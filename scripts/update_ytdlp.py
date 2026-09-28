@@ -10,8 +10,27 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = re.compile(r"^yt-dlp\[default\]==[^\s]+$", re.MULTILINE)
+PIN = re.compile(r"^yt-dlp\[default\]==(?P<version>[^\s]+)$", re.MULTILINE)
 VERSION = re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+\.dev0)?$")
+DOCUMENTED_PIN_OCCURRENCES = {
+    "AGENTS.md": 1,
+    "README.ru.md": 1,
+    "docs/PRD.md": 1,
+    "docs/technical/youtube-download-runbook.md": 2,
+}
+
+
+def update_documented_pin(
+    path: Path, old_version: str, new_version: str, expected_count: int
+) -> None:
+    """Обновляет точную версию в документе, не завися от языка его текста."""
+    content = path.read_text(encoding="utf-8")
+    count = content.count(old_version)
+    if count != expected_count:
+        raise RuntimeError(
+            f"ожидалось {expected_count} упоминаний {old_version} в {path.name}, найдено {count}"
+        )
+    path.write_text(content.replace(old_version, new_version), encoding="utf-8")
 
 
 def main() -> None:
@@ -24,6 +43,10 @@ def main() -> None:
 
     source = ROOT / "requirements.in"
     original = source.read_text(encoding="utf-8")
+    matches = list(PIN.finditer(original))
+    if len(matches) != 1:
+        raise RuntimeError("в requirements.in ожидается ровно один pin yt-dlp[default]")
+    old_version = matches[0].group("version")
     replacement, count = PIN.subn(f"yt-dlp[default]=={args.version}", original)
     if count != 1:
         raise RuntimeError("в requirements.in ожидается ровно один pin yt-dlp[default]")
@@ -32,9 +55,7 @@ def main() -> None:
         source,
         ROOT / "requirements.txt",
         ROOT / "requirements-dev.txt",
-        ROOT / "AGENTS.md",
-        ROOT / "docs/PRD.md",
-        ROOT / "docs/technical/youtube-download-runbook.md",
+        *(ROOT / relative for relative in DOCUMENTED_PIN_OCCURRENCES),
     ]
     backup = {path: path.read_bytes() for path in files}
     try:
@@ -55,16 +76,10 @@ def main() -> None:
             lock = output.read_text(encoding="utf-8")
             if f"yt-dlp=={args.version}" not in lock:
                 raise RuntimeError(f"{output.name} не закрепил версию {args.version}")
-        for path, pattern in (
-            (ROOT / "AGENTS.md", r"(\*\*Скачивание\*\*: \[yt-dlp\]\([^)]*\) )\S+"),
-            (ROOT / "docs/PRD.md", r"(`yt-dlp\[default\]` )\S+"),
-            (ROOT / "docs/technical/youtube-download-runbook.md", r"(Текущая закрепленная версия - `)\S+(?=`)"),
-        ):
-            content = path.read_text(encoding="utf-8")
-            updated, count = re.subn(pattern, lambda match: match.group(1) + args.version, content, count=1)
-            if count != 1:
-                raise RuntimeError(f"не найдено место версии в {path.name}")
-            path.write_text(updated, encoding="utf-8")
+        for relative, expected_count in DOCUMENTED_PIN_OCCURRENCES.items():
+            update_documented_pin(
+                ROOT / relative, old_version, args.version, expected_count
+            )
         if not args.skip_checks:
             subprocess.run(
                 ["uv", "pip", "sync", "--python", sys.executable, "requirements-dev.txt"],

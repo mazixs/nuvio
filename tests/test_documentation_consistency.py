@@ -6,6 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from scripts.update_ytdlp import (
+    DOCUMENTED_PIN_OCCURRENCES,
+    update_documented_pin,
+)
 from utils import cache_commands
 
 
@@ -108,8 +112,29 @@ def test_youtube_runbook_names_the_pinned_ytdlp_version():
         f"docs/technical/youtube-download-runbook.md не знает про yt-dlp {pinned_version}"
     )
     assert "scripts/update_ytdlp.py" in runbook
-    for duplicate in ("AGENTS.md", "docs/PRD.md"):
+    for duplicate in ("AGENTS.md", "README.ru.md", "docs/PRD.md"):
         assert pinned_version in (ROOT / duplicate).read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_ytdlp_updater_handles_current_documentation(tmp_path):
+    """Обновление pin должно работать и после перевода документации."""
+    requirements = (ROOT / "requirements.in").read_text(encoding="utf-8")
+    pinned_version = re.search(
+        r"^yt-dlp\[default\]==(\S+)$", requirements, re.MULTILINE
+    ).group(1)
+    next_version = "2099.1.2.123456.dev0"
+
+    for relative, expected_count in DOCUMENTED_PIN_OCCURRENCES.items():
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+
+        update_documented_pin(target, pinned_version, next_version, expected_count)
+
+        updated = target.read_text(encoding="utf-8")
+        assert updated.count(next_version) == expected_count, relative
+        assert pinned_version not in updated, relative
 
 
 @pytest.mark.unit
