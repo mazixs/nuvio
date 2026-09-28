@@ -125,11 +125,11 @@ An IP-specific cause is supported only if the same video and client fail from on
 
 ## 4. Update yt-dlp
 
-The example pinned version in this document is `2026.9.16.232951.dev0`. The bot no longer upgrades a running container with pip: files changed after import, so the reported version could differ from the executing code.
+The example pinned version in this document is `2026.9.27.232945.dev0`. The bot no longer upgrades a running container with pip: files changed after import, so the reported version could differ from the executing code.
 
 1. Choose an exact version published on PyPI and run the updater, substituting that version:
    ```bash
-   .venv/bin/python scripts/update_ytdlp.py 2026.9.16.232951.dev0
+   .venv/bin/python scripts/update_ytdlp.py 2026.9.27.232945.dev0
    ```
    It changes the pin and both hashed lock files, runs lint and tests, and shows the diff. On error, it restores all three files.
 2. Review the PR and CI, including the built-image smoke check. For a PR created with `GITHUB_TOKEN`, branch checks are triggered through `workflow_dispatch`; `pull_request` checks can await GitHub approval. Merge into `main`, create a `v*` tag, and wait for the canonical digest to be published in GHCR.
