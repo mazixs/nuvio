@@ -41,20 +41,27 @@ jobs:
             exit 0
           fi
           branch="mzx/update-ytdlp-${VERSION}"
-          if [[ $(gh pr list --head "$branch" --state open --json number --jq 'length') -gt 0 ]]; then
+          existing_branch=$(
+            gh pr list --state open --limit 100 --json headRefName \
+              --jq "[.[] | select(.headRefName == \"$branch\" or (.headRefName | startswith(\"${branch}-retry-\"))) | .headRefName][0] // empty"
+          )
+          if [[ -n "$existing_branch" ]]; then
             echo "PR для версии уже открыт, повторно запускаю проверки ветки"
-            gh workflow run ci.yml --ref "$branch"
-            gh workflow run youtube-smoke.yml --ref "$branch"
+            gh workflow run ci.yml --ref "$existing_branch"
+            gh workflow run youtube-smoke.yml --ref "$existing_branch"
             exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            branch="${branch}-retry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add requirements.in requirements.txt requirements-dev.txt AGENTS.md docs/PRD.md docs/technical/youtube-download-runbook.md
-          git commit -m "Обновить yt-dlp до ${VERSION}"
+          git add requirements.in requirements.txt requirements-dev.txt AGENTS.md README.ru.md docs/PRD.md docs/technical/youtube-download-runbook.md
+          git commit -m "chore: update yt-dlp to ${VERSION}"
           git push --set-upstream origin "$branch"
           gh pr create --base main --head "$branch" \
-            --title "Обновить yt-dlp до ${VERSION}" \
-            --body "Точная nightly-версия и lock-файлы с хешами. CI и сетевой YouTube smoke запускаются отдельно через workflow_dispatch: GitHub требует ручного одобрения проверок, созданных событием pull_request от GITHUB_TOKEN."
+            --title "Update yt-dlp to ${VERSION}" \
+            --body "Exact nightly pin and hashed lock files. CI and the network YouTube smoke run through workflow_dispatch because pull_request checks created with GITHUB_TOKEN require approval."
           gh workflow run ci.yml --ref "$branch"
           gh workflow run youtube-smoke.yml --ref "$branch"
