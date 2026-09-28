@@ -50,7 +50,7 @@ def test_video_is_handed_over_as_a_link():
 
     delivered = _deliver(_query(reply_video=reply_video), plan)
 
-    assert delivered is True
+    assert delivered.state == "delivered"
     assert reply_video.await_args.kwargs["video"] == MEDIA_URL
     assert reply_video.await_args.kwargs["supports_streaming"] is True
 
@@ -61,7 +61,7 @@ def test_audio_is_handed_over_as_a_link():
 
     delivered = _deliver(_query(reply_audio=reply_audio), plan)
 
-    assert delivered is True
+    assert delivered.state == "delivered"
     assert reply_audio.await_args.kwargs["audio"] == MEDIA_URL
 
 
@@ -71,7 +71,7 @@ def test_photo_is_handed_over_as_a_link():
 
     delivered = _deliver(_query(reply_photo=reply_photo), plan)
 
-    assert delivered is True
+    assert delivered.state == "delivered"
     assert reply_photo.await_args.kwargs["photo"] == MEDIA_URL
 
 
@@ -84,17 +84,24 @@ def test_refusal_reports_not_delivered_so_caller_falls_back():
 
     delivered = _deliver(_query(reply_video=reply_video), plan)
 
-    assert delivered is False
+    assert delivered.state == "refused"
 
 
-def test_timeout_reports_not_delivered():
-    """Ссылку, которую Telegram не смог забрать за отведённое время, тоже роняем в откат."""
+def test_timeout_has_unknown_delivery_outcome_and_does_not_fall_back():
+    """Таймаут после начала запроса не запускает рискованную повторную отправку."""
     reply_video = AsyncMock(side_effect=telegram.error.TimedOut())
     plan = UrlHandoff(url=MEDIA_URL, kind="video", size=2 * MB)
+    session_data = {}
 
-    delivered = _deliver(_query(reply_video=reply_video), plan)
+    outcome = _deliver(
+        _query(reply_video=reply_video), plan, session_data=session_data
+    )
 
-    assert delivered is False
+    assert outcome.state == "unknown"
+    assert outcome.confirmed_items == 0
+    assert outcome.error.__class__ is telegram.error.TimedOut
+    assert session_data["_delivery_outcome_unknown"] is True
+    assert reply_video.await_count == 1
 
 
 def test_file_id_from_a_link_is_cached(monkeypatch):
@@ -162,21 +169,36 @@ def test_refused_cdn_is_not_asked_again():
     plan = UrlHandoff(url=MEDIA_URL, kind="video", size=2 * MB)
     query = _query(reply_video=reply_video)
 
-    assert _deliver(query, plan) is False
-    assert _deliver(query, plan) is False
+    assert _deliver(query, plan).state == "refused"
+    assert _deliver(query, plan).state == "refused"
 
     assert reply_video.await_count == 1, "вторая попытка не должна была уйти"
 
 
 def test_refusal_for_video_does_not_block_pictures():
     """Измерено: картинки TikTok уходили, когда видео того же CDN отказывало."""
-    reply_video = AsyncMock(side_effect=telegram.error.BadRequest("отказ"))
+    reply_video = AsyncMock(
+        side_effect=telegram.error.BadRequest("failed to get HTTP URL content")
+    )
     reply_photo = AsyncMock(return_value=_sent("photo"))
 
-    _deliver(_query(reply_video=reply_video), UrlHandoff(MEDIA_URL, "video", 2 * MB))
+    assert _deliver(
+        _query(reply_video=reply_video), UrlHandoff(MEDIA_URL, "video", 2 * MB)
+    ).state == "refused"
     delivered = _deliver(
         _query(reply_photo=reply_photo),
         UrlHandoff("https://p16-sign.tiktokcdn-us.com/obj/image.jpeg", "photo", MB),
     )
 
-    assert delivered is True
+    assert delivered.state == "delivered"
+
+
+def test_unclassified_bad_request_is_not_treated_as_url_refusal():
+    """Неизвестный отказ может относиться к подписи или параметрам запроса."""
+    reply_video = AsyncMock(side_effect=telegram.error.BadRequest("отказ"))
+    plan = UrlHandoff(url=MEDIA_URL, kind="video", size=2 * MB)
+
+    with pytest.raises(telegram.error.BadRequest, match="отказ"):
+        _deliver(_query(reply_video=reply_video), plan)
+
+    assert reply_video.await_count == 1

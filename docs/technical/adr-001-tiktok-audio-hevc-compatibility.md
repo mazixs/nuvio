@@ -1,77 +1,64 @@
-# ADR-001: Исправление звука в TikTok и совместимость HEVC-видео на iOS
+# ADR-001: TikTok audio and HEVC compatibility on iOS
 
-## Статус
-Принято
+## Status
 
-## Контекст
-В боте Nuvio были обнаружены две взаимосвязанные проблемы с воспроизведением видео:
-1. **Отсутствие звука в TikTok видео:** При скачивании некоторых TikTok-видео (например, в высоком разрешении HEVC/1080p) видеофайлы отправлялись пользователям без звуковой дорожки.
-2. **Искажение пропорций на iPhone (Telegram iOS):** При воспроизведении этих же видеороликов на iPhone через встроенный плеер Telegram они отображались сжатыми по горизонтали и растянутыми по вертикали. На Android устройствах пропорции отображались корректно.
+Accepted. A later amendment changes the default path; see below.
 
-### Причины проблем:
-1. **Баг метаданных TikTok в yt-dlp:** TikTok отдает потоки HEVC (`bytevc1`) без аудиопотока (они фрагментированы/DASH). Однако yt-dlp ошибочно считает, что они содержат аудио (`acodec: aac`). В результате, при использовании опции `-f bestvideo+bestaudio/best`, yt-dlp скачивает только HEVC видео-онли файл, считая его самодостаточным (muxed).
-2. **Баг рендеринга HEVC/MP4 в Telegram iOS:** Встроенный плеер Telegram на iOS (AVPlayer/QuickTime) имеет давний баг с обработкой метаданных пропорций и ротации для видео, закодированных в H.265 (HEVC) внутри контейнера MP4. Это приводит к искажению соотношения сторон при воспроизведении.
+## Context
 
-## Решение
-Для решения этих проблем были внедрены следующие изменения:
+Nuvio had two related playback problems:
 
-1. **Фабрика `create_tiktok_ytdl` с динамическим подклассированием `yt-dlp.YoutubeDL`:**
-   - Добавлена функция-генератор, которая на лету создает подкласс `yt_dlp.YoutubeDL` и перехватывает методы обработки метаданных (`process_video_result` и `process_info`).
-   - Для экстрактора TikTok в метаданных форматов сбрасывается `acodec` в `'none'` для всех HEVC/bytevc1 потоков и потоков с `/media-video` в URL.
-   - Автоматически находится один из H.264-форматов, гарантированно содержащий аудио, и на его основе создается виртуальный аудио-формат (`virtual_audio_from_muxed`).
-   - Это вынуждает `yt-dlp` скачать видео максимального качества (например, 1080p) и аудиодорожку отдельно, а затем склеить их с помощью FFmpeg.
-   - Динамическое подклассирование выбрано для сохранения полной совместимости с механизмами мокирования `yt-dlp` в интеграционных тестах.
+1. **Silent TikTok videos:** Some downloaded videos, particularly high-resolution HEVC/1080p files, were sent without an audio track.
+2. **Incorrect aspect ratio on Telegram for iOS:** The same videos appeared compressed horizontally and stretched vertically in Telegram's built-in iPhone player. Android displayed them correctly.
 
-2. **Определение видеокодека и автоконвертация HEVC -> H.264:**
-   - В `utils/media_processor.py` добавлена функция `get_video_codec(file_path: Path) -> str | None`, использующая `ffprobe` для получения названия кодека первого видеопотока.
-   - В функциях `download_tiktok_video` и `download_instagram_video` после скачивания проверяется кодек полученного файла. Если видео закодировано в `hevc` или `h265`, оно автоматически перекодируется в H.264 с помощью функции `convert_to_format`.
-   - Это гарантирует, что на выходе получается стандартный, высокосовместимый H.264/AVC файл в контейнере MP4, который воспроизводится со звуком и без растягиваний на iPhone.
+### Causes
 
-## Альтернативы
-1. **Снижение качества видео до 540p (H.264):** Исключить HEVC форматы из скачивания. Это лишило бы пользователей возможности получать видео в качестве 1080p.
-2. **Принудительное перекодирование всех скачиваемых видео:** Замедлило бы обработку всех видеороликов, даже тех, которые изначально скачиваются в H.264 и не имеют проблем с совместимостью.
+1. **Incorrect TikTok format metadata in yt-dlp:** TikTok HEVC (`bytevc1`) streams are video-only fragmented/DASH streams, but yt-dlp reported them with `acodec: aac`. With `-f bestvideo+bestaudio/best`, yt-dlp therefore treated the HEVC video as a complete muxed file and did not fetch separate audio.
+2. **HEVC/MP4 playback behavior on Telegram for iOS:** The built-in iOS player mishandled aspect-ratio and rotation metadata for some H.265/HEVC video in MP4, distorting playback.
 
-## Дополнение от 2026-07-25: решение частично заменено быстрым путём
+## Decision
 
-Раздел добавлен, история решения выше не переписана.
+Two changes addressed the issues:
 
-Отклонённая альтернатива №1 («снижение качества видео до 540p H.264»,
-то есть отказ от HEVC-форматов) стала **поведением по умолчанию**. Флаг
-`TIKTOK_FAST_PATH` включён по умолчанию и отдаёт прямую ссылку `play`
-стороннего резолвера: устойчиво **576×1024, H.264 High + AAC**, независимо от
-длительности ролика. Замеры и обоснование — в
-`docs/technical/latency-disk-network-research.md` (§4, §5.3).
+1. **`create_tiktok_ytdl` factory with a dynamic `yt_dlp.YoutubeDL` subclass:**
+   - A factory creates a subclass at runtime and intercepts `process_video_result` and `process_info`.
+   - For TikTok, format metadata sets `acodec` to `'none'` for HEVC/bytevc1 streams and `/media-video` URLs.
+   - The code finds an H.264 format known to contain audio and derives a virtual audio format, `virtual_audio_from_muxed`.
+   - yt-dlp then downloads the highest-quality video and audio separately and merges them with FFmpeg.
+   - Dynamic subclassing preserves compatibility with yt-dlp mocks in integration tests.
+2. **Codec detection and HEVC-to-H.264 conversion:**
+   - `utils/media_processor.py` adds `get_video_codec(file_path: Path) -> str | None`, using ffprobe to read the first video stream's codec.
+   - After `download_tiktok_video` and `download_instagram_video`, a file encoded as `hevc` or `h265` is converted to H.264 with `convert_to_format`.
+   - The result is a broadly compatible H.264/AVC MP4 with sound and correct iPhone playback.
 
-Причина замены — скорость, а не качество:
+## Alternatives considered
 
-- HEVC-путь платит перекодированием: **9.5 с на 60-секундном ролике**;
-- быстрый путь укладывается в **~2 с** и не перекодирует видео; FFmpeg при
-  этом всё равно вызывается — одним `ffprobe` для проверки кодека, см. ниже;
-- 1080p через этот резолвер недоступен: `hdplay` и `hd_size` на бесплатном
-  тарифе приходят пустыми.
+1. **Limit downloads to 540p H.264:** Excluding HEVC would prevent 1080p delivery.
+2. **Transcode every downloaded video:** This would slow down H.264 videos that had no compatibility problem.
 
-Что осталось в силе:
+## Amendment, 2026-07-25: the fast path partly replaces the decision
 
-- **Требование HEVC → H.264 не отменено.** Путь через yt-dlp продолжает
-  проверять кодек и перекодировать HEVC. Быстрый путь тоже проверяет кодек
-  полученного файла (`_ensure_ios_compatible_video`): состав `play` — не наш
-  контракт, и смена бэкенда резолвера на HEVC не должна вернуть дефект.
-- **yt-dlp остаётся откатом** при недоступности резолвера, и вместе с ним —
-  доступ к 1080p при `TIKTOK_FAST_PATH=false`.
+This section was added without rewriting the earlier decision history.
 
-Цена решения, которую нужно учитывать:
+The previously rejected quality tradeoff became the **default behavior**. `TIKTOK_FAST_PATH` is enabled by default and uses a third-party resolver's direct `play` URL, reliably delivering **576×1024 H.264 High + AAC** regardless of video duration. Measurements and rationale are in [latency, disk, and network research](latency-disk-network-research.md), sections 4 and 5.3.
 
-- пользователи получают 576×1024 вместо 1080p;
-- смена флага не влияет на уже закэшированные ссылки: кэш `file_id` читается
-  до скачивания и живёт 90 дней (см. `.env.example`).
+The change favors speed:
 
-## Последствия
-- **Плюсы:**
-  - TikTok видео в высоком качестве (1080p) теперь всегда скачиваются со звуком.
-  - Все видеоролики TikTok и Instagram корректно отображаются на iOS (без искажений пропорций).
-  - Полная обратная совместимость с существующей тестовой базой благодаря динамическому наследованию.
-- **Минусы:**
-  - Скачивание HEVC-видео требует дополнительного времени на
-    перекодирование. Затраты зависят от длительности, разрешения и мощности
-    сервера; локальный Bot API меняет предел доставки, но не стоимость
-    перекодирования.
+- The HEVC path spent **9.5 seconds transcoding a 60-second clip**.
+- The fast path took **about 2 seconds** without video transcoding. It still uses one FFmpeg `ffprobe` call to check the codec.
+- The resolver's free tier did not provide 1080p: `hdplay` and `hd_size` were empty.
+
+Requirements retained from the original decision:
+
+- **HEVC must still be converted to H.264.** The yt-dlp path checks and converts HEVC. The fast path also checks the resulting file through `_ensure_ios_compatible_video`, because the contents of `play` are not under Nuvio's control and a resolver backend change must not reintroduce the defect.
+- **yt-dlp remains the fallback** when the resolver is unavailable. Setting `TIKTOK_FAST_PATH=false` also restores the yt-dlp path and access to 1080p.
+
+Tradeoffs to account for:
+
+- The default delivers 576×1024 instead of 1080p.
+- Changing the flag does not alter previously cached URLs. The `file_id` cache is checked before downloading and has a 90-day TTL; see `.env.example`.
+
+## Consequences of the original decision
+
+- **Benefits:** TikTok 1080p files can be downloaded with audio through the yt-dlp path; TikTok and Instagram output is compatible with iOS; dynamic inheritance preserves existing test mocks.
+- **Cost:** HEVC transcoding takes additional time according to duration, resolution, and server capacity. The local Bot API raises the delivery limit but does not reduce transcoding cost.

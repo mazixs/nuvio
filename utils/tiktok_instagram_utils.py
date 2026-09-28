@@ -482,6 +482,11 @@ def _parse_tiktok_photo_page_data(html: str) -> dict[str, Any] | None:
     return {
         "id": item.get("id"),
         "title": str(item.get("desc") or image_post.get("title") or "").strip(),
+        "description": str(item.get("desc") or ""),
+        "_nuvio_description_status": (
+            "available" if str(item.get("desc") or "").strip() else "empty"
+        ),
+        "_nuvio_description_source": "tiktok_item_struct",
         "cover": cover,
         "origin_cover": cover,
         "music": music_url,
@@ -709,6 +714,8 @@ def _fetch_tiktok_photo_post_data(
                     raise Exception(
                         "Сервис не вернул изображения для TikTok фото-поста."
                     )
+                data["_nuvio_description_source"] = "tikwm_title"
+                data["description"] = str(data.get("title") or "").strip()
                 return data
 
             try:
@@ -1130,9 +1137,24 @@ def _build_tiktok_photo_info(url: str, data: dict[str, Any]) -> dict[str, Any]:
     title = (
         data.get("title") or ""
     ).strip() or f"TikTok фото-пост {data.get('id', '')}".strip()
+    description_candidate = str(data.get("description") or "")
+    tikwm_candidate = data.get("_nuvio_description_source") == "tikwm_title"
+    description = "" if tikwm_candidate else description_candidate
     return {
         "id": data.get("id"),
         "title": title,
+        "description": description or None,
+        "_nuvio_description_status": (
+            "unavailable"
+            if tikwm_candidate
+            else "available"
+            if description.strip()
+            else "empty"
+        ),
+        "_nuvio_description_candidate": description_candidate if tikwm_candidate else None,
+        "_nuvio_description_source": data.get(
+            "_nuvio_description_source", "tiktok_item_struct"
+        ),
         "uploader": author.get("unique_id") or author.get("nickname") or "TikTok",
         "duration": int(duration or 0),
         "thumbnail": data.get("cover") or data.get("origin_cover"),
@@ -1255,6 +1277,7 @@ def _fetch_instagram_photo_page_media(
         "display_url": image_url,
         "owner": {"username": username} if username else {},
         "caption": description,
+        "_nuvio_description_source": "instagram_html_meta",
     }
     if title:
         media["title"] = title
@@ -1280,16 +1303,16 @@ def _extract_instagram_description(media: dict[str, Any]) -> str | None:
     if isinstance(caption, dict):
         text = caption.get("text")
         if isinstance(text, str) and text.strip():
-            return text.strip()
+            return text
     elif isinstance(caption, str) and caption.strip():
-        return caption.strip()
+        return caption
 
     edges = (media.get("edge_media_to_caption") or {}).get("edges") or []
     for edge in edges:
         node = edge.get("node") or {}
         text = node.get("text")
         if isinstance(text, str) and text.strip():
-            return text.strip()
+            return text
     return None
 
 
@@ -1358,6 +1381,76 @@ def _iter_instagram_photo_nodes(media: dict[str, Any]) -> list[dict[str, Any]]:
         ]
 
     return [media]
+
+
+def _iter_instagram_carousel_nodes(media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Возвращает все элементы карусели Instagram в исходном порядке."""
+    carousel_media = media.get("carousel_media")
+    if isinstance(carousel_media, list) and carousel_media:
+        return [node for node in carousel_media if isinstance(node, dict)]
+    edges = (media.get("edge_sidecar_to_children") or {}).get("edges") or []
+    if edges:
+        return [
+            node
+            for edge in edges
+            if isinstance(edge, dict)
+            for node in [edge.get("node")]
+            if isinstance(node, dict)
+        ]
+    return [media]
+
+
+def _instagram_video_url(media: dict[str, Any]) -> str | None:
+    """Выбирает прямую ссылку на видео-элемент sidecar, без превью-кадра."""
+    direct = media.get("video_url")
+    if isinstance(direct, str) and direct.startswith("https://"):
+        return direct
+    versions = [
+        item
+        for item in (media.get("video_versions") or [])
+        if isinstance(item, dict) and isinstance(item.get("url"), str)
+    ]
+    if versions:
+        best = max(
+            versions,
+            key=lambda item: (
+                item.get("width") or 0,
+                item.get("height") or 0,
+                item.get("bandwidth") or 0,
+            ),
+        )
+        return best.get("url")
+    return None
+
+
+def _instagram_carousel_items(media: dict[str, Any]) -> list[dict[str, Any]]:
+    """Нормализует упорядоченные URL всех фото- и видео-элементов sidecar."""
+    items = []
+    for node in _iter_instagram_carousel_nodes(media):
+        is_video = bool(
+            node.get("is_video")
+            or node.get("video_versions")
+            or node.get("video_url")
+            or node.get("video_dash_manifest")
+        )
+        if is_video:
+            items.append(
+                {
+                    "kind": "video",
+                    "url": _instagram_video_url(node),
+                    "width": node.get("original_width") or node.get("width"),
+                    "height": node.get("original_height") or node.get("height"),
+                    "duration": node.get("video_duration"),
+                }
+            )
+            continue
+        items.append(
+            {
+                "kind": "photo",
+                "url": _choose_best_instagram_image_url(node),
+            }
+        )
+    return items
 
 
 def _extract_instagram_photo_images(media: dict[str, Any]) -> list[str]:
@@ -1548,8 +1641,26 @@ def _build_instagram_photo_info(url: str, media: dict[str, Any]) -> dict[str, An
         media.get("shortcode") or media.get("code") or ""
     )
     owner = media.get("owner") or media.get("user") or {}
-    description = _extract_instagram_description(media)
+    description_source = media.get("_nuvio_description_source") or "instagram_graphql"
+    description = (
+        None
+        if description_source == "instagram_html_meta"
+        else _extract_instagram_description(media)
+    )
     images = _extract_instagram_photo_images(media)
+    carousel_items = _instagram_carousel_items(media)
+    has_photo = any(item.get("kind") == "photo" for item in carousel_items)
+    has_video = any(item.get("kind") == "video" for item in carousel_items)
+    is_mixed = has_photo and has_video
+    source_nodes = media.get("carousel_media") or (
+        media.get("edge_sidecar_to_children") or {}
+    ).get("edges")
+    complete = (
+        description_source != "instagram_html_meta"
+        and bool(carousel_items)
+        and all(item.get("url") for item in carousel_items)
+        and (not source_nodes or len(source_nodes) == len(carousel_items))
+    )
     if not images:
         raise Exception("Не удалось получить изображения для Instagram фото-поста.")
 
@@ -1572,8 +1683,20 @@ def _build_instagram_photo_info(url: str, media: dict[str, Any]) -> dict[str, An
         "thumbnail": images[0],
         "webpage_url": url,
         "description": description,
+        "_nuvio_description_status": (
+            "available"
+            if description
+            else "unavailable"
+            if description_source == "instagram_html_meta"
+            else "empty"
+        ),
+        "_nuvio_description_source": description_source,
         "extractor": "nuvio_instagram_photo",
         "_nuvio_instagram_photo_post": True,
+        "_nuvio_instagram_mixed_post": is_mixed,
+        "_nuvio_instagram_carousel_items": carousel_items,
+        "_nuvio_instagram_carousel_incomplete": not complete,
+        "_nuvio_instagram_carousel_complete": complete,
         "_nuvio_instagram_photo_data": media,
         "_nuvio_instagram_images": images,
         "_nuvio_instagram_audio_url": _extract_instagram_audio_url(media),
@@ -1590,21 +1713,58 @@ def _try_get_instagram_photo_info(url: str) -> dict[str, Any] | None:
         )
         return None
 
-    if (
-        media.get("video_url")
-        or media.get("video_versions")
-        or media.get("video_dash_manifest")
-    ):
-        return None
-    if (
-        media.get("is_video") is True
-        and not media.get("edge_sidecar_to_children")
-        and not media.get("carousel_media")
-    ):
-        return None
     if not _extract_instagram_photo_images(media):
         return None
-    return _build_instagram_photo_info(url, media)
+    info = _build_instagram_photo_info(url, media)
+    if info.get("_nuvio_instagram_mixed_post"):
+        return info
+    if media.get("is_video") is True or media.get("video_url"):
+        return None
+    return info
+
+
+def _enrich_instagram_carousel_info(url: str, info: dict[str, Any]) -> dict[str, Any]:
+    """Предпочитает полный sidecar, если yt-dlp распознал несколько записей."""
+    entries = [entry for entry in (info.get("entries") or []) if entry is not None]
+    if len(entries) < 2:
+        return info
+    try:
+        carousel_info = _try_get_instagram_photo_info(url)
+    except Exception as error:  # noqa: BLE001
+        logger.debug("Не удалось уточнить состав Instagram-карусели: %s", error)
+        return {**info, "_nuvio_instagram_carousel_incomplete": True}
+    if not carousel_info:
+        return {**info, "_nuvio_instagram_carousel_incomplete": True}
+    items = carousel_info.get("_nuvio_instagram_carousel_items") or []
+    if len(items) != len(entries):
+        logger.warning(
+            "Instagram sidecar не совпал с yt-dlp: %s элементов вместо %s",
+            len(items),
+            len(entries),
+        )
+        return {
+            **carousel_info,
+            "_nuvio_instagram_carousel_complete": False,
+            "_nuvio_instagram_carousel_incomplete": True,
+            "_nuvio_instagram_expected_items": len(entries),
+        }
+    entry_kinds = [
+        "video" if entry.get("formats") else "photo" for entry in entries
+    ]
+    sidecar_kinds = [item.get("kind") for item in items]
+    if sidecar_kinds != entry_kinds:
+        logger.warning(
+            "Instagram sidecar и yt-dlp расходятся по типу элемента: %s против %s",
+            sidecar_kinds,
+            entry_kinds,
+        )
+        return {
+            **carousel_info,
+            "_nuvio_instagram_carousel_complete": False,
+            "_nuvio_instagram_carousel_incomplete": True,
+            "_nuvio_instagram_expected_kinds": entry_kinds,
+        }
+    return carousel_info
 
 
 def _collect_instagram_photo_assets(
@@ -1645,6 +1805,68 @@ def _collect_instagram_photo_assets(
     return info, image_paths, audio_path
 
 
+def _collect_instagram_mixed_carousel_assets(
+    url: str,
+    session_id: str,
+    cached_info: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], Path | None]:
+    """Скачивает полный sidecar, сохраняя порядок фото и видео."""
+    info = cached_info
+    items = list(info.get("_nuvio_instagram_carousel_items") or [])
+    if (
+        not info.get("_nuvio_instagram_carousel_complete")
+        or not items
+        or any(not item.get("url") for item in items)
+    ):
+        raise ValueError("Не удалось подтвердить полный состав карусели Instagram.")
+
+    title_seed = _normalize_filename_component(
+        str(info.get("title") or "instagram_carousel"), "instagram_carousel"
+    )
+    downloaded: list[dict[str, Any]] = []
+    image_paths: list[Path] = []
+    for index, item in enumerate(items, start=1):
+        kind = item["kind"]
+        if kind not in {"photo", "video"}:
+            raise ValueError("Instagram вернул неизвестный тип элемента карусели.")
+        extension = _guess_extension(
+            str(item["url"]), ".mp4" if kind == "video" else ".jpg"
+        )
+        media_path = get_temp_file_path(
+            session_id, f"{title_seed}_{index:02d}{extension}"
+        )
+        media_path = _download_remote_file(
+            str(item["url"]),
+            media_path,
+            referer="https://www.instagram.com/",
+            expected_content_type="video/" if kind == "video" else "image/",
+        )
+        if kind == "video":
+            media_path = _ensure_ios_compatible_video(
+                media_path, session_id, "Instagram carousel"
+            )
+        else:
+            image_paths.append(media_path)
+        downloaded.append({"kind": kind, "path": media_path})
+
+    audio_url = info.get("_nuvio_instagram_audio_url")
+    audio_path = None
+    if audio_url:
+        audio_path = get_temp_file_path(
+            session_id,
+            f"{title_seed}_audio{_guess_extension(str(audio_url), '.m4a')}",
+        )
+        audio_path = _download_remote_file(
+            str(audio_url), audio_path, referer="https://www.instagram.com/"
+        )
+    info["_nuvio_instagram_images"] = [
+        item.get("url")
+        for item in items
+        if item.get("kind") == "photo" and item.get("url")
+    ]
+    return info, downloaded, audio_path
+
+
 def download_tiktok_photo_post_assets(
     url: str,
     session_id: str,
@@ -1657,6 +1879,7 @@ def download_tiktok_photo_post_assets(
     return {
         "info": info,
         "images": image_paths,
+        "items": [{"kind": "photo", "path": path} for path in image_paths],
         "audio": audio_path,
     }
 
@@ -1690,12 +1913,27 @@ def download_instagram_photo_post_assets(
     cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Скачивает изображения и звук Instagram фото-поста для поэтапной отправки."""
+    if not _is_instagram_photo_post_info(cached_info):
+        cached_info = _build_instagram_photo_info(url, _fetch_instagram_photo_post_media(url))
+    if cached_info.get("_nuvio_instagram_carousel_incomplete"):
+        raise ValueError("Не удалось подтвердить полный состав карусели Instagram.")
+    if cached_info.get("_nuvio_instagram_mixed_post"):
+        info, items, audio_path = _collect_instagram_mixed_carousel_assets(
+            url, session_id, cached_info
+        )
+        return {
+            "info": info,
+            "items": items,
+            "images": [item["path"] for item in items if item["kind"] == "photo"],
+            "audio": audio_path,
+        }
     info, image_paths, audio_path = _collect_instagram_photo_assets(
         url, session_id, cached_info
     )
     return {
         "info": info,
         "images": image_paths,
+        "items": [{"kind": "photo", "path": path} for path in image_paths],
         "audio": audio_path,
     }
 
@@ -1881,6 +2119,7 @@ def get_instagram_info(url: str) -> dict[str, Any]:
     try:
         logger.info("Пробуем получить информацию об Instagram видео без cookies.")
         info = _get_info(False)
+        info = _enrich_instagram_carousel_info(url, info)
         if _is_instagram_photo_post_info(info):
             return info
         if _is_instagram_empty_playlist_result(info):
@@ -1917,6 +2156,7 @@ def get_instagram_info(url: str) -> dict[str, Any]:
                 try:
                     logger.info("Пробуем с cookies файлом...")
                     info = _get_info(True)
+                    info = _enrich_instagram_carousel_info(url, info)
                     if _is_instagram_photo_post_info(info):
                         return info
                     if _is_instagram_empty_playlist_result(info):
@@ -1971,6 +2211,7 @@ def get_instagram_info(url: str) -> dict[str, Any]:
                 try:
                     logger.info("Пробуем с cookies файлом для других ошибок...")
                     info = _get_info(True)
+                    info = _enrich_instagram_carousel_info(url, info)
                     if _is_instagram_photo_post_info(info):
                         return info
                     if _is_instagram_empty_playlist_result(info):

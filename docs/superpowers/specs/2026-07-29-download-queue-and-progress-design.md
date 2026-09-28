@@ -1,22 +1,15 @@
-# Очередь загрузок на пользователя и честный прогресс
+# User Load Queue and Fair Progress
 
-Дата: 2026-07-29. Статус: спецификация, к реализации не начата.
-
-Документ описывает три связанные вещи: приём новых ссылок во время работы,
-очередь из не более двух задач на пользователя и внятную индикацию долгой
-работы. Первое без изменения способа обработки апдейтов невозможно в принципе —
-это и есть корень, с которого всё начинается.
+Date: 2026-07-29. Status: specification, implementation not started.
+This document describes three interrelated issues: accepting new links during processing, limiting the queue to no more than two tasks per user, and providing clear indication of long-running operations. The first issue cannot be changed without altering the update processing mechanism - this is the root cause from which everything begins.
 
 ---
 
-## 1. Почему сейчас нельзя ни отменить, ни прислать вторую ссылку
+## 1. Why we currently cannot cancel or resend a link
 
-### Измеренная причина
+### Measured Cause
 
-`main.py` не вызывает `.concurrent_updates(...)`, поэтому у PTB 22.8 действует
-значение по умолчанию `max_concurrent_updates = 1` (проверено на установленной
-версии). В этом режиме цикл выборки апдейтов в `Application.__update_fetcher`
-работает так:
+`main.py` does not call `.concurrent_updates(...)`, so PTB 22.8 uses the default value `max_concurrent_updates = 1` (verified on the installed version). In this mode, the update fetching loop in `Application.__update_fetcher` operates as follows:
 
 ```python
 if self._update_processor.max_concurrent_updates > 1:
@@ -25,32 +18,24 @@ else:
     await self.__process_update_wrapper(update)   # ждём завершения
 ```
 
-Пока `button_callback` → `download_content` висит на `await run_blocking(...)`,
-следующий апдейт из очереди не забирается. Воспроизведено на живом PTB
-подменой хэндлеров:
+While `button_callback` → `download_content` is blocked by `await run_blocking(...)`, the next update from the queue is not picked up. Observed on live PTB by replacing handlers:
 
 ```
-0.0с  обработчик длинной задачи начал
-0.3с  нажата кнопка «Отменить»
-1.5с  обработчик длинной задачи кончил
-1.5с  ОТМЕНА обработана        ← через 1.2с ожидания, уже впустую
+0.0 s  long-running handler starts
+0.3 s  user presses "Cancel"
+1.5 s  long-running handler finishes
+1.5 s  cancellation is processed, 1.2 s too late
 ```
 
-### Следствия, которые это объясняет
+### Consequences this explains
 
-- **Кнопка «Отменить» мертва** на всех долгих фазах. Механизм отмены при этом
-  исправен: реестр по `session_id`, `progress_hooks`, `CancelledByUser` —
-  всё работает, до него просто не доходит нажатие. Существующие тесты
-  (`test_cancel_flow.py`, `test_ytdlp_cancellation.py`) вызывают
-  `button_callback` напрямую, поэтому проверяют механизм, но не доставку.
-- **Вторая ссылка не читается** до конца первой задачи.
-- **`DOWNLOAD_WORKERS=8` фактически не используется.** Пул обслуживает одну
-  задачу за раз, потому что вторая не может начаться. Антиспам «4 запроса за
-  5 секунд» подразумевает параллельность, которой нет.
+- **The "Cancel" button is unresponsive** during all long phases. The cancellation mechanism itself is working correctly: the session_id, progress_hooks, and CancelledByUser records are all functioning properly. The issue is simply that the button press never reaches the mechanism. Existing tests (`test_cancel_flow.py`, `test_ytdlp_cancellation.py`) trigger the `button_callback` directly, so they verify the mechanism but not the delivery.
+- **The second link is not fully read** until the first task is completed.
+- **`DOWNLOAD_WORKERS=8` is effectively unused.** The worker pool serves only one task at a time, because the second task cannot start. The anti-spam rule ("4 requests every 5 seconds") assumes parallelism, which is absent.
 
-### Отдельная причина потери статуса
+### Separate reason for status loss
 
-`_pulsing_chat_action` выходит из цикла навсегда при первой же ошибке:
+`_pulsing_chat_action` permanently exits the loop upon the first error:
 
 ```python
 except telegram.error.TelegramError as error:
@@ -58,223 +43,134 @@ except telegram.error.TelegramError as error:
     return
 ```
 
-Один сетевой сбой за десять минут отправки — и отметка «отправляет видео»
-исчезает до конца работы. Исчерпание пула соединений тут не при чём:
-`connection_pool_size` по умолчанию 256, проверено.
+One network failure within ten minutes of sending - and the "sending video" status disappears until the end of the operation. Connection pool exhaustion is not the issue: `connection_pool_size` is set to 256 by default and has been verified.
 
 ---
 
-## 2. Требования
+## 2. Requirements
 
-1. Ссылка, присланная во время работы, принимается сразу; текущая задача не
-   прерывается.
-2. Формат спрашивается сразу при получении ссылки. Скачивание встаёт в очередь.
-3. Не более **двух** задач на пользователя: одна в работе плюс одна ждущая.
-   Третья получает не отказ, а предложение нажать тот же формат повторно.
-
-   Ссылка, на которой формат ещё не выбран, слот **не занимает**. Причина
-   измерена: у сессий нет TTL — `SessionStore` вытесняет их только когда
-   накопится больше пяти, по времени создания (`utils/callback_fsm.py:90`).
-   Считай мы брошенные меню, одно такое меню заблокировало бы половину
-   ёмкости на неопределённый срок.
-4. Состояние всех задач видно в **одном** сообщении-тасклисте.
-5. На долгой работе видно, что процесс жив, и сколько сделано.
-6. Отмена работает мгновенно — и для работающей задачи, и для ждущих.
+1. A link sent during operation is accepted immediately; the current task is not interrupted.
+2. The format is requested immediately upon receiving a link. Downloading is queued.
+3. No more than **two** tasks per user: one in progress plus one waiting. A third task receives no rejection, but instead a prompt to select the same format again. A link where the format has not yet been selected does **not** occupy a slot. The reason has been measured: sessions have no TTL - `SessionStore` only evicts them when five or more have accumulated by creation time (`utils/callback_fsm.py:90`). Think of it as abandoned menus; one such menu would block half the capacity indefinitely.
+4. The state of all tasks is visible in a **single** message summary.
+5. During long-running operations, it is visible that the process is alive and how many tasks have been completed.
+6. Cancellation works instantly - for both running and waiting tasks.
 
 ---
 
-## 3. Границы, внутри которых это выполнимо
+## 3. Boundaries within which this is feasible
 
-### Прогресс отправки недоступен
+### Progress during download is not available
 
-yt-dlp отдаёт прогресс скачивания через `progress_hooks` — те же хуки уже
-используются для отмены, отдельного механизма не нужно. На фазе отправки ни PTB,
-ни локальный Bot API не сообщают, сколько байт ушло. Поэтому на этой фазе
-показываются **размер и идущее время**, а не проценты. Прогресс-бар отправки был
-бы выдумкой.
+yt-dlp provides download progress via `progress_hooks` - the same hooks are already used for cancellation. Neither PTB nor the local Bot API report how many bytes have been sent during upload. Therefore, during the upload phase, only **size and elapsed time** are shown, not percentages. A progress bar for upload would be speculative.
 
-### Правки сообщений ограничены Telegram
+### Message edits are limited by Telegram
 
-Список обновляется не чаще **раза в 5 секунд на пользователя** и только когда
-изменилось состояние или процент. Чаще — отказы и мигание вместо статуса. Одно
-сообщение на все задачи здесь выгодно: поток правок один, а не три. Смена
-состояния задачи (`downloading` → `uploading` → `done`) рисуется вне очереди
-ожидания — такие события редки, а именно они важны.
+The list is updated no more than **once every 5 seconds per user**, and only when the state or percentage changes. More frequently - rejections and flickering instead of status updates. One message for all tasks is beneficial: one edit stream instead of three. Changes in task state (`downloading` → `uploading` → `done`) are drawn outside of waiting queue - such events are rare, but they are critical.
 
-### Очередь не переживает перезапуск
+### The queue does not survive restarts
 
-Живёт в памяти, как и существующие сессии (`context.user_data["sessions"]`).
-Восстановление потребовало бы базы, а вместе с ней — воссоздания разобранных
-форматов и привязки к сообщениям, то есть почти всего состояния. Для двух задач
-это не оправдано.
-
-**Но висящий после перезапуска «скачиваю 45%» недопустим** — это ровно то
-непонимание, из которого выросло требование 5. Поэтому идентификаторы сообщений
-с активным тасклистом сохраняются (таблица в `analytics.db`), и при старте бот
-перезаписывает их в «бот перезапустился, задачи не сохранились, пришлите ссылку
-заново», после чего запись удаляет. Это единственное, что персистится.
+It exists in memory, just like existing sessions (`context.user_data["sessions"]`). Recovery would require a database, and with it - reconstruction of parsed formats and message associations, i.e., almost the entire state. For two tasks, this is not justified.
+**However, a "downloading 45%" message lingering after a restart is unacceptable** - this is exactly the misunderstanding that gave rise to requirement 5. Therefore, message identifiers for active task lists are preserved (in a table in `analytics.db`), and upon startup, the bot rewrites them to "Bot restarted, tasks not preserved, please send the link again", after which the record is deleted. This is the only thing that persists.
 
 ---
 
-## 4. Архитектура
+## 4. Architecture
 
-Два новых модуля с узкими задачами — вместо наращивания `telegram_utils.py`,
-в котором уже около 2800 строк.
+Two new modules with narrow, focused responsibilities - instead of expanding `telegram_utils.py`, which already contains about 2800 lines.
 
-### `utils/download_queue.py` — структура данных
+### `utils/download_queue.py` - data structure
 
-Задача (`QueuedTask`): токен сессии, url, платформа, действие, значение формата,
-состояние, прогресс. Очередь пользователя: активная задача плюс не более одной
-ждущей, переходы состояний. Не знает ни про Telegram, ни про asyncio — поэтому
-тестируется без моков.
+A task (`QueuedTask`): session token, URL, platform, action, format value, state, progress. A user's queue: active task plus at most one waiting task, state transitions. It has no knowledge of Telegram or asyncio - thus it is tested without mocks.
 
-Состояния: `waiting` → `downloading` → `uploading` → `done` | `failed` |
-`cancelled`.
+States: `waiting` → `downloading` → `uploading` → `done` | `failed` | `cancelled`.
 
-При лимите 2 арифметика слотов не нужна: занято — значит есть активная и есть
-ждущая. Всё, что требуется от модуля, — принять задачу или отказать, отдать
-следующую и сменить состояние.
+With a limit of two tasks, slot arithmetic is unnecessary: occupied means there is an active task and one waiting task. The only thing required from the module is to accept a task or reject it, pass the next one, and change the state.
 
-### Исполнение — без собственного жизненного цикла
+### Execution - without its own lifecycle
 
-Отдельного модуля-исполнителя **не будет**. Первая редакция этой спеки
-предполагала долгоживущую `asyncio.Task` на каждого пользователя со своим
-запуском, остановкой при shutdown и присмотром за осиротевшими задачами. Всё это
-уже умеет PTB:
+There will be no separate executor module. The first version of this spec assumed a long-lived `asyncio.Task` per user, with individual task creation, shutdown handling, and monitoring of orphaned tasks. All of this is already handled by PTB:
 
-`Application.create_task` (проверено на 22.8) пропускает исключения корутины
-через `process_error`, то есть через глобальный обработчик ошибок — падение
-внутри очереди не может исчезнуть молча. И задачи, созданные им, **дожидаются
-при `stop()`**, поэтому остановка бота не требует ни реестра раннеров, ни их
-отмены вручную.
+`Application.create_task` (verified on 22.8) passes coroutine exceptions through `process_error`, meaning they go to the global error handler - errors inside the queue cannot silently disappear. Tasks created by it **wait for completion during `stop()`**, so bot shutdown does not require a runner registry or manual cancellation of tasks.
 
-Поэтому исполнение — короткая корутина в `telegram_utils`: доедает очередь
-пользователя и заканчивается. Запускается через `context.application.create_task`
-в момент постановки задачи, если у пользователя ещё нет активной. Класс ошибок с
-осиротевшими задачами при таком устройстве не возникает вовсе.
+Therefore, execution is a short coroutine in `telegram_utils`: it processes the user's queue and then ends. It is launched via `context.application.create_task` when a task is added, if the user has no active task running. No class of errors related to orphaned tasks arises under this design.
 
-### `utils/task_list_view.py` — рендер
+### `utils/task_list_view.py` - rendering
 
-Чистая функция: состояние очереди → текст и клавиатура. Отдельно, потому что это
-единственное, что придётся часто менять, и проверять его удобно сравнением
-строк.
+A pure function: queue state → text and keyboard. Separated out because this is the only part that will need frequent updates, and it's easy to verify by string comparison.
 
-### Правки существующего
+### Existing changes
 
-| Файл | Правка |
-|---|---|
-| `main.py` | `concurrent_updates` (выпуск 1) |
-| `utils/callback_fsm.py` | разбор `q\|{task}\|{action}` — адресация задач в списке |
-| `utils/telegram_utils.py` | постановка в очередь вместо прямого скачивания; тасклист вместо статуса в своём сообщении |
-| `utils/telegram_utils.py` | `_pulsing_chat_action` не умирает от одной ошибки |
-| `utils/analytics_db.py` | таблица активных тасклистов для сообщения о перезапуске |
+| File | Change |
+|-----|--------|
+| `main.py` | `concurrent_updates` (release 1) |
+| `utils/callback_fsm.py` | parsing `q\|{task}\|{action}` - task addressing in the list |
+| `utils/telegram_utils.py` | queue placement instead of direct file download; task list instead of status in own message |
+| `utils/telegram_utils.py` | `_pulsing_chat_action` does not die from a single error |
+| `utils/analytics_db.py` | table of active task lists for message on restart |
 
 ---
 
-## 5. Поток
+## 5. Request flow
 
 ```
-ссылка → антиспам → разбор (run_blocking) → меню форматов
-      ↓ выбор формата
-   слот свободен? ── нет → «2 из 2, нажмите формат снова позже», меню живо
-      ↓ да
-   меню форматов удаляется, задача в очередь, тасклист перерисован
-      ↓
-   у пользователя есть активная задача? ── да → задача ждёт своей очереди
-      ↓ нет → application.create_task(доесть очередь пользователя)
-   downloading → progress_hooks → тасклист раз в 5с
-      ↓
-   uploading → размер и время → тасклист раз в 5с
-      ↓
-   файл отправлен → прежний тасклист удалён, новый отправлен снизу
+URL -> spam check -> metadata (run_blocking) -> format menu
+  -> format selected
+  -> slot available? If no, keep menu and ask user to try selection later
+  -> if yes, remove format menu, enqueue task, redraw task list
+  -> active task for this user? If yes, wait in the queue
+  -> if no, application.create_task(process_user_queue)
+  -> downloading: progress_hooks update task list at most every 5 s
+  -> uploading: show size and elapsed time at most every 5 s
+  -> file delivered: remove previous task list and send updated list below
 ```
 
-Тасклист перепосылается после каждого доставленного файла, чтобы статус
-оставался под последним видео, а не уезжал вверх.
+The task list is resent after each delivered file so that the status remains aligned with the latest video, rather than drifting upward.
 
 ---
 
-## 6. Обработка ошибок
+## 6. Error Handling
 
-**Одна упавшая задача не роняет очередь.** Помечается `✗` с кодом ошибки, и
-корутина берёт следующую. То же с `BLOCKING_TASK_TIMEOUT` (600с): задача помечается «не
-успела за 10 минут», очередь идёт дальше.
-
-**Отмена.** `✕ N` для ждущей задачи убирает её из очереди; для работающей —
-вызывает существующий `request_cancellation(session_id)`, и yt-dlp прерывается
-через `progress_hooks`. «Отменить всё» делает и то, и другое.
-
-**Правка тасклиста.** Только через `safe_edit_message_text`: пользователь может
-удалить сообщение со списком, и это не ошибка. Если список удалён, он
-перепосылается при следующем обновлении.
-
-**Отказ отметки активности** остаётся неошибкой — теперь пульс переживает сбой и
-продолжает попытки, а не выходит навсегда.
+**One failed task does not crash the queue.** A task marked with `✗` and an error code is recorded, and the coroutine proceeds to the next one. The same applies to `BLOCKING_TASK_TIMEOUT` (600s): the task is marked as "failed to complete within 10 minutes," and the queue continues.
+**Cancellation.** `✕ N` removes a waiting task from the queue; for an active task, it triggers the existing `request_cancellation(session_id)`, and yt-dlp is interrupted via `progress_hooks`. "Cancel all" performs both actions.
+**Task list editing.** Only through `safe_edit_message_text`: the user can delete the task list message, and this is not an error. If the list is deleted, it is resent on the next update.
+**Failure to mark activity status** remains non-fatal - the pulse now survives failures and continues retry attempts, rather than exiting permanently.
 
 ---
 
-## 7. Тестирование
+## 7. Testing
 
-Модульно, без сети и без моков Telegram:
+Modular, without network access or mocked Telegram:
+- `download_queue`: limit of 2, considered as occupied slot (a link without selected format is not counted); state transitions, removal of tasks from the middle.
+- `task_list_view`: text and keyboard for each state, including "queue is full" and mixed lists of ready and waiting tasks.
+- Execution: one task per user at a time; a failed task does not block the next; the coroutine ends when the queue is empty.
 
-- `download_queue`: лимит 2, что считается занятым слотом (ссылка без выбранного
-  формата — не считается), переходы состояний, снятие задачи из середины.
-- `task_list_view`: текст и клавиатура для каждого состояния, включая «очередь
-  полна» и смешанный список готовых и ждущих.
-- исполнение: одна задача за раз на пользователя; упавшая задача не мешает
-  следующей; корутина заканчивается, когда очередь пуста.
+Through handlers:
+- **Delivery of a callback during a long-running task** - no test exists for this, and this was exactly the broken case. It is verified that the callback is processed without waiting for the current task to finish.
+- A second link received while a task is running shows the format menu.
+- A third task is not accepted; the previous two remain unaffected, and the format menu stays active - re-clicking the same format after freeing the slot works without re-sending the link.
+- The task list can be edited no more than once every 5 seconds.
 
-Через хэндлеры:
-
-- **Доставка нажатия во время долгой задачи** — теста на это нет вообще, а
-  сломана была именно она. Проверяется, что callback обрабатывается, не дожидаясь
-  завершения текущей задачи.
-- Вторая ссылка во время работы получает меню форматов.
-- Третья задача не принимается, прежние две не затронуты, а меню форматов
-  остаётся живым — повторное нажатие того же формата после освобождения слота
-  работает без повторной присылки ссылки.
-- Правка списка не чаще раза в 5 секунд.
-
-Про параллельность:
-
-- Одновременные нажатия не ломают антиспам и хранилище сессий. `_check_spam`
-  полностью синхронный, без `await` внутри, — значит остаётся атомарным в одном
-  event loop; тест закрепляет это свойство, чтобы будущий `await` внутри не
-  проехал незамеченным.
+Regarding concurrency:
+- Concurrent clicks do not break anti-spam or session storage. `_check_spam` is fully synchronous, with no `await` inside - thus it remains atomic within a single event loop; the test confirms this property to ensure that future `await` inside won't go unnoticed.
 
 ---
 
-## 8. Чего сознательно не делается
+## 8. Intentional Omissions
 
-- Приоритеты и перестановка задач в списке. Две штуки проще отменить и прислать
-  заново.
-- Ограничение на суммарный объём. Лимит на количество задач, не на гигабайты:
-  три двухгигабайтных видео по-прежнему займут диск и время.
-- Восстановление очереди после перезапуска (см. §3).
+- Task priorities and reordering within the list. Two items are simpler to cancel and resend.
+- Total volume limits. A limit on the number of tasks, not on gigabytes: three two-gigabyte videos still occupy disk space and time.
+- Queue recovery after restart (see §3).
 
 ---
 
-## 9. Два выпуска вместо одного
+## 9. Two Releases Instead of One
 
-Работа разбивается на две части, и это не формальность: первая часть — починка
-уже сломанного, вторая — новая функциональность. Смешивать их в одном выпуске
-значит не понять, что именно сломалось, если сломается.
+The work is split into two parts, and this is not just formalism: the first part fixes a previously broken feature, the second introduces new functionality. Mixing them in one release means you won't understand what exactly broke if it breaks again.
+**Release 1 - "The cancel button works again."** `concurrent_updates`, checks for shared state during concurrent access, resilient activity status pulse, test for callback delivery during a long-running task. No new features: after this, cancellation works, the second link is read, and several users run in parallel. This is a standalone value and the biggest risk - it's clearly visible separately.
+**Release 2 - Queue and task list.** Two new modules, limit of 2, progress tracking, restart notification. Built on a foundation already proven in production.
 
-**Выпуск 1 — «кнопка отмены снова работает».** `concurrent_updates`, проверка
-общего состояния на одновременный доступ, живучий пульс отметки активности, тест
-на доставку нажатия во время долгой задачи. Никакой новой функциональности:
-после него отмена работает, вторая ссылка читается, и несколько пользователей
-качают параллельно. Это самостоятельная ценность и самый большой риск — его
-видно отдельно.
+## 10. Main Risk
 
-**Выпуск 2 — очередь и тасклист.** Два новых модуля, лимит 2, прогресс,
-сообщение о перезапуске. Строится на уже проверенном в проде фундаменте.
-
-## 10. Главный риск
-
-Включение параллельной обработки апдейтов — самое рискованное в этой работе.
-Сейчас бот физически не мог делать две вещи разом, и это скрывало любые проблемы
-с общим состоянием. До прода нужно проверить антиспам, `SessionStore` и учёт
-временных файлов на одновременный доступ и закрепить проверки тестами. Гонок
-данных в одном event loop не будет, а логическое переплетение (прочитал счётчик →
-`await` → записал устаревшее значение) — вполне.
+Enabling parallel processing of updates is the riskiest aspect of this work.
+Currently, the bot physically couldn't perform two tasks at once, which masked any issues with the shared state. Before going to production, we need to check anti-spam, `SessionStore`, and file access for temporary files under concurrent access, and solidify these checks with tests. Data races within a single event loop won't occur, but logical race conditions (read counter → await → write outdated value) are entirely possible.

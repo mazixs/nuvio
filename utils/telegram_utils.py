@@ -14,7 +14,13 @@ from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 from telegram.helpers import escape_markdown as _telegram_escape_markdown
 from telegram.ext import ContextTypes
 
@@ -28,7 +34,7 @@ from config import (
 )
 from utils import download_report
 from utils.logger import setup_logger
-from utils.cancellation import CancelledByUser, request_cancellation
+from utils.cancellation import CancelledByUser, is_cancelled, request_cancellation
 from utils.subtitles import (
     SUBTITLE_FORMATS,
     available_subtitle_languages,
@@ -60,6 +66,14 @@ from utils.youtube_utils import (
 from utils.temp_file_manager import create_temp_dir, cleanup_temp_files
 from utils.callback_fsm import CallbackEvent, SessionStore
 from utils.file_delivery import media_kind_for_suffix
+from utils.social_delivery import (
+    DeliveryOutcome,
+    chunk_media,
+    description_delivery_plan,
+    description_status,
+    media_album_sizes,
+    normalize_description,
+)
 from utils.media_processor import get_video_geometry
 from utils.platform_actions import (
     DIRECT_VIDEO_CACHE_KEY,
@@ -106,10 +120,23 @@ from messages import (
     BTN_AUDIO_M4A,
     BTN_TG_VIDEO,
     BTN_MORE,
-    TG_SEND_ERROR,
     BTN_BACK,
     BTN_DOWNLOAD_VIDEO,
     BTN_DOWNLOAD_POST,
+    BTN_DOWNLOAD_WITHOUT_DESCRIPTION,
+    BTN_DOWNLOAD_WITH_DESCRIPTION,
+    DESCRIPTION_EMPTY,
+    DESCRIPTION_UNAVAILABLE,
+    DOWNLOADING_PHOTOS_MESSAGE,
+    ERROR_INSTAGRAM_NO_PHOTOS,
+    ERROR_TIKTOK_NO_PHOTOS,
+    MIXED_INSTAGRAM_POST,
+    INSTAGRAM_CAROUSEL_INCOMPLETE,
+    PHOTO_POST_PARTIAL,
+    DELIVERY_OUTCOME_UNKNOWN,
+    DESCRIPTION_SEND_FAILED,
+    PARTIAL_CANCELLED,
+    CANCEL_IN_FLIGHT_MESSAGE,
     BTN_AUDIO_ONLY,
     BTN_SECTION_VIDEO,
     BTN_SECTION_AUDIO,
@@ -127,7 +154,7 @@ from messages import (
     NO_SUBTITLE_LANGUAGES_MESSAGE,
     ERROR_FALLBACK,
     ERROR_NETWORK,
-    ERROR_FILE_TOO_LARGE_TELEGRAM,
+    YOUTUBE_RATE_LIMIT_MESSAGE,
     SUBTITLE_CAPTION,
     SPAM_WARNING,
     USER_ERROR_WITH_CODE,
@@ -166,7 +193,7 @@ from utils.ytdlp_common import FileSizeLimitError
 from utils.video_cache import telegram_cache, CachedVideo
 from utils.cookie_health import check_cookie_health
 from utils.ytdlp_runtime import get_installed_yt_dlp_version
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = setup_logger(__name__)
 
@@ -348,19 +375,24 @@ async def _notify_admins_crash(
 executor = ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS)
 _worker_lock = threading.Lock()
 _active_workers: dict[str, set[Future]] = {}
+_active_deliveries: dict[str, int] = {}
 _pending_cleanup: dict[str, bool] = {}
 
 
 def active_download_sessions() -> set[str]:
     """Снимок сессий с еще работающими задачами."""
     with _worker_lock:
-        return {session for session, workers in _active_workers.items() if workers}
+        return {
+            session
+            for session in set(_active_workers) | set(_active_deliveries)
+            if _active_workers.get(session) or _active_deliveries.get(session)
+        }
 
 
 def _cleanup_session_when_idle(session_id: str, *, forget_report: bool = False) -> None:
     """Удаляет медиа только после фактического выхода фоновой задачи."""
     with _worker_lock:
-        if _active_workers.get(session_id):
+        if _active_workers.get(session_id) or _active_deliveries.get(session_id):
             _pending_cleanup[session_id] = (
                 _pending_cleanup.get(session_id, False) or forget_report
             )
@@ -378,6 +410,29 @@ def _worker_finished(session_id: str, future: Future) -> None:
             if workers:
                 return
             _active_workers.pop(session_id, None)
+        if _active_deliveries.get(session_id):
+            return
+        pending = _pending_cleanup.pop(session_id, None)
+    if pending is not None:
+        cleanup_temp_files(session_id)
+        if pending:
+            download_report.forget(session_id)
+
+
+def _delivery_started(session_id: str) -> None:
+    with _worker_lock:
+        _active_deliveries[session_id] = _active_deliveries.get(session_id, 0) + 1
+
+
+def _delivery_finished(session_id: str) -> None:
+    with _worker_lock:
+        count = _active_deliveries.get(session_id, 0) - 1
+        if count > 0:
+            _active_deliveries[session_id] = count
+            return
+        _active_deliveries.pop(session_id, None)
+        if _active_workers.get(session_id):
+            return
         pending = _pending_cleanup.pop(session_id, None)
     if pending is not None:
         cleanup_temp_files(session_id)
@@ -502,6 +557,9 @@ def _session_is_disposable(session_id: str | None) -> bool:
     """
     if not session_id:
         return True
+    with _worker_lock:
+        if _active_workers.get(session_id) or _active_deliveries.get(session_id):
+            return False
     directory = TEMP_DIR / session_id
     try:
         return not any(directory.iterdir())
@@ -614,22 +672,57 @@ def _build_main_menu(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Возвращает текст и клавиатуру главного меню для платформы."""
     formats = formats or {}
-    title = escape_markdown(str(video_info.get("title") or "Video"))
+    raw_title = re.sub(r"\s+", " ", str(video_info.get("title") or "Video"))
+    title = escape_markdown(raw_title[:160])
     uploader = escape_markdown(str(video_info.get("uploader") or "N/A"))
     duration = format_duration(int(video_info.get("duration") or 0))
 
-    if platform == "tiktok":
-        is_photo_post = bool(video_info.get("_nuvio_tiktok_photo_post"))
-        keyboard = [
+    def download_rows(platform_name: str, is_photo_post: bool) -> list[list[InlineKeyboardButton]]:
+        ordinary_label = BTN_DOWNLOAD_POST if is_photo_post else BTN_DOWNLOAD_VIDEO
+        ordinary_action = f"{platform_name}_download"
+        if description_status(video_info) == "available":
+            return [
+                [
+                    InlineKeyboardButton(
+                        BTN_DOWNLOAD_WITHOUT_DESCRIPTION,
+                        callback_data=_make_callback_data(
+                            session_token, "main", ordinary_action
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        BTN_DOWNLOAD_WITH_DESCRIPTION,
+                        callback_data=_make_callback_data(
+                            session_token,
+                            "main",
+                            f"{platform_name}_download_desc",
+                        ),
+                    )
+                ],
+            ]
+        return [
             [
                 InlineKeyboardButton(
-                    BTN_DOWNLOAD_POST if is_photo_post else BTN_DOWNLOAD_VIDEO,
+                    ordinary_label,
                     callback_data=_make_callback_data(
-                        session_token, "main", "tiktok_download"
+                        session_token, "main", ordinary_action
                     ),
                 )
             ]
         ]
+
+    def description_status_line() -> str:
+        status = description_status(video_info)
+        if status == "empty":
+            return f"\n{DESCRIPTION_EMPTY}"
+        if status == "unavailable":
+            return f"\n{DESCRIPTION_UNAVAILABLE}"
+        return ""
+
+    if platform == "tiktok":
+        is_photo_post = bool(video_info.get("_nuvio_tiktok_photo_post"))
+        keyboard = download_rows("tiktok", is_photo_post)
         if not (is_photo_post and not video_info.get("_nuvio_tiktok_audio_url")):
             keyboard.append(
                 [
@@ -651,23 +744,14 @@ def _build_main_menu(
         )
         if is_photo_post:
             images_count = len(video_info.get("_nuvio_tiktok_images") or [])
-            text = f"*{title}*\nАвтор: {uploader}\nКадров: {images_count}\nЗвук: {'есть' if video_info.get('_nuvio_tiktok_audio_url') else 'нет'}\nДлительность: {duration}"
+            text = f"*{title}*\nАвтор: {uploader}\nКадров: {images_count}\nЗвук: {'есть' if video_info.get('_nuvio_tiktok_audio_url') else 'нет'}\nДлительность: {duration}{description_status_line()}"
         else:
-            text = f"*{title}*\nАвтор: {uploader}\nДлительность: {duration}"
+            text = f"*{title}*\nАвтор: {uploader}\nДлительность: {duration}{description_status_line()}"
         return text, InlineKeyboardMarkup(keyboard)
 
     if platform == "instagram":
         is_photo_post = bool(video_info.get("_nuvio_instagram_photo_post"))
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    BTN_DOWNLOAD_POST if is_photo_post else BTN_DOWNLOAD_VIDEO,
-                    callback_data=_make_callback_data(
-                        session_token, "main", "instagram_download"
-                    ),
-                )
-            ]
-        ]
+        keyboard = download_rows("instagram", is_photo_post)
         if not (is_photo_post and not video_info.get("_nuvio_instagram_audio_url")):
             keyboard.append(
                 [
@@ -689,9 +773,13 @@ def _build_main_menu(
         )
         if is_photo_post:
             images_count = len(video_info.get("_nuvio_instagram_images") or [])
-            text = f"*{title}*\nАвтор: {uploader}\nКадров: {images_count}\nЗвук: {'есть' if video_info.get('_nuvio_instagram_audio_url') else 'нет'}\nДлительность: {duration}"
+            if video_info.get("_nuvio_instagram_mixed_post"):
+                images_count = len(video_info.get("_nuvio_instagram_carousel_items") or [])
+                text = f"*{title}*\nАвтор: {uploader}\n{MIXED_INSTAGRAM_POST}: {images_count} элементов\nДлительность: {duration}{description_status_line()}"
+            else:
+                text = f"*{title}*\nАвтор: {uploader}\nКадров: {images_count}\nЗвук: {'есть' if video_info.get('_nuvio_instagram_audio_url') else 'нет'}\nДлительность: {duration}{description_status_line()}"
         else:
-            text = f"*{title}*\nАвтор: {uploader}\nДлительность: {duration}"
+            text = f"*{title}*\nАвтор: {uploader}\nДлительность: {duration}{description_status_line()}"
         return text, InlineKeyboardMarkup(keyboard)
 
     if platform == "rutube":
@@ -1056,6 +1144,15 @@ async def safe_edit_message_text(
         raise
 
 
+async def _edit_delivery_status(query: telegram.CallbackQuery, text: str, **kwargs) -> bool:
+    """Не превращает отказ служебного статуса в повторную отправку медиа."""
+    try:
+        return await safe_edit_message_text(query, text, **kwargs)
+    except telegram.error.TelegramError as error:
+        logger.warning("Не удалось обновить статус доставки: %s", type(error).__name__)
+        return False
+
+
 def _classify_youtube_error(error_msg: str) -> str | None:
     """Классифицирует частые YouTube/yt-dlp ошибки для понятного ответа пользователю."""
     error_code = _youtube_error_code(error_msg)
@@ -1071,6 +1168,9 @@ def _classify_youtube_error(error_msg: str) -> str | None:
             "YouTube отклонил доступ к этому ролику (ограничения/авторизация).\n"
             "Попробуйте другую ссылку или повторите попытку позже."
         )
+
+    if error_code == "RATE_LIMIT":
+        return YOUTUBE_RATE_LIMIT_MESSAGE
 
     if error_code in {"NETWORK_TIMEOUT", "MEDIA_FORBIDDEN"}:
         return ERROR_NETWORK
@@ -1089,7 +1189,7 @@ def _classify_youtube_error(error_msg: str) -> str | None:
     return None
 
 
-def _youtube_error_code(error_msg: str) -> str:
+def _youtube_error_code(error_msg: str | BaseException) -> str:
     """Возвращает короткий код YouTube/yt-dlp ошибки для структурированного логирования."""
     return youtube_error_code(error_msg)
 
@@ -1105,15 +1205,28 @@ def _make_error_code(platform: str, category: str) -> str:
         "file": "FILE",
         "bot": "BOT",
     }.get(platform, "BOT")
-    normalized_category = category.upper()[:8]
+    # Старые вызовы не должны возвращать пользователю категорию UNKNOWN.
+    normalized_category = (
+        "UNEXPECT" if category.upper() == "UNKNOWN" else category.upper()
+    )[:8]
     return f"{platform_prefix}-{normalized_category}-{uuid.uuid4().hex[:6].upper()}"
 
 
-def _classify_internal_error_category(platform: str, error_msg: str) -> str:
+def _classify_internal_error_category(platform: str, error_msg: str | BaseException) -> str:
     return classify_internal_error_category(platform, error_msg)
 
 
-def _build_public_error_message(platform: str, error_code: str, error_msg: str) -> str:
+def _make_error_code_for_exception(
+    platform: str, exc: BaseException, *, prefix_platform: str | None = None
+) -> str:
+    """Сохраняет одну категорию в коде и журнале при разных префиксах."""
+    category = _classify_internal_error_category(platform, exc)
+    return _make_error_code(prefix_platform or platform, category)
+
+
+def _build_public_error_message(
+    platform: str, error_code: str, error_msg: str | BaseException
+) -> str:
     return build_public_error_message(platform, error_code, error_msg)
 
 
@@ -1128,7 +1241,7 @@ def _should_notify_admins_platform_failure(
     краш-репорт дошёл до админа. Замолчать эту категорию значит согласиться, что
     бот будет стоять сломанным, пока кто-нибудь не пожалуется.
     """
-    if stage.endswith("_timeout") or category in {"NETWORK", "NETWORK_TIMEOUT"}:
+    if stage.endswith("_timeout") or category in {"NETWORK", "NETWORK_TIMEOUT", "TIMEOUT"}:
         return False
     return True
 
@@ -1143,7 +1256,7 @@ async def _log_platform_failure(
     session_id: str | None = None,
     output_tail: list[str] | None = None,
 ) -> None:
-    category = _classify_internal_error_category(platform, str(exc))
+    category = _classify_internal_error_category(platform, exc)
     cookie_status = "not_checked"
     cookie_summary = "not_checked"
     if platform in {"youtube", "instagram", "tiktok"}:
@@ -1160,10 +1273,12 @@ async def _log_platform_failure(
     )
     log_method = logger.error if should_notify_admins else logger.warning
     log_method(
-        "USER_FLOW_FAIL code=%s platform=%s stage=%s session_id=%s url=%s cookie_status=%s cookie_summary=%s error=%s",
+        "USER_FLOW_FAIL code=%s platform=%s stage=%s category=%s exception=%s session_id=%s url=%s cookie_status=%s cookie_summary=%s error=%s",
         error_code,
         platform,
         stage,
+        category,
+        type(exc).__name__,
         session_id,
         url,
         cookie_status,
@@ -1238,7 +1353,9 @@ async def _deliver_cached_audio(
         return False
 
     try:
-        await query.message.reply_audio(audio=cached.file_id)
+        await _call_telegram_with_retry_after(
+            lambda: query.message.reply_audio(audio=cached.file_id)
+        )
     except telegram.error.BadRequest as e:
         logger.warning("file_id аудио устарел (key=%s): %s", cache_key, e)
         telegram_cache.delete_by_file_id(cached.file_id)
@@ -1246,6 +1363,136 @@ async def _deliver_cached_audio(
 
     logger.info("Аудио доставлено из кэша (key=%s)", cache_key)
     return True
+
+
+def _description_for_delivery(session_data: dict) -> str | None:
+    """Возвращает описание только для выбранного действия Instagram/TikTok."""
+    if not session_data.get("_include_description"):
+        return None
+    if session_data.get("platform") not in {"tiktok", "instagram"}:
+        return None
+    return normalize_description(
+        (session_data.get("video_info") or {}).get("description")
+    )
+
+
+def _description_chunks_for_delivery(session_data: dict) -> list[str]:
+    caption, chunks = description_delivery_plan(_description_for_delivery(session_data))
+    session_data["_description_caption"] = caption
+    return chunks
+
+
+async def _send_description_chunks(
+    query: telegram.CallbackQuery,
+    chunks: list[str],
+    first_media: telegram.Message | None,
+    session_data: dict,
+) -> bool:
+    """Отправляет длинное описание рядом с первым подтвержденным медиа."""
+    if not chunks:
+        return True
+    if session_data.get("_description_attempted"):
+        return not session_data.get("_description_delivery_failed", False)
+    session_data["_description_attempted"] = True
+    first_id = getattr(first_media, "message_id", None)
+    for chunk in chunks:
+        if is_cancelled(str(session_data.get("session_id") or "")):
+            raise CancelledByUser("отправка описания отменена")
+        try:
+            await _call_telegram_with_retry_after(
+                lambda: query.message.reply_text(
+                    chunk,
+                    parse_mode=None,
+                    reply_to_message_id=first_id,
+                    allow_sending_without_reply=True,
+                    do_quote=False,
+                ),
+                session_data,
+            )
+        except telegram.error.BadRequest as error:
+            if first_id is None or not _is_missing_reply_target(error):
+                session_data["_description_delivery_failed"] = True
+                logger.warning("Не удалось отправить часть описания: %s", error)
+                return False
+            logger.info(
+                "Медиа удалено до отправки описания; отправляю текст без reply"
+            )
+            first_id = None
+            try:
+                await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_text(chunk, parse_mode=None, do_quote=False),
+                    session_data,
+                )
+            except telegram.error.TelegramError as retry_error:
+                session_data["_description_delivery_failed"] = True
+                logger.warning(
+                    "Не удалось отправить описание без привязки к медиа: %s",
+                    retry_error,
+                )
+                return False
+        except telegram.error.TelegramError as error:
+            session_data["_description_delivery_failed"] = True
+            logger.warning("Не удалось отправить часть описания: %s", error)
+            return False
+    return True
+
+
+def _is_missing_reply_target(error: telegram.error.BadRequest) -> bool:
+    """Проверяет только отказ, который подтверждает отсутствие reply-цели."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "message to reply not found",
+            "message to be replied not found",
+            "replied message not found",
+            "reply message not found",
+        )
+    )
+
+
+async def _call_telegram_with_retry_after(
+    call,
+    session_data: dict | None = None,
+    *,
+    reset_files=None,
+    max_attempts: int = 2,
+) -> object:
+    """Повторяет только явный RetryAfter с коротким бюджетом и отменой."""
+    attempt = 1
+    while True:
+        if session_data and is_cancelled(str(session_data.get("session_id") or "")):
+            raise CancelledByUser("отправка отменена до запроса Telegram")
+        try:
+            if session_data is not None:
+                session_data["_delivery_request_in_flight"] = True
+            try:
+                return await call()
+            finally:
+                if session_data is not None:
+                    session_data["_delivery_request_in_flight"] = False
+        except telegram.error.RetryAfter as error:
+            if attempt >= max_attempts:
+                raise
+            delay = error.retry_after
+            delay_seconds = (
+                delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
+            )
+            if delay_seconds < 0 or delay_seconds > 60:
+                raise
+            logger.warning("Telegram попросил подождать %.2fс перед повтором", delay_seconds)
+            remaining = delay_seconds
+            while remaining > 0:
+                if session_data and is_cancelled(
+                    str(session_data.get("session_id") or "")
+                ):
+                    raise CancelledByUser("отправка отменена во время RetryAfter")
+                interval = min(remaining, 1.0)
+                await asyncio.sleep(interval)
+                remaining -= interval
+            if reset_files:
+                reset_files()
+            attempt += 1
 
 
 async def _deliver_cached_video(
@@ -1266,10 +1513,12 @@ async def _deliver_cached_video(
         return False
 
     try:
-        await query.message.reply_video(
-            video=cached.file_id,
-            caption=None,
-            supports_streaming=True,
+        await _call_telegram_with_retry_after(
+            lambda: query.message.reply_video(
+                video=cached.file_id,
+                caption=None,
+                supports_streaming=True,
+            )
         )
     except telegram.error.BadRequest as e:
         logger.warning("file_id видео устарел (key=%s): %s", cache_key, e)
@@ -1278,6 +1527,46 @@ async def _deliver_cached_video(
 
     logger.info("Видео доставлено из кэша (key=%s)", cache_key)
     return True
+
+
+def _is_stale_file_id(error: telegram.error.BadRequest) -> bool:
+    """Разрешает повтор загрузки только при явном отказе ссылки на файл."""
+    text = str(error).lower()
+    return any(marker in text for marker in (
+        "wrong file_id", "wrong file identifier", "file_id not found",
+        "file reference expired", "file_reference_expired",
+    ))
+
+
+async def _deliver_social_cached_video(
+    query: telegram.CallbackQuery,
+    file_id: str,
+    session_data: dict,
+) -> telegram.Message:
+    """Отправляет социальное видео из кэша с выбранным описанием."""
+    message = await _call_telegram_with_retry_after(
+        lambda: query.message.reply_video(
+            do_quote=False,
+            video=file_id,
+            caption=description_delivery_plan(
+                _description_for_delivery(session_data)
+            )[0],
+            parse_mode=None,
+            supports_streaming=True,
+        ),
+        session_data,
+    )
+    session_data["_first_media_message"] = message
+    session_data["_delivered_items"] = 1
+    session_data["_delivery_progress"] = 1
+    session_data["_confirmed_delivery_messages"] = (message,)
+    await _send_description_chunks(
+        query,
+        _description_chunks_for_delivery(session_data),
+        message,
+        session_data,
+    )
+    return message
 
 
 def _cache_key_with_delivered_format(
@@ -1369,13 +1658,13 @@ async def _deliver_by_url(
     platform: str,
     cache_format_id: str | None = None,
     video_info: dict | None = None,
-) -> bool:
+    session_data: dict | None = None,
+) -> DeliveryOutcome:
     """Отдаёт медиа Telegram прямой ссылкой, минуя диск.
 
     Returns:
-        bool: True, если Telegram ссылку принял; False — если отказал или не
-        успел её забрать, и тогда вызывающий код обязан пойти обычным путём
-        через скачивание файла.
+        DeliveryOutcome: состояние отправки, подтвержденное сообщение и число
+        доставленных элементов. Неизвестный исход запрещает слепой fallback.
     """
     size_mb = plan.size / 1024 / 1024
     now = asyncio.get_running_loop().time()
@@ -1383,8 +1672,10 @@ async def _deliver_by_url(
         logger.info(
             "Пропускаю доставку ссылкой (%s): CDN недавно отказал Telegram", plan.kind
         )
-        return False
+        return DeliveryOutcome("refused")
 
+    if session_data is not None:
+        session_data["_delivery_request_in_flight"] = True
     try:
         match plan.kind:
             case "video":
@@ -1400,17 +1691,34 @@ async def _deliver_by_url(
                     )
                     if value
                 }
-                message = await query.message.reply_video(
-                    video=plan.url,
-                    caption=None,
-                    supports_streaming=True,
-                    **geometry,
+                message = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_video(
+                        do_quote=False if platform in {"tiktok", "instagram"} else None,
+                        video=plan.url,
+                        caption=(
+                            description_delivery_plan(
+                                _description_for_delivery(session_data or {})
+                            )[0]
+                        ),
+                        parse_mode=None,
+                        supports_streaming=True,
+                        **geometry,
+                    ),
+                    session_data,
                 )
             case "audio":
-                message = await query.message.reply_audio(audio=plan.url, caption=None)
+                message = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_audio(audio=plan.url, caption=None, do_quote=False),
+                    session_data,
+                )
             case _:
-                message = await query.message.reply_photo(photo=plan.url, caption=None)
-    except telegram.error.TelegramError as e:
+                message = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_photo(photo=plan.url, caption=None, do_quote=False),
+                    session_data,
+                )
+    except telegram.error.BadRequest as e:
+        if platform in {"tiktok", "instagram"} and not _is_url_handoff_refusal(e):
+            raise
         _HANDOFF_REFUSALS.remember(plan.url, plan.kind, now)
         logger.warning(
             "Telegram не принял ссылку (%s, %.2f МБ): %s — уходим на скачивание",
@@ -1418,9 +1726,34 @@ async def _deliver_by_url(
             size_mb,
             e,
         )
-        return False
+        return DeliveryOutcome("refused", error=e)
+    except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
+        if platform in {"tiktok", "instagram"}:
+            if session_data is not None:
+                session_data["_delivery_outcome_unknown"] = True
+            return DeliveryOutcome("unknown", error=e)
+        _HANDOFF_REFUSALS.remember(plan.url, plan.kind, now)
+        logger.warning("Telegram не принял ссылку (%s): %s", plan.kind, e)
+        return DeliveryOutcome("refused", error=e)
+    except telegram.error.TelegramError as e:
+        if platform in {"tiktok", "instagram"}:
+            raise
+        _HANDOFF_REFUSALS.remember(plan.url, plan.kind, now)
+        logger.warning("Telegram не принял ссылку (%s): %s", plan.kind, e)
+        return DeliveryOutcome("refused", error=e)
+    finally:
+        if session_data is not None:
+            session_data["_delivery_request_in_flight"] = False
 
     logger.info("Медиа доставлено ссылкой (%s, %.2f МБ)", plan.kind, size_mb)
+    if session_data is not None:
+        session_data["_first_media_message"] = message
+        session_data["_delivered_items"] = 1
+        session_data["_delivery_progress"] = 1
+        session_data["_confirmed_delivery_messages"] = (message,)
+    if plan.kind == "video" and session_data is not None:
+        chunks = _description_chunks_for_delivery(session_data)
+        await _send_description_chunks(query, chunks, message, session_data)
     # Кэш file_id рассчитан на видео, аудио и документы; фото-посты в нём не
     # хранятся, поэтому для них запись пропускается.
     # Регистр диагностики здесь не спрашивается намеренно: ссылка ведёт ровно на
@@ -1428,7 +1761,7 @@ async def _deliver_by_url(
     # могла остаться от предыдущей неудачной попытки той же сессии.
     if cache_format_id and plan.kind != "photo":
         _cache_sent_media(message, url, platform, cache_format_id, video_info)
-    return True
+    return DeliveryOutcome("delivered", (message,), confirmed_items=1)
 
 
 # CDN может отказать инфраструктуре Telegram, оставаясь доступным для нас;
@@ -1439,43 +1772,523 @@ _HANDOFF_REFUSALS = HandoffRefusals()
 
 
 async def _deliver_photo_post_by_url(
-    query: telegram.CallbackQuery, plan: PhotoPostHandoff
-) -> bool:
+    query: telegram.CallbackQuery,
+    plan: PhotoPostHandoff,
+    session_data: dict | None = None,
+) -> DeliveryOutcome:
     """Отправляет фото-пост прямыми ссылками.
 
     Returns:
-        bool: True, если пост доставлен; False — если Telegram отказал на первой
-        же картинке, когда уйти на обычный путь ещё безопасно.
-
-    Raises:
-        telegram.error.TelegramError: отказ после того, как часть поста уже
-            ушла. Повторять пост нельзя — пользователь получил бы дубли, —
-            поэтому ошибка поднимается наверх к обычной обработке.
+        DeliveryOutcome: число подтвержденных фото и сообщения; unknown запрещает
+        повторять отправку на файловом пути.
     """
     now = asyncio.get_running_loop().time()
+    delivery_state = session_data if session_data is not None else {}
     first = plan.images[0]
     if _HANDOFF_REFUSALS.is_cooling_down(first.url, first.kind, now):
         logger.info("Пропускаю фото-пост ссылками: CDN недавно отказал Telegram")
-        return False
+        return DeliveryOutcome("refused")
 
-    for index, image in enumerate(plan.images):
+    sizes = media_album_sizes(len(plan.images))
+    offset = 0
+    sent_messages = []
+    caption = description_delivery_plan(
+        _description_for_delivery(delivery_state)
+    )[0]
+    for block_index, group_size in enumerate(sizes, start=1):
+        group = plan.images[offset : offset + group_size]
+        if is_cancelled(str(delivery_state.get("session_id") or "")):
+            raise CancelledByUser("отправка альбома отменена")
         try:
-            await query.message.reply_photo(photo=image.url, caption=None)
-        except telegram.error.TelegramError as error:
-            if index:
+            delivery_state["_delivery_request_in_flight"] = True
+            if len(group) == 1:
+                messages = [
+                    await _call_telegram_with_retry_after(
+                        lambda: query.message.reply_photo(
+                            do_quote=False,
+                            photo=group[0].url,
+                            caption=caption if offset == 0 else None,
+                            parse_mode=None,
+                        ),
+                        delivery_state,
+                    )
+                ]
+            else:
+                media = [
+                    InputMediaPhoto(
+                        media=image.url,
+                        caption=caption if offset == 0 and index == 0 else None,
+                        parse_mode=None,
+                    )
+                    for index, image in enumerate(group)
+                ]
+                messages = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_media_group(media=media, do_quote=False),
+                    delivery_state,
+                )
+        except telegram.error.BadRequest as error:
+            if not (
+                _is_url_handoff_refusal(error)
+                or _is_photo_format_refusal(error)
+            ):
                 raise
-            _HANDOFF_REFUSALS.remember(image.url, image.kind, now)
+            _HANDOFF_REFUSALS.remember(group[0].url, group[0].kind, now)
+            delivery_state["_delivered_items"] = offset
             logger.warning(
-                "Telegram не принял ссылку на картинку: %s — уходим на скачивание",
+                "Telegram не принял URL блока фото-поста после %s кадров: %s",
+                offset,
                 error,
             )
-            return False
+            return DeliveryOutcome(
+                "refused",
+                tuple(sent_messages),
+                confirmed_items=offset,
+                error=error,
+            )
+        except (telegram.error.NetworkError, telegram.error.TimedOut) as error:
+            delivery_state["_delivery_outcome_unknown"] = True
+            return DeliveryOutcome(
+                "unknown",
+                tuple(sent_messages),
+                confirmed_items=offset,
+                error=error,
+            )
+        finally:
+            delivery_state["_delivery_request_in_flight"] = False
+        if offset == 0 and messages:
+            delivery_state["_first_media_message"] = messages[0]
+        sent_messages.extend(messages)
+        offset += group_size
+        delivery_state["_delivered_items"] = offset
+        delivery_state["_delivery_progress"] = offset
+        delivery_state["_confirmed_delivery_messages"] = tuple(sent_messages)
+        logger.info(
+            "Медиа-блок доставлен: platform=%s session=%s block=%s transport=url items=%s",
+            delivery_state.get("platform", "social"),
+            delivery_state.get("session_id", "unknown"),
+            block_index,
+            group_size,
+        )
+
+    caption_value, description_chunks = description_delivery_plan(
+        _description_for_delivery(delivery_state)
+    )
+    if caption_value is None and description_chunks:
+        sent = await _send_description_chunks(
+            query,
+            description_chunks,
+            delivery_state.get("_first_media_message"),
+            delivery_state,
+        )
+        if sent:
+            delivery_state["_description_sent"] = True
 
     if plan.audio:
-        await query.message.reply_audio(audio=plan.audio.url, caption=None)
+        if is_cancelled(str(delivery_state.get("session_id") or "")):
+            raise CancelledByUser("отправка аудио отменена")
+        try:
+            delivery_state["_delivery_request_in_flight"] = True
+            audio_message = await _call_telegram_with_retry_after(
+                lambda: query.message.reply_audio(
+                    do_quote=False,
+                    audio=plan.audio.url, caption=None
+                ),
+                delivery_state,
+            )
+        except telegram.error.BadRequest as error:
+            if not _is_url_handoff_refusal(error):
+                raise
+            logger.warning("Telegram не принял URL аудио фото-поста: %s", error)
+            delivery_state["_audio_delivered"] = False
+            return DeliveryOutcome(
+                "refused",
+                tuple(sent_messages),
+                confirmed_items=offset,
+                audio_delivered=False,
+                error=error,
+            )
+        except telegram.error.NetworkError as error:
+            delivery_state["_delivery_outcome_unknown"] = True
+            return DeliveryOutcome(
+                "unknown", tuple(sent_messages), confirmed_items=offset,
+                audio_delivered=None, error=error,
+            )
+        finally:
+            delivery_state["_delivery_request_in_flight"] = False
+        delivery_state["_audio_delivered"] = True
+        sent_messages.append(audio_message)
 
     logger.info("Фото-пост доставлен ссылками: %s кадров", len(plan.images))
-    return True
+    return DeliveryOutcome(
+        "delivered",
+        tuple(sent_messages),
+        confirmed_items=offset,
+        audio_delivered=True if plan.audio else None,
+    )
+
+
+def _is_url_handoff_refusal(error: telegram.error.BadRequest) -> bool:
+    """Отличает отказ загрузить URL от ошибки подписи или параметров запроса."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "failed to get http url content",
+            "wrong file identifier/http url specified",
+            "wrong type of the web page content",
+            "failed to open the file",
+            "failed to fetch url",
+        )
+    )
+
+
+def _is_photo_format_refusal(error: telegram.error.BadRequest) -> bool:
+    """Проверяет конкретные ответы Telegram о формате или геометрии фото."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "photo must be non-empty",
+            "photo dimensions",
+            "photo_invalid_dimensions",
+            "unsupported image format",
+            "invalid image",
+            "image_process_failed",
+        )
+    )
+
+
+async def _send_photo_path_as_document(
+    query: telegram.CallbackQuery,
+    image_path: Path,
+    caption: str | None,
+    session_data: dict,
+) -> telegram.Message:
+    telegram_file = image_path.resolve() if TELEGRAM_LOCAL_MODE else image_path.open("rb")
+    try:
+        return await query.message.reply_document(
+            do_quote=False,
+            document=telegram_file,
+            caption=caption,
+            parse_mode=None,
+            write_timeout=1800,
+            read_timeout=1800,
+        )
+    finally:
+        if not TELEGRAM_LOCAL_MODE:
+            telegram_file.close()
+
+
+async def _send_photo_file_group(
+    query: telegram.CallbackQuery,
+    image_paths: list[Path],
+    caption: str | None,
+    session_data: dict,
+) -> list[telegram.Message]:
+    """Отправляет последовательную группу фото и сохраняет документный откат."""
+    if is_cancelled(str(session_data.get("session_id") or "")):
+        raise CancelledByUser("отправка фото отменена")
+    opened = []
+    media = []
+
+    def reset_opened_files() -> None:
+        for telegram_file in opened:
+            telegram_file.seek(0)
+
+    try:
+        for index, image_path in enumerate(image_paths):
+            telegram_file = (
+                image_path.resolve()
+                if TELEGRAM_LOCAL_MODE
+                else image_path.open("rb")
+            )
+            if not TELEGRAM_LOCAL_MODE:
+                opened.append(telegram_file)
+            media.append(
+                InputMediaPhoto(
+                    media=(telegram_file if TELEGRAM_LOCAL_MODE else telegram.InputFile(
+                        telegram_file, attach=True, read_file_handle=False
+                    )),
+                    caption=caption if index == 0 else None,
+                    parse_mode=None,
+                )
+            )
+        session_data["_delivery_request_in_flight"] = True
+        try:
+            if len(media) == 1:
+                message = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_photo(
+                        do_quote=False,
+                        photo=media[0].media,
+                        caption=caption,
+                        parse_mode=None,
+                        write_timeout=1800,
+                        read_timeout=1800,
+                    ),
+                    session_data,
+                    reset_files=reset_opened_files,
+                )
+                return [message]
+            return await _call_telegram_with_retry_after(
+                lambda: query.message.reply_media_group(media=media, do_quote=False),
+                session_data,
+                reset_files=reset_opened_files,
+            )
+        except telegram.error.BadRequest as error:
+            if not _is_photo_format_refusal(error):
+                raise
+            # sendMediaGroup отклонен целиком, поэтому безопасно повторить этот
+            # блок по одному элементу и отправить только проблемное как файл.
+            result = []
+            progress_base = int(session_data.get("_delivered_items") or 0)
+            for index, image_path in enumerate(image_paths):
+                if is_cancelled(str(session_data.get("session_id") or "")):
+                    raise CancelledByUser("отправка фото отменена")
+                item_caption = caption if index == 0 else None
+                telegram_file = (
+                    image_path.resolve()
+                    if TELEGRAM_LOCAL_MODE
+                    else image_path.open("rb")
+                )
+                try:
+                    try:
+                        sent = await _call_telegram_with_retry_after(
+                            lambda: query.message.reply_photo(
+                                do_quote=False,
+                                photo=telegram_file,
+                                caption=item_caption,
+                                parse_mode=None,
+                            ),
+                            session_data,
+                            reset_files=lambda: telegram_file.seek(0)
+                            if not TELEGRAM_LOCAL_MODE
+                            else None,
+                        )
+                    except telegram.error.BadRequest as photo_error:
+                        if not _is_photo_format_refusal(photo_error):
+                            raise
+                        if not TELEGRAM_LOCAL_MODE:
+                            telegram_file.seek(0)
+                        sent = await _call_telegram_with_retry_after(
+                            lambda: query.message.reply_document(
+                                do_quote=False,
+                                document=telegram_file,
+                                caption=item_caption,
+                                parse_mode=None,
+                            ),
+                            session_data,
+                            reset_files=lambda: telegram_file.seek(0)
+                            if not TELEGRAM_LOCAL_MODE
+                            else None,
+                        )
+                    result.append(sent)
+                    session_data.setdefault("_first_media_message", sent)
+                    session_data["_confirmed_delivery_messages"] = (
+                        *session_data.get("_confirmed_delivery_messages", ()), sent
+                    )
+                    session_data["_delivered_items"] = progress_base + len(result)
+                    session_data["_delivery_progress"] = progress_base + len(result)
+                finally:
+                    if not TELEGRAM_LOCAL_MODE:
+                        telegram_file.close()
+            return result
+        finally:
+            session_data["_delivery_request_in_flight"] = False
+    finally:
+        for telegram_file in opened:
+            telegram_file.close()
+
+
+async def _send_mixed_media_group(
+    query: telegram.CallbackQuery,
+    items: list[dict],
+    caption: str | None,
+    session_data: dict,
+) -> list[telegram.Message]:
+    """Отправляет упорядоченный смешанный блок фото и видео Instagram."""
+    if is_cancelled(str(session_data.get("session_id") or "")):
+        raise CancelledByUser("отправка карусели отменена")
+
+    async def geometry_for(path: Path) -> dict:
+        try:
+            return await run_blocking(
+                get_video_geometry,
+                path,
+                description="get_instagram_carousel_video_geometry",
+                session_id=session_data.get("session_id"),
+            ) or {}
+        except Exception as error:  # noqa: BLE001
+            logger.warning("Не удалось измерить видео карусели %s: %s", path, error)
+            return {}
+
+    opened = []
+    media = []
+    normalized = []
+
+    def reset_opened_files() -> None:
+        for file_handle in opened:
+            file_handle.seek(0)
+
+    try:
+        for item in items:
+            kind = item.get("kind")
+            path = Path(item["path"])
+            if kind not in {"photo", "video"} or not _file_ready_to_send(path):
+                raise FileNotFoundError(str(path))
+            file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
+            if not TELEGRAM_LOCAL_MODE:
+                opened.append(file_input)
+            normalized.append((kind, path))
+            item_caption = caption if not media else None
+            if kind == "video":
+                geometry = await geometry_for(path)
+                media_geometry = dict(geometry)
+                if media_geometry.get("duration") is not None:
+                    media_geometry["duration"] = timedelta(
+                        seconds=int(media_geometry["duration"])
+                    )
+                media.append(
+                    InputMediaVideo(
+                        media=(file_input if TELEGRAM_LOCAL_MODE else telegram.InputFile(
+                            file_input, attach=True, read_file_handle=False
+                        )),
+                        caption=item_caption,
+                        parse_mode=None,
+                        supports_streaming=True,
+                        **media_geometry,
+                    )
+                )
+            else:
+                media.append(
+                    InputMediaPhoto(
+                        media=(file_input if TELEGRAM_LOCAL_MODE else telegram.InputFile(
+                            file_input, attach=True, read_file_handle=False
+                        )),
+                        caption=item_caption,
+                        parse_mode=None,
+                    )
+                )
+
+        session_data["_delivery_request_in_flight"] = True
+        try:
+            if len(media) > 1:
+                return await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_media_group(media=media, do_quote=False),
+                    session_data,
+                    reset_files=reset_opened_files,
+                )
+            kind, _path = normalized[0]
+            file_input = media[0].media
+            if kind == "video":
+                return [
+                    await _call_telegram_with_retry_after(
+                        lambda: query.message.reply_video(
+                            do_quote=False,
+                            video=file_input,
+                            caption=caption,
+                            parse_mode=None,
+                            supports_streaming=True,
+                            **{
+                                key: value
+                                for key, value in media[0].to_dict().items()
+                                if key in {"width", "height", "duration"} and value
+                            },
+                        ),
+                        session_data,
+                        reset_files=reset_opened_files,
+                    )
+                ]
+            return [
+                await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_photo(
+                        do_quote=False,
+                        photo=file_input,
+                        caption=caption,
+                        parse_mode=None,
+                    ),
+                    session_data,
+                    reset_files=reset_opened_files,
+                )
+            ]
+        except telegram.error.BadRequest as error:
+            if not any(item.get("kind") == "photo" for item in items) or not _is_photo_format_refusal(error):
+                raise
+            results = []
+            progress_base = int(session_data.get("_delivered_items") or 0)
+            for index, (kind, path) in enumerate(normalized):
+                if is_cancelled(str(session_data.get("session_id") or "")):
+                    raise CancelledByUser("отправка карусели отменена")
+                item_caption = caption if index == 0 else None
+                if kind == "video":
+                    geometry = await geometry_for(path)
+                    file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
+                    try:
+                        sent = await _call_telegram_with_retry_after(
+                            lambda: query.message.reply_video(
+                                do_quote=False,
+                                video=file_input,
+                                caption=item_caption,
+                                parse_mode=None,
+                                supports_streaming=True,
+                                **geometry,
+                            ),
+                            session_data,
+                            reset_files=lambda: file_input.seek(0)
+                            if not TELEGRAM_LOCAL_MODE
+                            else None,
+                        )
+                    finally:
+                        if not TELEGRAM_LOCAL_MODE:
+                            file_input.close()
+                else:
+                    file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
+                    try:
+                        try:
+                            sent = await _call_telegram_with_retry_after(
+                                lambda: query.message.reply_photo(
+                                    do_quote=False,
+                                    photo=file_input,
+                                    caption=item_caption,
+                                    parse_mode=None,
+                                ),
+                                session_data,
+                                reset_files=lambda: file_input.seek(0)
+                                if not TELEGRAM_LOCAL_MODE
+                                else None,
+                            )
+                        except telegram.error.BadRequest as photo_error:
+                            if not _is_photo_format_refusal(photo_error):
+                                raise
+                            if not TELEGRAM_LOCAL_MODE:
+                                file_input.seek(0)
+                            sent = await _call_telegram_with_retry_after(
+                                lambda: query.message.reply_document(
+                                    do_quote=False,
+                                    document=file_input,
+                                    caption=item_caption,
+                                    parse_mode=None,
+                                ),
+                                session_data,
+                                reset_files=lambda: file_input.seek(0)
+                                if not TELEGRAM_LOCAL_MODE
+                                else None,
+                            )
+                    finally:
+                        if not TELEGRAM_LOCAL_MODE:
+                            file_input.close()
+                results.append(sent)
+                session_data.setdefault("_first_media_message", sent)
+                session_data["_confirmed_delivery_messages"] = (
+                    *session_data.get("_confirmed_delivery_messages", ()), sent
+                )
+                session_data["_delivered_items"] = progress_base + len(results)
+                session_data["_delivery_progress"] = progress_base + len(results)
+            return results
+        finally:
+            session_data["_delivery_request_in_flight"] = False
+    finally:
+        for file_input in opened:
+            file_input.close()
 
 
 async def _deliver_plan(
@@ -1496,19 +2309,35 @@ async def _deliver_plan(
     if not plan:
         return False
 
-    delivered = await _deliver_by_url(
+    outcome = await _deliver_by_url(
         query,
         plan,
         session_data["url"],
         session_data.get("platform", "bot"),
         cache_format_id,
         session_data.get("video_info"),
+        session_data,
     )
-    if not delivered:
+    if outcome.state == "unknown":
+        logger.warning(
+            "Неизвестный исход URL-видео: platform=%s session=%s error=%s",
+            session_data.get("platform", "social"),
+            session_data.get("session_id", "unknown"),
+            type(outcome.error).__name__ if outcome.error else "unknown",
+        )
+        await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN)
+        await _cleanup_user_session(query.from_user.id, context, session_token)
+        return True
+    if outcome.state != "delivered":
         return False
 
     await _record_delivery(query.from_user.id, session_data)
-    await query.edit_message_text(FILE_SENT)
+    await _edit_delivery_status(
+        query,
+        DESCRIPTION_SEND_FAILED
+        if session_data.get("_description_delivery_failed")
+        else FILE_SENT
+    )
     await _cleanup_user_session(query.from_user.id, context, session_token)
     return True
 
@@ -1788,7 +2617,7 @@ async def process_url(
                 )
         except (yt_dlp.utils.DownloadError, yt_dlp.cookies.CookieLoadError) as e_cookie:
             error_code = _make_error_code(
-                "youtube", _classify_internal_error_category("youtube", str(e_cookie))
+                "youtube", _classify_internal_error_category("youtube", e_cookie)
             )
             _schedule_platform_failure_log(
                 platform="youtube",
@@ -1799,7 +2628,7 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("youtube", error_code, str(e_cookie))
+                _build_public_error_message("youtube", error_code, e_cookie)
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -1807,7 +2636,7 @@ async def process_url(
             if "слишком длинное" in str(e):
                 await processing_message.edit_text(TOO_LONG_VIDEO_MESSAGE)
             else:
-                error_code = _make_error_code("youtube", "DATA")
+                error_code = _make_error_code_for_exception("youtube", e)
                 _schedule_platform_failure_log(
                     platform="youtube",
                     stage="process_url_data",
@@ -1821,8 +2650,12 @@ async def process_url(
                 )
             if session_id:
                 _cleanup_session_when_idle(session_id)
-        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-            error_code = _make_error_code("youtube", "TIMEOUT")
+        except asyncio.CancelledError:
+            if session_id:
+                _cleanup_session_when_idle(session_id)
+            raise
+        except asyncio.TimeoutError as e:
+            error_code = _make_error_code_for_exception("youtube", e)
             _schedule_platform_failure_log(
                 platform="youtube",
                 stage="process_url_timeout",
@@ -1837,7 +2670,7 @@ async def process_url(
             if session_id:
                 _cleanup_session_when_idle(session_id)
         except Exception as e:
-            error_code = _make_error_code("youtube", "UNKNOWN")
+            error_code = _make_error_code("youtube", _classify_internal_error_category("youtube", e))
             _schedule_platform_failure_log(
                 platform="youtube",
                 stage="process_url_unexpected",
@@ -1872,7 +2705,7 @@ async def process_url(
             )
         except Exception as e:
             error_code = _make_error_code(
-                "tiktok", _classify_internal_error_category("tiktok", str(e))
+                "tiktok", _classify_internal_error_category("tiktok", e)
             )
             _schedule_platform_failure_log(
                 platform="tiktok",
@@ -1883,7 +2716,7 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("tiktok", error_code, str(e))
+                _build_public_error_message("tiktok", error_code, e)
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -1923,7 +2756,7 @@ async def process_url(
             )
         except Exception as e:
             error_code = _make_error_code(
-                "instagram", _classify_internal_error_category("instagram", str(e))
+                "instagram", _classify_internal_error_category("instagram", e)
             )
             _schedule_platform_failure_log(
                 platform="instagram",
@@ -1934,7 +2767,7 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("instagram", error_code, str(e))
+                _build_public_error_message("instagram", error_code, e)
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -1958,7 +2791,7 @@ async def process_url(
             )
         except Exception as e:
             error_code = _make_error_code(
-                "rutube", _classify_internal_error_category("rutube", str(e))
+                "rutube", _classify_internal_error_category("rutube", e)
             )
             _schedule_platform_failure_log(
                 platform="rutube",
@@ -1969,7 +2802,7 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("rutube", error_code, str(e))
+                _build_public_error_message("rutube", error_code, e)
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2003,7 +2836,7 @@ async def process_url(
             await _cleanup_user_session(user_id, context, session_token)
         except Exception as e:
             error_code = _make_error_code(
-                "vk", _classify_internal_error_category("vk", str(e))
+                "vk", _classify_internal_error_category("vk", e)
             )
             _schedule_platform_failure_log(
                 platform="vk",
@@ -2014,7 +2847,7 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("vk", error_code, str(e))
+                _build_public_error_message("vk", error_code, e)
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2045,7 +2878,7 @@ async def _handle_main_callback(
     cancel_markup = _build_cancel_markup(session_token)
 
     match action:
-        case "tiktok_download":
+        case "tiktok_download" | "tiktok_download_desc":
             is_photo_post = bool(
                 session_data.get("video_info", {}).get("_nuvio_tiktok_photo_post")
             )
@@ -2059,29 +2892,37 @@ async def _handle_main_callback(
             cache_key = (
                 None
                 if is_photo_post
-                else _cache_format_id_for_main_action("tiktok", "tiktok_download")
+                else _cache_format_id_for_main_action("tiktok", action)
             )
             if cache_key:
                 cached = telegram_cache.get(url, format_id=cache_key)
                 if cached:
                     try:
-                        await query.message.reply_video(
-                            video=cached.file_id,
-                            caption=None,
-                            supports_streaming=True,
+                        await _deliver_social_cached_video(
+                            query, cached.file_id, session_data
                         )
                         logger.info(
                             "TikTok видео доставлено из кэша (key=%s)", cache_key
                         )
                         await _record_delivery(query.from_user.id, session_data)
-                        await query.edit_message_text(FILE_SENT)
+                        await _edit_delivery_status(
+                            query,
+                            DESCRIPTION_SEND_FAILED
+                            if session_data.get("_description_delivery_failed")
+                            else FILE_SENT
+                        )
                         await _cleanup_user_session(user_id, context, session_token)
                         return
                     except telegram.error.BadRequest as e:
+                        if not _is_stale_file_id(e):
+                            raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
                         telegram_cache.delete_by_file_id(cached.file_id)
+                    except (telegram.error.NetworkError, telegram.error.TimedOut):
+                        session_data["_delivery_outcome_unknown"] = True
+                        raise
 
-            await safe_edit_message_text(
+            await _edit_delivery_status(
                 query, DOWNLOADING_MESSAGE, reply_markup=cancel_markup
             )
             from utils.tiktok_instagram_utils import (
@@ -2126,12 +2967,12 @@ async def _handle_main_callback(
                     session_data,
                     context,
                     cache_format_id=_cache_format_id_for_main_action(
-                        "tiktok", "tiktok_download"
+                        "tiktok", action
                     ),
                 )
             except Exception as e:
                 error_code = _make_error_code(
-                    "tiktok", _classify_internal_error_category("tiktok", str(e))
+                    "tiktok", _classify_internal_error_category("tiktok", e)
                 )
                 _schedule_platform_failure_log(
                     platform="tiktok",
@@ -2142,7 +2983,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("tiktok", error_code, str(e))
+                    _build_public_error_message("tiktok", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2155,7 +2996,7 @@ async def _handle_main_callback(
                 await _cleanup_user_session(user_id, context, session_token)
                 return
 
-            await safe_edit_message_text(
+            await _edit_delivery_status(
                 query, DOWNLOADING_AUDIO_MESSAGE, reply_markup=cancel_markup
             )
             from utils.tiktok_instagram_utils import (
@@ -2204,7 +3045,7 @@ async def _handle_main_callback(
                 await _cleanup_user_session(user_id, context, session_token)
             except Exception as e:
                 error_code = _make_error_code(
-                    "tiktok", _classify_internal_error_category("tiktok", str(e))
+                    "tiktok", _classify_internal_error_category("tiktok", e)
                 )
                 _schedule_platform_failure_log(
                     platform="tiktok",
@@ -2215,12 +3056,23 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("tiktok", error_code, str(e))
+                    _build_public_error_message("tiktok", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
 
-        case "instagram_download":
+        case "instagram_download" | "instagram_download_desc":
+            if session_data.get("video_info", {}).get(
+                "_nuvio_instagram_carousel_incomplete"
+            ) or (
+                session_data.get("video_info", {}).get("_nuvio_instagram_mixed_post")
+                and not session_data.get("video_info", {}).get(
+                    "_nuvio_instagram_carousel_complete"
+                )
+            ):
+                await query.edit_message_text(INSTAGRAM_CAROUSEL_INCOMPLETE)
+                await _cleanup_user_session(user_id, context, session_token)
+                return
             is_photo_post = bool(
                 session_data.get("video_info", {}).get("_nuvio_instagram_photo_post")
             )
@@ -2234,29 +3086,37 @@ async def _handle_main_callback(
             cache_key = (
                 None
                 if is_photo_post
-                else _cache_format_id_for_main_action("instagram", "instagram_download")
+                else _cache_format_id_for_main_action("instagram", action)
             )
             if cache_key:
                 cached = telegram_cache.get(url, format_id=cache_key)
                 if cached:
                     try:
-                        await query.message.reply_video(
-                            video=cached.file_id,
-                            caption=None,
-                            supports_streaming=True,
+                        await _deliver_social_cached_video(
+                            query, cached.file_id, session_data
                         )
                         logger.info(
                             "Instagram видео доставлено из кэша (key=%s)", cache_key
                         )
                         await _record_delivery(query.from_user.id, session_data)
-                        await query.edit_message_text(FILE_SENT)
+                        await _edit_delivery_status(
+                            query,
+                            DESCRIPTION_SEND_FAILED
+                            if session_data.get("_description_delivery_failed")
+                            else FILE_SENT
+                        )
                         await _cleanup_user_session(user_id, context, session_token)
                         return
                     except telegram.error.BadRequest as e:
+                        if not _is_stale_file_id(e):
+                            raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
                         telegram_cache.delete_by_file_id(cached.file_id)
+                    except (telegram.error.NetworkError, telegram.error.TimedOut):
+                        session_data["_delivery_outcome_unknown"] = True
+                        raise
 
-            await safe_edit_message_text(
+            await _edit_delivery_status(
                 query, DOWNLOADING_MESSAGE, reply_markup=cancel_markup
             )
             from utils.tiktok_instagram_utils import (
@@ -2297,7 +3157,7 @@ async def _handle_main_callback(
                     session_data,
                     context,
                     cache_format_id=_cache_format_id_for_main_action(
-                        "instagram", "instagram_download"
+                        "instagram", action
                     ),
                 )
             except Exception as e:
@@ -2307,7 +3167,7 @@ async def _handle_main_callback(
                     )
                     return
                 error_code = _make_error_code(
-                    "instagram", _classify_internal_error_category("instagram", str(e))
+                    "instagram", _classify_internal_error_category("instagram", e)
                 )
                 _schedule_platform_failure_log(
                     platform="instagram",
@@ -2318,7 +3178,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("instagram", error_code, str(e))
+                    _build_public_error_message("instagram", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2333,7 +3193,7 @@ async def _handle_main_callback(
                 await _cleanup_user_session(user_id, context, session_token)
                 return
 
-            await safe_edit_message_text(
+            await _edit_delivery_status(
                 query, DOWNLOADING_AUDIO_MESSAGE, reply_markup=cancel_markup
             )
             from utils.tiktok_instagram_utils import download_instagram_audio
@@ -2368,7 +3228,7 @@ async def _handle_main_callback(
                 await _cleanup_user_session(user_id, context, session_token)
             except Exception as e:
                 error_code = _make_error_code(
-                    "instagram", _classify_internal_error_category("instagram", str(e))
+                    "instagram", _classify_internal_error_category("instagram", e)
                 )
                 _schedule_platform_failure_log(
                     platform="instagram",
@@ -2379,7 +3239,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("instagram", error_code, str(e))
+                    _build_public_error_message("instagram", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2433,7 +3293,7 @@ async def _handle_main_callback(
                 )
             except Exception as e:
                 error_code = _make_error_code(
-                    "rutube", _classify_internal_error_category("rutube", str(e))
+                    "rutube", _classify_internal_error_category("rutube", e)
                 )
                 _schedule_platform_failure_log(
                     platform="rutube",
@@ -2444,7 +3304,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("rutube", error_code, str(e))
+                    _build_public_error_message("rutube", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2482,7 +3342,7 @@ async def _handle_main_callback(
                 )
             except Exception as e:
                 error_code = _make_error_code(
-                    "rutube", _classify_internal_error_category("rutube", str(e))
+                    "rutube", _classify_internal_error_category("rutube", e)
                 )
                 _schedule_platform_failure_log(
                     platform="rutube",
@@ -2493,7 +3353,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("rutube", error_code, str(e))
+                    _build_public_error_message("rutube", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2555,7 +3415,7 @@ async def _handle_main_callback(
                 )
             except Exception as e:
                 error_code = _make_error_code(
-                    "vk", _classify_internal_error_category("vk", str(e))
+                    "vk", _classify_internal_error_category("vk", e)
                 )
                 _schedule_platform_failure_log(
                     platform="vk",
@@ -2566,7 +3426,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("vk", error_code, str(e))
+                    _build_public_error_message("vk", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2604,7 +3464,7 @@ async def _handle_main_callback(
                 )
             except Exception as e:
                 error_code = _make_error_code(
-                    "vk", _classify_internal_error_category("vk", str(e))
+                    "vk", _classify_internal_error_category("vk", e)
                 )
                 _schedule_platform_failure_log(
                     platform="vk",
@@ -2615,7 +3475,7 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("vk", error_code, str(e))
+                    _build_public_error_message("vk", error_code, e)
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2780,7 +3640,7 @@ async def _handle_main_callback(
                         url, tg_video["format_id"], session_id, "combined"
                     )
                 except Exception as e:
-                    error_code = _youtube_error_code(str(e))
+                    error_code = _youtube_error_code(e)
                     logger.warning(
                         "YT_DL_STAGE_FAIL code=%s stage=tg_video_manual_combined format_id=%s url=%s error=%s",
                         error_code,
@@ -2912,7 +3772,13 @@ async def _handle_main_callback(
             # Отмена обязана останавливать саму работу, а не прятать результат:
             # признак читает progress hook yt-dlp и прерывает загрузку.
             request_cancellation(session_id)
-            await safe_edit_message_text(query, CANCELLED_MESSAGE)
+            if session_data.get("_delivery_request_in_flight"):
+                cancel_text = CANCEL_IN_FLIGHT_MESSAGE
+            elif session_data.get("_delivery_progress", 0):
+                cancel_text = PARTIAL_CANCELLED
+            else:
+                cancel_text = CANCELLED_MESSAGE
+            await safe_edit_message_text(query, cancel_text)
             await _cleanup_user_session(user_id, context, session_token)
             return
 
@@ -3092,7 +3958,7 @@ async def _handle_format_callback(
     except Exception as e:
         e.add_note(f"user_id={user_id}, url={url}, session_id={session_id}")
         error_code = _make_error_code(
-            "youtube", _classify_internal_error_category("youtube", str(e))
+            "youtube", _classify_internal_error_category("youtube", e)
         )
         _schedule_platform_failure_log(
             platform="youtube",
@@ -3103,7 +3969,7 @@ async def _handle_format_callback(
             session_id=session_id,
         )
         await query.edit_message_text(
-            _build_public_error_message("youtube", error_code, str(e))
+            _build_public_error_message("youtube", error_code, e)
         )
         await _cleanup_user_session(user_id, context, session_token)
 
@@ -3130,23 +3996,76 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     logger.info(f"Получен колбэк от пользователя {user_id}: {query.data}")
 
+    active_session: dict | None = None
     try:
         event = CallbackEvent.parse(query.data)
         if event and event.scope == "main" and event.session_token:
             session_token = event.session_token
+            locked_download = event.action in {
+                "tiktok_download",
+                "tiktok_download_desc",
+                "instagram_download",
+                "instagram_download_desc",
+            }
+            active_session = _get_session(context, session_token)
+            if (
+                active_session
+                and active_session.get("_delivery_active")
+                and event.action != "cancel"
+            ):
+                return
+            if (
+                active_session
+                and active_session.get("_delivered_items")
+                and event.action not in {
+                    "cancel", "back", active_session.get("_delivery_action")
+                }
+            ):
+                await safe_edit_message_text(query, PHOTO_POST_PARTIAL)
+                return
+            delivery_session_id = None
+            if locked_download and active_session:
+                platform = active_session.get("platform")
+                if not event.action.startswith(f"{platform}_"):
+                    await safe_edit_message_text(query, SESSION_EXPIRED)
+                    return
+                if active_session.get("_delivery_outcome_unknown"):
+                    await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
+                    return
+                has_progress = bool(active_session.get("_delivered_items"))
+                active_session["_delivery_active"] = True
+                active_session["_delivery_action"] = event.action
+                active_session["_include_description"] = event.action.endswith("_desc")
+                if not has_progress:
+                    active_session.pop("_description_delivery_failed", None)
+                    active_session.pop("_description_attempted", None)
+                active_session["_delivery_progress"] = int(
+                    active_session.get("_delivered_items") or 0
+                )
+                active_session["_delivery_request_in_flight"] = False
+                delivery_session_id = active_session.get("session_id")
+                if delivery_session_id:
+                    _delivery_started(delivery_session_id)
             # Скачивание и отправка идут секунды: пока они идут, в шапке чата
             # держится отметка активности — иначе пользователь смотрит в
             # неподвижный текст и не понимает, жив ли бот.
-            async with _pulsing_chat_action(
-                query.message.chat, _chat_action_for(event.action), expensive
-            ):
-                await _handle_main_callback(
-                    query,
-                    context,
-                    user_id,
-                    session_token,
-                    event.action,
-                )
+            try:
+                async with _pulsing_chat_action(
+                    query.message.chat, _chat_action_for(event.action), expensive
+                ):
+                    await _handle_main_callback(
+                        query,
+                        context,
+                        user_id,
+                        session_token,
+                        event.action,
+                    )
+            finally:
+                if locked_download and active_session:
+                    active_session.pop("_delivery_active", None)
+                    active_session.pop("_include_description", None)
+                    if delivery_session_id:
+                        _delivery_finished(delivery_session_id)
         elif (
             event
             and event.scope == "format"
@@ -3198,7 +4117,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Ошибка в button_callback: {e}", exc_info=True)
         error_msg = str(e)
 
-        if "Can't parse entities" in error_msg:
+        if active_session and active_session.get("_delivery_outcome_unknown"):
+            await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
+        elif "Can't parse entities" in error_msg:
             try:
                 await safe_edit_message_text(
                     query,
@@ -3214,7 +4135,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 await safe_edit_message_text(query, ERROR_FALLBACK)
         else:
-            error_code = _make_error_code("bot", "CALLBACK")
+            error_code = _make_error_code_for_exception("bot", e)
             _schedule_platform_failure_log(
                 platform="bot",
                 stage="button_callback",
@@ -3276,7 +4197,7 @@ async def download_content(
         e.add_note(
             f"url={url}, format_id={format_id}, session_id={session_id}, content_type={content_type}"
         )
-        error_code = _youtube_error_code(str(e))
+        error_code = _youtube_error_code(e)
         logger.error(
             "YT_DL_FAIL code=%s stage=download_content content_type=%s format_id=%s url=%s error=%s",
             error_code,
@@ -3304,7 +4225,7 @@ async def send_file(
     url = session_data.get("url")
     success = False
     try:
-        await safe_edit_message_text(query, FILE_PREPARING)
+        await _edit_delivery_status(query, FILE_PREPARING)
         success = await send_single_file(
             query,
             file_path,
@@ -3314,9 +4235,14 @@ async def send_file(
         )
         if success:
             await _record_delivery(user_id, session_data)
-            await safe_edit_message_text(query, FILE_SENT)
+            await _edit_delivery_status(
+                query,
+                DESCRIPTION_SEND_FAILED
+                if session_data.get("_description_delivery_failed")
+                else FILE_SENT,
+            )
     except (FileNotFoundError, PermissionError) as e:
-        error_code = _make_error_code("file", "ACCESS")
+        error_code = _make_error_code_for_exception(platform, e, prefix_platform="file")
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_file_access",
@@ -3325,13 +4251,13 @@ async def send_file(
             exc=e,
             session_id=session_data.get("session_id"),
         )
-        await safe_edit_message_text(
+        await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
     except telegram.error.NetworkError as e:
-        error_code = _make_error_code("telegram", "NETWORK")
+        error_code = _make_error_code_for_exception(platform, e, prefix_platform="telegram")
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_file_network",
@@ -3340,13 +4266,13 @@ async def send_file(
             exc=e,
             session_id=session_data.get("session_id"),
         )
-        await safe_edit_message_text(
+        await _edit_delivery_status(
             query,
             USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
     except telegram.error.TelegramError as e:
-        error_code = _make_error_code("telegram", "API")
+        error_code = _make_error_code_for_exception(platform, e, prefix_platform="telegram")
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_file_telegram",
@@ -3355,13 +4281,13 @@ async def send_file(
             exc=e,
             session_id=session_data.get("session_id"),
         )
-        await safe_edit_message_text(
+        await _edit_delivery_status(
             query,
             USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
     except Exception as e:
-        error_code = _make_error_code("bot", "SEND")
+        error_code = _make_error_code_for_exception(platform, e, prefix_platform="bot")
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_file_unexpected",
@@ -3370,13 +4296,13 @@ async def send_file(
             exc=e,
             session_id=session_data.get("session_id"),
         )
-        await safe_edit_message_text(
+        await _edit_delivery_status(
             query,
             USER_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
     finally:
-        if success:
+        if success or session_data.get("_delivery_outcome_unknown"):
             await _cleanup_user_session(user_id, context, session_token)
         elif session_id := session_data.get("session_id"):
             _cleanup_session_when_idle(session_id)
@@ -3388,7 +4314,7 @@ async def _send_photo_post_assets(
     session_data: dict,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Отправляет фото-пост по одной картинке и затем отдельным аудио."""
+    """Отправляет фото-пост последовательными альбомами и отдельным аудио."""
     user_id = query.from_user.id
     url = session_data["url"]
     session_id = session_data["session_id"]
@@ -3406,10 +4332,8 @@ async def _send_photo_post_assets(
             download_instagram_photo_post_assets as download_photo_post_assets,
         )
 
-        downloading_photos_message = "⏳ Скачиваю фотографии..."
-        empty_images_message = (
-            "Не удалось получить изображения для Instagram фото-поста."
-        )
+        downloading_photos_message = DOWNLOADING_PHOTOS_MESSAGE
+        empty_images_message = ERROR_INSTAGRAM_NO_PHOTOS
         platform_for_errors = "instagram"
         images_key = "_nuvio_instagram_images"
         audio_key = "_nuvio_instagram_audio_url"
@@ -3419,70 +4343,191 @@ async def _send_photo_post_assets(
             download_tiktok_photo_post_assets as download_photo_post_assets,
         )
 
-        downloading_photos_message = "⏳ Скачиваю фотографии..."
-        empty_images_message = "Не удалось получить изображения для TikTok фото-поста."
+        downloading_photos_message = DOWNLOADING_PHOTOS_MESSAGE
+        empty_images_message = ERROR_TIKTOK_NO_PHOTOS
         platform_for_errors = "tiktok"
         images_key = "_nuvio_tiktok_images"
         audio_key = "_nuvio_tiktok_audio_url"
         referer = "https://www.tiktok.com/"
 
     try:
-        await safe_edit_message_text(query, downloading_photos_message)
+        await _edit_delivery_status(
+            query, downloading_photos_message,
+            reply_markup=_build_cancel_markup(session_token) if session_token else None,
+        )
 
-        # Пост до 5 МБ на кадр Telegram забирает по ссылкам сам, и тогда диск не
-        # трогается вовсе. Решение принимается до первой отправки: доставить
-        # половину поста ссылками, а половину файлами нельзя.
+        # Прямая отправка сохраняет старый быстрый путь. Отказ URL в первой
+        # группе разрешает скачать весь пост; после частичной отправки скачивается
+        # весь набор, но пользователю отправляется только неподтвержденный остаток.
         from utils.tiktok_instagram_utils import resolve_photo_post_handoff
 
         video_info = session_data.get("video_info") or {}
-        photo_plan = await run_blocking(
-            resolve_photo_post_handoff,
-            list(video_info.get(images_key) or []),
-            video_info.get(audio_key),
-            referer,
-            description=f"resolve_{platform}_photo_post_handoff",
-            session_id=session_id,
-        )
-        if photo_plan and await _deliver_photo_post_by_url(query, photo_plan):
-            await _record_delivery(query.from_user.id, session_data)
-            await query.edit_message_text(FILE_SENT)
+        is_mixed = bool(video_info.get("_nuvio_instagram_mixed_post"))
+        if is_mixed and not video_info.get("_nuvio_instagram_carousel_complete"):
+            await _edit_delivery_status(query, INSTAGRAM_CAROUSEL_INCOMPLETE)
             await _cleanup_user_session(user_id, context, session_token)
             return
+        if not is_mixed and not session_data.get("_delivered_items"):
+            photo_plan = await run_blocking(
+                resolve_photo_post_handoff,
+                list(video_info.get(images_key) or []),
+                video_info.get(audio_key),
+                referer,
+                description=f"resolve_{platform}_photo_post_handoff",
+                session_id=session_id,
+            )
+            if photo_plan:
+                outcome = await _deliver_photo_post_by_url(
+                    query, photo_plan, session_data
+                )
+                session_data["_delivered_items"] = outcome.confirmed_items
+                session_data["_delivery_progress"] = outcome.confirmed_items
+                if outcome.messages:
+                    session_data["_confirmed_delivery_messages"] = outcome.messages
+                    session_data.setdefault(
+                        "_first_media_message", outcome.messages[0]
+                    )
+                if outcome.audio_delivered is not None:
+                    session_data["_audio_delivered"] = outcome.audio_delivered
+                if outcome.state == "unknown":
+                    logger.warning(
+                        "Неизвестный исход URL-отправки: platform=%s session=%s confirmed=%s error=%s",
+                        platform_for_errors,
+                        session_id,
+                        outcome.confirmed_items,
+                        type(outcome.error).__name__ if outcome.error else "unknown",
+                    )
+                    await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN)
+                    await _cleanup_user_session(user_id, context, session_token)
+                    return
+                if outcome.state == "delivered":
+                    await _record_delivery(query.from_user.id, session_data)
+                    await _edit_delivery_status(
+                        query,
+                        DESCRIPTION_SEND_FAILED
+                        if session_data.get("_description_delivery_failed")
+                        else FILE_SENT
+                    )
+                    await _cleanup_user_session(user_id, context, session_token)
+                    return
 
         assets = await run_blocking(
             download_photo_post_assets,
             url,
             session_id,
-            session_data.get("video_info"),
+            video_info,
             description=f"download_{platform}_photo_post_assets",
             session_id=session_id,
         )
+        asset_info = assets.get("info")
+        if isinstance(asset_info, dict):
+            video_info = asset_info
+            session_data["video_info"] = asset_info
+            is_mixed = bool(asset_info.get("_nuvio_instagram_mixed_post"))
         image_paths = list(assets.get("images") or [])
+        media_items = list(assets.get("items") or [])
         audio_path = assets.get("audio")
 
-        if not image_paths:
+        if not media_items:
+            media_items = [{"kind": "photo", "path": path} for path in image_paths]
+        if not media_items:
             raise Exception(empty_images_message)
 
-        for image_path in image_paths:
-            with open(image_path, "rb") as image_file:
-                try:
-                    await query.message.reply_photo(photo=image_file, caption=None)
-                except telegram.error.BadRequest:
-                    image_file.seek(0)
-                    await query.message.reply_document(
-                        document=image_file, caption=None
-                    )
+        delivered_items = int(session_data.get("_delivered_items") or 0)
+        expected_count = len(video_info.get(images_key) or [])
+        if is_mixed:
+            expected_count = len(video_info.get("_nuvio_instagram_carousel_items") or [])
+        if delivered_items and (
+            delivered_items > len(media_items)
+            or (expected_count and expected_count != len(media_items))
+        ):
+            raise RuntimeError("Состав публикации изменился после частичной отправки")
+        if delivered_items and not session_data.get("_first_media_message"):
+            raise RuntimeError("Нет подтверждения первого сообщения альбома")
 
-        if audio_path:
-            await safe_edit_message_text(query, DOWNLOADING_AUDIO_MESSAGE)
-            with open(audio_path, "rb") as audio_file:
-                await query.message.reply_audio(audio=audio_file, caption=None)
+        caption, description_chunks = description_delivery_plan(
+            _description_for_delivery(session_data)
+        )
+        pending_items = media_items[delivered_items:]
+        for block_index, group in enumerate(chunk_media(pending_items), start=1):
+            if is_cancelled(session_id):
+                raise CancelledByUser("отправка публикации отменена")
+            group_caption = caption if delivered_items == 0 else None
+            if is_mixed:
+                sent_messages = await _send_mixed_media_group(
+                    query, group, group_caption, session_data
+                )
+            else:
+                sent_messages = await _send_photo_file_group(
+                    query,
+                    [Path(item["path"]) for item in group],
+                    group_caption,
+                    session_data,
+                )
+            if not session_data.get("_first_media_message") and sent_messages:
+                session_data["_first_media_message"] = sent_messages[0]
+            delivered_items += len(group)
+            session_data["_delivered_items"] = delivered_items
+            session_data["_delivery_progress"] = delivered_items
+            logger.info(
+                "Медиа-блок доставлен: platform=%s session=%s block=%s transport=file items=%s",
+                platform_for_errors,
+                session_id,
+                block_index,
+                len(group),
+            )
+
+        if description_chunks and not session_data.get("_description_attempted"):
+            sent = await _send_description_chunks(
+                query,
+                description_chunks,
+                session_data.get("_first_media_message"),
+                session_data,
+            )
+            if sent:
+                session_data["_description_sent"] = True
+
+        if audio_path and not session_data.get("_audio_delivered"):
+            if is_cancelled(session_id):
+                raise CancelledByUser("отправка аудио отменена")
+            await _edit_delivery_status(
+                query, DOWNLOADING_AUDIO_MESSAGE,
+                reply_markup=_build_cancel_markup(session_token) if session_token else None,
+            )
+            audio_file = audio_path.resolve() if TELEGRAM_LOCAL_MODE else audio_path.open("rb")
+            try:
+                session_data["_delivery_request_in_flight"] = True
+                await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_audio(
+                        do_quote=False,
+                        audio=audio_file,
+                        caption=None,
+                        write_timeout=1800,
+                        read_timeout=1800,
+                    ),
+                    session_data,
+                    reset_files=lambda: audio_file.seek(0)
+                    if not TELEGRAM_LOCAL_MODE
+                    else None,
+                )
+            finally:
+                session_data["_delivery_request_in_flight"] = False
+                if not TELEGRAM_LOCAL_MODE:
+                    audio_file.close()
+            session_data["_audio_delivered"] = True
 
         await _record_delivery(query.from_user.id, session_data)
-        await query.edit_message_text(FILE_SENT)
+        await _edit_delivery_status(
+            query,
+            DESCRIPTION_SEND_FAILED
+            if session_data.get("_description_delivery_failed")
+            else FILE_SENT
+        )
         await _cleanup_user_session(user_id, context, session_token)
     except (FileNotFoundError, PermissionError) as e:
-        error_code = _make_error_code("file", "ACCESS")
+        error_code = _make_error_code_for_exception(
+            platform_for_errors, e, prefix_platform="file"
+        )
         _schedule_platform_failure_log(
             platform=platform_for_errors,
             stage="send_photo_post_access",
@@ -3491,28 +4536,16 @@ async def _send_photo_post_assets(
             exc=e,
             session_id=session_id,
         )
-        await query.edit_message_text(
+        await _edit_delivery_status(
+            query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
         _cleanup_session_when_idle(session_id)
-    except telegram.error.NetworkError as e:
-        error_code = _make_error_code("telegram", "NETWORK")
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_network",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
+    except telegram.error.BadRequest as e:
+        error_code = _make_error_code_for_exception(
+            platform_for_errors, e, prefix_platform="telegram"
         )
-        await query.edit_message_text(
-            USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
-        )
-        _cleanup_session_when_idle(session_id)
-    except telegram.error.TelegramError as e:
-        error_code = _make_error_code("telegram", "API")
         _schedule_platform_failure_log(
             platform=platform_for_errors,
             stage="send_photo_post_telegram",
@@ -3521,15 +4554,53 @@ async def _send_photo_post_assets(
             exc=e,
             session_id=session_id,
         )
-        await query.edit_message_text(
-            USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
+        await _edit_delivery_status(
+            query,
+            PHOTO_POST_PARTIAL
+            if session_data.get("_delivery_progress")
+            else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
+            reply_markup=back_markup,
+        )
+        _cleanup_session_when_idle(session_id)
+    except telegram.error.NetworkError as e:
+        session_data["_delivery_outcome_unknown"] = True
+        error_code = _make_error_code_for_exception(
+            platform_for_errors, e, prefix_platform="telegram"
+        )
+        _schedule_platform_failure_log(
+            platform=platform_for_errors,
+            stage="send_photo_post_network",
+            url=url,
+            error_code=error_code,
+            exc=e,
+            session_id=session_id,
+        )
+        await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN)
+        await _cleanup_user_session(user_id, context, session_token)
+    except telegram.error.TelegramError as e:
+        error_code = _make_error_code_for_exception(
+            platform_for_errors, e, prefix_platform="telegram"
+        )
+        _schedule_platform_failure_log(
+            platform=platform_for_errors,
+            stage="send_photo_post_telegram",
+            url=url,
+            error_code=error_code,
+            exc=e,
+            session_id=session_id,
+        )
+        await _edit_delivery_status(
+            query,
+            PHOTO_POST_PARTIAL
+            if session_data.get("_delivery_progress")
+            else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
         )
         _cleanup_session_when_idle(session_id)
     except Exception as e:
         error_code = _make_error_code(
             platform_for_errors,
-            _classify_internal_error_category(platform_for_errors, str(e)),
+            _classify_internal_error_category(platform_for_errors, e),
         )
         _schedule_platform_failure_log(
             platform=platform_for_errors,
@@ -3539,8 +4610,11 @@ async def _send_photo_post_assets(
             exc=e,
             session_id=session_id,
         )
-        await query.edit_message_text(
-            _build_public_error_message(platform_for_errors, error_code, str(e)),
+        await _edit_delivery_status(
+            query,
+            PHOTO_POST_PARTIAL
+            if session_data.get("_delivery_progress")
+            else _build_public_error_message(platform_for_errors, error_code, e),
             reply_markup=back_markup,
         )
         _cleanup_session_when_idle(session_id)
@@ -3580,16 +4654,19 @@ async def send_single_file(
 
     # Повторять нечего: файла нет, и от третьей попытки он не появится.
     if not _file_ready_to_send(file_path):
-        error_code = _make_error_code("file", "ACCESS")
+        missing_file = FileNotFoundError(str(file_path))
+        error_code = _make_error_code_for_exception(
+            platform, missing_file, prefix_platform="file"
+        )
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_single_file_missing",
             url=url,
             error_code=error_code,
-            exc=FileNotFoundError(str(file_path)),
+            exc=missing_file,
             session_id=session_data.get("session_id"),
         )
-        await safe_edit_message_text(
+        await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
             reply_markup=back_markup,
@@ -3622,7 +4699,8 @@ async def send_single_file(
                 file_path,
             )
 
-    for attempt in range(1, max_retries + 1):
+    retry_limit = 1 if platform in {"tiktok", "instagram"} else max_retries
+    for attempt in range(1, retry_limit + 1):
         try:
             message = None
             telegram_file = (
@@ -3633,31 +4711,61 @@ async def send_single_file(
 
             try:
                 if media_kind == "video":
-                    message = await query.message.reply_video(
-                        video=telegram_file,
-                        caption=None,
-                        supports_streaming=True,
-                        write_timeout=1800,
-                        read_timeout=1800,
-                        **video_kwargs,
+                    message = await _call_telegram_with_retry_after(
+                        lambda: query.message.reply_video(
+                            do_quote=False if platform in {"tiktok", "instagram"} else None,
+                            video=telegram_file,
+                            caption=description_delivery_plan(
+                                _description_for_delivery(session_data)
+                            )[0],
+                            parse_mode=None,
+                            supports_streaming=True,
+                            write_timeout=1800,
+                            read_timeout=1800,
+                            **video_kwargs,
+                        ),
+                        session_data,
+                        reset_files=lambda: telegram_file.seek(0)
+                        if not TELEGRAM_LOCAL_MODE
+                        else None,
                     )
                 elif media_kind == "audio":
-                    message = await query.message.reply_audio(
-                        audio=telegram_file,
-                        caption=None,
-                        write_timeout=1800,
-                        read_timeout=1800,
+                    message = await _call_telegram_with_retry_after(
+                        lambda: query.message.reply_audio(
+                            do_quote=False if platform in {"tiktok", "instagram"} else None,
+                            audio=telegram_file,
+                            caption=None,
+                            write_timeout=1800,
+                            read_timeout=1800,
+                        ),
+                        session_data,
+                        reset_files=lambda: telegram_file.seek(0)
+                        if not TELEGRAM_LOCAL_MODE
+                        else None,
                     )
                 else:
-                    message = await query.message.reply_document(
-                        document=telegram_file,
-                        caption=None,
-                        write_timeout=1800,
-                        read_timeout=1800,
+                    message = await _call_telegram_with_retry_after(
+                        lambda: query.message.reply_document(
+                            do_quote=False if platform in {"tiktok", "instagram"} else None,
+                            document=telegram_file,
+                            caption=None,
+                            write_timeout=1800,
+                            read_timeout=1800,
+                        ),
+                        session_data,
+                        reset_files=lambda: telegram_file.seek(0)
+                        if not TELEGRAM_LOCAL_MODE
+                        else None,
                     )
             finally:
                 if not TELEGRAM_LOCAL_MODE:
                     telegram_file.close()
+
+            if message and platform in {"tiktok", "instagram"}:
+                session_data["_first_media_message"] = message
+                session_data["_delivered_items"] = 1
+                session_data["_delivery_progress"] = 1
+                session_data["_confirmed_delivery_messages"] = (message,)
 
             # Кэширование file_id для видео, аудио и документов
             if message and url and cache_format_id:
@@ -3670,15 +4778,19 @@ async def send_single_file(
                     session_data.get("session_id"),
                 )
 
+            if message and media_kind == "video":
+                await _send_description_chunks(
+                    query,
+                    _description_chunks_for_delivery(session_data),
+                    message,
+                    session_data,
+                )
+
             return True
-        except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
-            last_error = e
-            logger.warning(f"Попытка {attempt}/{max_retries} неудачна: {e}")
-            if attempt < max_retries:
-                await asyncio.sleep(2**attempt)
-            continue
         except (FileNotFoundError, PermissionError) as e:
-            error_code = _make_error_code("file", "ACCESS")
+            error_code = _make_error_code_for_exception(
+                platform, e, prefix_platform="file"
+            )
             _schedule_platform_failure_log(
                 platform=platform,
                 stage="send_single_file_access",
@@ -3687,25 +4799,45 @@ async def send_single_file(
                 exc=e,
                 session_id=session_data.get("session_id"),
             )
-            await query.edit_message_text(
+            await _edit_delivery_status(
+                query,
                 USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
                 reply_markup=back_markup,
             )
             return False
         except telegram.error.BadRequest as e:
-            logger.error(
-                f"Неверный запрос при отправке файла {file_path}: {e}", exc_info=True
+            error_code = _make_error_code_for_exception(
+                platform, e, prefix_platform="telegram"
             )
-            if "file too large" in str(e).lower():
-                await query.edit_message_text(
-                    ERROR_FILE_TOO_LARGE_TELEGRAM,
-                    reply_markup=back_markup,
-                )
-            else:
-                await query.edit_message_text(TG_SEND_ERROR, reply_markup=back_markup)
+            _schedule_platform_failure_log(
+                platform=platform,
+                stage="send_single_file_bad_request",
+                url=url,
+                error_code=error_code,
+                exc=e,
+                session_id=session_data.get("session_id"),
+            )
+            category = _classify_internal_error_category(platform, e)
+            message = (
+                _build_public_error_message(platform, error_code, e)
+                if category == "LARGE"
+                else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code)
+            )
+            await _edit_delivery_status(query, message, reply_markup=back_markup)
             return False
+        except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
+            last_error = e
+            logger.warning(f"Попытка {attempt}/{retry_limit} неудачна: {e}")
+            if platform in {"tiktok", "instagram"}:
+                session_data["_delivery_outcome_unknown"] = True
+                break
+            if attempt < retry_limit:
+                await asyncio.sleep(2**attempt)
+            continue
         except telegram.error.TelegramError as e:
-            error_code = _make_error_code("telegram", "API")
+            error_code = _make_error_code_for_exception(
+                platform, e, prefix_platform="telegram"
+            )
             _schedule_platform_failure_log(
                 platform=platform,
                 stage="send_single_file_telegram",
@@ -3714,13 +4846,16 @@ async def send_single_file(
                 exc=e,
                 session_id=session_data.get("session_id"),
             )
-            await query.edit_message_text(
+            await _edit_delivery_status(
+                query,
                 USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
                 reply_markup=back_markup,
             )
             return False
         except Exception as e:
-            error_code = _make_error_code("bot", "UNKNOWN")
+            error_code = _make_error_code_for_exception(
+                platform, e, prefix_platform="bot"
+            )
             _schedule_platform_failure_log(
                 platform=platform,
                 stage="send_single_file_unexpected",
@@ -3729,11 +4864,17 @@ async def send_single_file(
                 exc=e,
                 session_id=session_data.get("session_id"),
             )
-            await query.edit_message_text(TG_SEND_ERROR, reply_markup=back_markup)
+            await _edit_delivery_status(
+                query,
+                _build_public_error_message(platform, error_code, e),
+                reply_markup=back_markup,
+            )
             return False
 
     if last_error:
-        error_code = _make_error_code("telegram", "NETWORK")
+        error_code = _make_error_code_for_exception(
+            platform, last_error, prefix_platform="telegram"
+        )
         _schedule_platform_failure_log(
             platform=platform,
             stage="send_single_file_retry_exhausted",
@@ -3742,9 +4883,16 @@ async def send_single_file(
             exc=last_error,
             session_id=session_data.get("session_id"),
         )
-        await query.edit_message_text(
-            USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+        await _edit_delivery_status(
+            query,
+            DELIVERY_OUTCOME_UNKNOWN
+            if session_data.get("_delivery_outcome_unknown")
+            else USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
+            reply_markup=(
+                None
+                if session_data.get("_delivery_outcome_unknown")
+                else back_markup
+            ),
         )
     return False
 

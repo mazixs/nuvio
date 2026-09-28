@@ -1,9 +1,4 @@
-"""Тесты доставки фото-постов прямыми ссылками.
-
-Решение здесь «всё или ничего»: половина картинок ссылкой, половина файлом
-означала бы разный порядок отправки и разное качество в одном посте. Поэтому
-если хоть одна ссылка непригодна, весь пост идёт обычным путём.
-"""
+"""Тесты доставки фото-постов альбомами и по прямым ссылкам."""
 
 import asyncio
 from types import SimpleNamespace
@@ -105,9 +100,13 @@ def clean_refusal_memory(monkeypatch):
 
 
 
-def _query(reply_photo, reply_audio=None):
+def _query(reply_photo=None, reply_audio=None, reply_media_group=None):
     return SimpleNamespace(
-        message=SimpleNamespace(reply_photo=reply_photo, reply_audio=reply_audio)
+        message=SimpleNamespace(
+            reply_photo=reply_photo or AsyncMock(),
+            reply_audio=reply_audio or AsyncMock(),
+            reply_media_group=reply_media_group or AsyncMock(return_value=[]),
+        )
     )
 
 
@@ -122,40 +121,99 @@ def _plan(audio: bool = True):
 
 
 def test_post_is_sent_as_links_in_order():
-    reply_photo = AsyncMock()
+    reply_media_group = AsyncMock(
+        return_value=[SimpleNamespace(message_id=1), SimpleNamespace(message_id=2)]
+    )
     reply_audio = AsyncMock()
 
     sent = asyncio.run(
         telegram_utils._deliver_photo_post_by_url(
-            _query(reply_photo, reply_audio), _plan()
+            _query(reply_audio=reply_audio, reply_media_group=reply_media_group), _plan()
         )
     )
 
-    assert sent is True
-    assert [call.kwargs["photo"] for call in reply_photo.await_args_list] == IMAGES
+    assert sent.state == "delivered"
+    assert sent.confirmed_items == 2
+    assert sent.audio_delivered is True
+    assert len(sent.messages) == 3
+    assert len(reply_media_group.await_args.kwargs["media"]) == 2
+    assert [item.media for item in reply_media_group.await_args.kwargs["media"]] == IMAGES
     assert reply_audio.await_args.kwargs["audio"] == AUDIO
+    assert reply_audio.await_count == 1
 
 
 def test_refusal_on_the_first_image_falls_back_quietly():
     """Ничего ещё не отправлено — можно спокойно уйти на обычный путь."""
-    reply_photo = AsyncMock(side_effect=telegram.error.BadRequest("отказ"))
+    reply_media_group = AsyncMock(
+        side_effect=telegram.error.BadRequest("failed to get HTTP URL content")
+    )
 
     sent = asyncio.run(
-        telegram_utils._deliver_photo_post_by_url(_query(reply_photo), _plan(audio=False))
-    )
-
-    assert sent is False
-
-
-def test_refusal_in_the_middle_is_raised_instead_of_resending():
-    """Первая картинка уже у пользователя: повтор поста дал бы дубли."""
-    reply_photo = AsyncMock(
-        side_effect=[None, telegram.error.BadRequest("отказ на второй")]
-    )
-
-    with pytest.raises(telegram.error.BadRequest):
-        asyncio.run(
-            telegram_utils._deliver_photo_post_by_url(
-                _query(reply_photo), _plan(audio=False)
-            )
+        telegram_utils._deliver_photo_post_by_url(
+            _query(reply_media_group=reply_media_group), _plan(audio=False)
         )
+    )
+
+    assert sent.state == "refused"
+    assert sent.confirmed_items == 0
+
+
+def test_refusal_after_first_album_falls_back_for_unconfirmed_remainder():
+    """Подтвержденный первый альбом сохраняется, файлы нужны только для остатка."""
+    images = tuple(
+        UrlHandoff(
+            url=f"https://p16-sign.tiktokcdn-us.com/obj/image-{index}.jpeg",
+            kind="photo",
+            size=300 * 1024,
+        )
+        for index in range(11)
+    )
+    plan = PhotoPostHandoff(images=images, audio=None)
+    reply_media_group = AsyncMock(
+        side_effect=[
+            [SimpleNamespace(message_id=1)],
+            telegram.error.BadRequest("failed to get HTTP URL content"),
+        ]
+    )
+    session_data = {"session_id": "photo-handoff-test"}
+
+    sent = asyncio.run(
+        telegram_utils._deliver_photo_post_by_url(
+            _query(reply_media_group=reply_media_group), plan, session_data
+        )
+    )
+
+    assert sent.state == "refused"
+    assert sent.confirmed_items == 9
+    assert len(sent.messages) == 1
+    assert session_data["_delivered_items"] == 9
+    assert session_data["_delivery_progress"] == 9
+
+
+def test_unknown_outcome_after_first_album_returns_confirmed_progress():
+    images = tuple(
+        UrlHandoff(
+            url=f"https://p16-sign.tiktokcdn-us.com/obj/image-{index}.jpeg",
+            kind="photo",
+            size=300 * 1024,
+        )
+        for index in range(11)
+    )
+    plan = PhotoPostHandoff(images=images, audio=None)
+    first_group = [SimpleNamespace(message_id=index) for index in range(9)]
+    reply_media_group = AsyncMock(
+        side_effect=[first_group, telegram.error.NetworkError("connection lost")]
+    )
+    session_data = {"session_id": "unknown-after-album"}
+
+    outcome = asyncio.run(
+        telegram_utils._deliver_photo_post_by_url(
+            _query(reply_media_group=reply_media_group), plan, session_data
+        )
+    )
+
+    assert outcome.state == "unknown"
+    assert outcome.confirmed_items == 9
+    assert outcome.messages == tuple(first_group)
+    assert session_data["_delivery_outcome_unknown"] is True
+    assert reply_media_group.await_count == 2

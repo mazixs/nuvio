@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from web.i18n import day_unit, translate
 
 import sys  # noqa: E402
 
@@ -193,6 +194,24 @@ app.add_middleware(
 )
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
+
+def _language(request: Request) -> str:
+    return "ru" if request.session.get("language") == "ru" else "en"
+
+
+def _render(request: Request, template: str, context: dict):
+    language = _language(request)
+    return templates.TemplateResponse(
+        request,
+        template,
+        {
+            **context,
+            "language": language,
+            "t": lambda message, **values: translate(language, message, **values),
+        },
+    )
+
+
 WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
 SALT = secrets.token_bytes(16)
 WEB_PASSWORD_HASH = hashlib.pbkdf2_hmac(
@@ -232,7 +251,23 @@ async def health():
 async def login_page(request: Request):
     if _check_auth(request):
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"error": None})
+    return _render(request, "login.html", {"error": None})
+
+
+@app.get("/language/{language}")
+async def set_language(request: Request, language: str, next: str = "/"):
+    if language not in {"en", "ru"}:
+        raise HTTPException(status_code=404, detail="Language not found")
+    request.session["language"] = language
+    destination = (
+        next
+        if (
+            next in {"/", "/login", "/users", "/settings"}
+            or (next.startswith("/users/") and next.removeprefix("/users/").isdigit())
+        )
+        else "/"
+    )
+    return RedirectResponse(destination, status_code=303)
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -249,17 +284,23 @@ async def login_submit(
     if _check_rate_limit(client_ip):
         await _notify_admins_brute_force(client_ip)
         lockout_min = LOGIN_LOCKOUT // 60
-        return templates.TemplateResponse(
+        return _render(
             request,
             "login.html",
-            {"error": f"Слишком много попыток. Попробуйте через {lockout_min} мин."},
+            {
+                "error": translate(
+                    _language(request),
+                    "Too many attempts. Try again in {minutes} min.",
+                    minutes=lockout_min,
+                )
+            },
         )
 
     if not username or not password:
-        return templates.TemplateResponse(
+        return _render(
             request,
             "login.html",
-            {"error": "Заполните все поля"},
+            {"error": translate(_language(request), "Fill in all fields")},
         )
 
     # Timing-safe сравнение с использованием PBKDF2 (защита от timing attack и brute-force)
@@ -278,16 +319,19 @@ async def login_submit(
     if _check_rate_limit(client_ip):
         await _notify_admins_brute_force(client_ip)
 
-    return templates.TemplateResponse(
+    return _render(
         request,
         "login.html",
-        {"error": "Неверный логин или пароль"},
+        {"error": translate(_language(request), "Invalid username or password")},
     )
 
 
 @app.get("/logout")
 async def logout(request: Request):
+    language = _language(request)
     request.session.clear()
+    if language == "ru":
+        request.session["language"] = language
     return RedirectResponse("/login", status_code=303)
 
 
@@ -297,7 +341,7 @@ async def logout(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, _=Depends(require_auth)):
     data = await asyncio.to_thread(dashboard_summary)
-    return templates.TemplateResponse(request, "dashboard.html", data)
+    return _render(request, "dashboard.html", data)
 
 
 @app.get("/users", response_class=HTMLResponse)
@@ -306,7 +350,7 @@ async def users_list(request: Request, page: int = 1, _=Depends(require_auth)):
     per_page = 50
     offset = (page - 1) * per_page
     users = await asyncio.to_thread(get_all_users, limit=per_page, offset=offset)
-    return templates.TemplateResponse(
+    return _render(
         request,
         "users.html",
         {
@@ -321,8 +365,10 @@ async def users_list(request: Request, page: int = 1, _=Depends(require_auth)):
 async def user_detail(request: Request, user_id: int, _=Depends(require_auth)):
     user = await asyncio.to_thread(get_user_detail, user_id)
     if not user:
-        return HTMLResponse("Пользователь не найден", status_code=404)
-    return templates.TemplateResponse(request, "user_detail.html", {"user": user})
+        return HTMLResponse(
+            translate(_language(request), "User not found"), status_code=404
+        )
+    return _render(request, "user_detail.html", {"user": user})
 
 
 # ── Настройки ───────────────────────────────────────────────────
@@ -330,10 +376,10 @@ async def user_detail(request: Request, user_id: int, _=Depends(require_auth)):
 # Готовые варианты частоты опроса. Ручной ввод тоже разрешён — пресеты нужны,
 # чтобы не приходилось считать дни в неделях.
 CSI_INTERVAL_PRESETS = [
-    (7, "неделя"),
-    (14, "2 недели"),
-    (30, "месяц"),
-    (90, "квартал"),
+    (7, "week"),
+    (14, "2 weeks"),
+    (30, "month"),
+    (90, "quarter"),
 ]
 
 # Горизонт дорожки отправок. 90 дней — тот масштаб, на котором разница между
@@ -346,33 +392,35 @@ CSI_ZONE_DENSE_MAX = 7
 CSI_ZONE_BALANCED_MAX = 45
 
 
-def _csi_zone(days: int) -> tuple[str, str]:
+def _csi_zone(days: int, language: str = "en") -> tuple[str, str]:
     """Зона частоты: машинное имя для стиля и слово для оператора."""
     if days <= CSI_ZONE_DENSE_MAX:
-        return "dense", "часто"
+        return "dense", translate(language, "frequent")
     if days <= CSI_ZONE_BALANCED_MAX:
-        return "balanced", "сбалансированно"
-    return "sparse", "редко"
+        return "balanced", translate(language, "balanced")
+    return "sparse", translate(language, "infrequent")
 
 
-def _csi_cadence_phrase(days: int) -> str:
+def _csi_cadence_phrase(days: int, language: str = "en") -> str:
     """Интервал словами. Считается на сервере, чтобы формулировка была одна.
 
     Страница пересчитывает подпись через `/api/csi/preview`, а не дублирует
     правило в JavaScript.
     """
     named = {
-        1: "каждый день",
-        7: "раз в неделю",
-        14: "раз в две недели",
-        21: "раз в три недели",
-        30: "раз в месяц",
-        60: "раз в два месяца",
-        90: "раз в квартал",
-        180: "раз в полгода",
-        365: "раз в год",
+        1: "every day",
+        7: "once a week",
+        14: "every two weeks",
+        21: "every three weeks",
+        30: "once a month",
+        60: "every two months",
+        90: "once a quarter",
+        180: "every six months",
+        365: "once a year",
     }
-    return named.get(days, f"раз в {days} дней")
+    return translate(
+        language, named[days] if days in named else "every {days} days", days=days
+    )
 
 
 def _csi_dispatch_offsets(days: int) -> list[int]:
@@ -396,25 +444,43 @@ def _csi_queue_size(days: int) -> int | None:
         return None
 
 
-def _settings_context(*, error: str | None = None, saved: bool = False) -> dict:
+def _queue_hint(language: str, count: int | None) -> str:
+    if count is None:
+        return translate(language, "Could not read the database")
+    message = (
+        "person will receive a survey at the next check"
+        if count == 1
+        else "people will receive a survey at the next check"
+    )
+    return translate(language, message)
+
+
+def _settings_context(
+    *, language: str = "en", error: str | None = None, saved: bool = False
+) -> dict:
     days = get_csi_interval_days()
-    zone, zone_label = _csi_zone(days)
+    zone, zone_label = _csi_zone(days, language)
     try:
         csi = get_csi_metrics()
     except Exception:
         logger.exception("Не удалось получить метрики CSI")
         csi = {"total_responses": 0, "avg_rating": 0.0}
+    queue_size = _csi_queue_size(days)
     return {
         "csi_interval_days": days,
+        "csi_interval_unit": day_unit(language, days),
         "csi_interval_min": CSI_INTERVAL_DAYS_MIN,
         "csi_interval_max": CSI_INTERVAL_DAYS_MAX,
-        "csi_interval_presets": CSI_INTERVAL_PRESETS,
+        "csi_interval_presets": [
+            (value, translate(language, label)) for value, label in CSI_INTERVAL_PRESETS
+        ],
         "csi_zone": zone,
         "csi_zone_label": zone_label,
-        "csi_cadence": _csi_cadence_phrase(days),
+        "csi_cadence": _csi_cadence_phrase(days, language),
         "csi_track_horizon": CSI_TRACK_HORIZON_DAYS,
         "csi_dispatch_offsets": _csi_dispatch_offsets(days),
-        "csi_queue_size": _csi_queue_size(days),
+        "csi_queue_size": queue_size,
+        "csi_queue_hint": _queue_hint(language, queue_size),
         "csi_per_year": round(365 / days) if days else 0,
         "csi_total_responses": csi.get("total_responses", 0),
         "csi_avg_rating": csi.get("avg_rating", 0.0),
@@ -426,27 +492,37 @@ def _settings_context(*, error: str | None = None, saved: bool = False) -> dict:
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, _=Depends(require_auth)):
     saved = request.query_params.get("saved") == "1"
-    return templates.TemplateResponse(
-        request, "settings.html", await asyncio.to_thread(_settings_context, saved=saved)
+    return _render(
+        request,
+        "settings.html",
+        await asyncio.to_thread(
+            _settings_context, language=_language(request), saved=saved
+        ),
     )
 
 
 @app.get("/api/csi/preview")
-async def api_csi_preview(days: int, _=Depends(require_auth)):
+async def api_csi_preview(request: Request, days: int, _=Depends(require_auth)):
     """Пересчёт последствий интервала до сохранения.
 
     Нужен, чтобы оператор видел размер очереди на том значении, которое он
     только примеряет ползунком, а не на уже сохранённом.
     """
     if not CSI_INTERVAL_DAYS_MIN <= days <= CSI_INTERVAL_DAYS_MAX:
-        raise HTTPException(status_code=422, detail="интервал вне диапазона")
-    zone, zone_label = _csi_zone(days)
+        raise HTTPException(
+            status_code=422,
+            detail=translate(_language(request), "Interval is out of range"),
+        )
+    zone, zone_label = _csi_zone(days, _language(request))
+    queue_size = await asyncio.to_thread(_csi_queue_size, days)
     return {
         "days": days,
+        "unit": day_unit(_language(request), days),
         "zone": zone,
         "zone_label": zone_label,
-        "cadence": _csi_cadence_phrase(days),
-        "queue_size": await asyncio.to_thread(_csi_queue_size, days),
+        "cadence": _csi_cadence_phrase(days, _language(request)),
+        "queue_size": queue_size,
+        "queue_hint": _queue_hint(_language(request), queue_size),
         "per_year": round(365 / days),
         "offsets": _csi_dispatch_offsets(days),
     }
@@ -464,16 +540,22 @@ async def settings_submit(
     отправляет при межсайтовом POST.
     """
     try:
-        await asyncio.to_thread(set_csi_interval_days, int(_sanitize_input(csi_interval_days)))
-    except ValueError as exc:
-        message = (
-            str(exc)
-            if str(exc).startswith("интервал")
-            else f"интервал должен быть от {CSI_INTERVAL_DAYS_MIN} "
-            f"до {CSI_INTERVAL_DAYS_MAX} дней"
+        await asyncio.to_thread(
+            set_csi_interval_days, int(_sanitize_input(csi_interval_days))
         )
-        return templates.TemplateResponse(
-            request, "settings.html", await asyncio.to_thread(_settings_context, error=message)
+    except ValueError:
+        message = translate(
+            _language(request),
+            "Interval must be between {min_days} and {max_days} days",
+            min_days=CSI_INTERVAL_DAYS_MIN,
+            max_days=CSI_INTERVAL_DAYS_MAX,
+        )
+        return _render(
+            request,
+            "settings.html",
+            await asyncio.to_thread(
+                _settings_context, language=_language(request), error=message
+            ),
         )
     return RedirectResponse("/settings?saved=1", status_code=303)
 

@@ -94,6 +94,18 @@ def _classify_polling_error(exc: telegram.error.TelegramError) -> tuple[str, str
             "Параллельный polling другим экземпляром или сервером с тем же токеном.",
         )
 
+    if isinstance(exc, telegram.error.RetryAfter):
+        return ("RATE_LIMIT", "Bot API ограничил частоту запросов polling.")
+
+    if isinstance(exc, telegram.error.Forbidden):
+        return ("ACCESS", "Bot API отказал в доступе при long polling.")
+
+    if isinstance(exc, telegram.error.BadRequest):
+        return ("API", "Bot API отклонил запрос long polling.")
+
+    if isinstance(exc, telegram.error.TimedOut):
+        return ("TIMEOUT", "Превышен таймаут ожидания ответа Bot API.")
+
     if (
         "server disconnected without sending a response" in msg_lower
         or "remoteprotocolerror" in msg_lower
@@ -122,7 +134,7 @@ def _classify_polling_error(exc: telegram.error.TelegramError) -> tuple[str, str
         )
 
     return (
-        "UNKNOWN",
+        "UNEXPECT",
         "Неожиданная ошибка при long polling Bot API.",
     )
 
@@ -256,9 +268,9 @@ def _build_application() -> Application:
         """Глобальный обработчик необработанных исключений — шлёт краш-репорт админам."""
         logger.error("Необработанное исключение:", exc_info=context.error)
         if context.error:
-            from utils.telegram_utils import _make_error_code
+            from utils.telegram_utils import _make_error_code_for_exception
 
-            error_code = _make_error_code("bot", "GLOBAL")
+            error_code = _make_error_code_for_exception("bot", context.error)
             await _notify_admins_crash(
                 error_code=error_code,
                 platform="bot",

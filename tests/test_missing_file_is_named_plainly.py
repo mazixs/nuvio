@@ -82,7 +82,7 @@ def test_user_sees_a_file_error_not_a_network_error(tmp_path):
     _result, query = _send(tmp_path / "нет-такого.mp4")
 
     assert query.texts, "пользователю ничего не сказали"
-    assert "FILE-ACCESS" in query.texts[-1]
+    assert "FILE-FILE" in query.texts[-1]
 
 
 def test_existing_file_is_not_rejected(tmp_path):

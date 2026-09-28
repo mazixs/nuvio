@@ -25,7 +25,7 @@ def test_polling_error_callback_logs_other_errors_as_warning(caplog):
     with caplog.at_level(logging.WARNING):
         main._polling_error_callback(error)
 
-    assert "UNKNOWN" in caplog.text
+    assert "UNEXPECT" in caplog.text
     assert "Неожиданная ошибка при long polling Bot API" in caplog.text
 
 
@@ -36,6 +36,13 @@ def test_classify_polling_error_detects_conflict():
 
     assert category == "POLLING_CONFLICT"
     assert "Параллельный polling" in summary
+
+
+def test_polling_bad_request_is_api_error_not_network_error():
+    category, _summary = main._classify_polling_error(
+        telegram.error.BadRequest("chat not found")
+    )
+    assert category == "API"
 
 
 def test_prepare_runtime_storage_removes_only_stale_media(monkeypatch):

@@ -48,7 +48,7 @@ def test_fast_path_flag_documents_cache_reset():
 
     for name, text in documents.items():
         assert "TIKTOK_FAST_PATH" in text, name
-        assert "кэш" in text.lower(), name
+        assert "cache" in text.lower(), name
         assert "/cleanup_cache" in text, f"{name}: нет упоминания команды кэша"
         # /cleanup_cache снимает только просроченные записи, поэтому честный
         # способ немедленного откатa — удаление файла кэша.
@@ -123,9 +123,9 @@ def test_youtube_runbook_records_false_negative_probes():
     """
     runbook = RUNBOOK.read_text(encoding="utf-8")
 
-    assert "--test" in runbook and "10 КБ" in runbook
-    assert "file_id" in runbook and "кэш" in runbook.lower()
-    assert "минут" in runbook
+    assert "--test" in runbook and "10 KB" in runbook
+    assert "file_id" in runbook and "cache" in runbook.lower()
+    assert "minute" in runbook
     # Категория отличает смену правил выдачи от закрытого видео: без неё оператор
     # уходит проверять cookies вместо версии yt-dlp.
     assert "MEDIA_FORBIDDEN" in runbook

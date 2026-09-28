@@ -1,167 +1,128 @@
-# Устранение типичных проблем
+# Troubleshooting
 
-## Бот не запускается
+## The bot does not start
 
-### TELEGRAM_TOKEN не задан
+### TELEGRAM_TOKEN is missing
 
-- **Ошибка**: `Отсутствуют обязательные переменные окружения: TELEGRAM_TOKEN`
-- **Решение**: скопировать `.env.example` в `.secrets/.env` и задать токен там
-  либо передать его переменной процесса. `.env.local` и корневой `.env`
-  читаются только для обратной совместимости и не должны использоваться в
-  новых установках.
+- **Error:** The startup log says that the required `TELEGRAM_TOKEN` variable is missing.
+- **Fix:** Copy `.env.example` to `.secrets/.env` and set the token there, or pass it as a process environment variable. Root `.env` and `.env.local` are read only for backward compatibility; do not use them for new installations.
 
-### Ошибки импорта
+### Import errors
 
-- Убедиться, что все зависимости установлены:
-  ```bash
-  pip install -r requirements.txt
-  ```
-- Убедиться, что используется Python 3.14 или выше:
-  ```bash
-  python --version
-  ```
+Install all dependencies:
 
-### FFmpeg не найден
+```bash
+pip install -r requirements.txt
+```
 
-FFmpeg необходим для обработки аудио и видео (извлечение аудио, конвертация WebM в MP4, мерж потоков).
+Check that Python 3.14 or newer is in use:
 
-- **Linux**:
-  ```bash
-  sudo apt install ffmpeg
-  ```
-- **macOS**:
-  ```bash
-  brew install ffmpeg
-  ```
-- **Windows**: скачать с [ffmpeg.org](https://ffmpeg.org), распаковать и добавить путь к `ffmpeg.exe` в переменную окружения `PATH`.
+```bash
+python --version
+```
 
----
+### FFmpeg is missing
 
-## Проблемы с платформами
+FFmpeg is required for audio and video processing, including audio extraction, WebM-to-MP4 conversion, and stream merging.
 
-### YouTube: "требуется аутентификация"
+- **Linux:** `sudo apt install ffmpeg`
+- **macOS:** `brew install ffmpeg`
+- **Windows:** Download it from [ffmpeg.org](https://ffmpeg.org), unpack it, and add the directory containing `ffmpeg.exe` to `PATH`.
 
-- **Причина**: YouTube блокирует загрузку без cookies.
-- **Решение**: загрузить файл cookies в `.secrets/www.youtube.com_cookies.txt` или через интерфейс `/admin`.
-- Cookies имеют ограниченный срок действия — проверять их актуальность.
-- Состояние cookies можно отследить по записям `cookie_health_status` в логах.
+## Platform problems
 
-### YouTube: `HTTP Error 403` на скачивании
+### YouTube asks for authentication
 
-- **Причина**: чаще всего устаревшая версия yt-dlp. 18 августа 2026 YouTube сломал
-  скачивание по прямым ссылкам `videoplayback` для клиентов, которыми пользуется
-  стабильная 2026.7.4: список форматов приходит, а первый же запрос к CDN получает
-  403. Проверено на двух разных исходящих адресах — от IP это не зависит.
-- **Решение**: обновить yt-dlp. В образе версия зажата в `requirements.txt`, так что
-  нужен новый образ с точной версией из `requirements.in`; порядок описан в
-  [runbook](../technical/youtube-download-runbook.md).
-- **Чем отличается от запрета доступа**: 403 на медиафайле логируется категорией
-  `MEDIA_FORBIDDEN` и повторяется автоматически, а `ACCESS_RESTRICTED` означает
-  закрытое видео — приватное, платное или требующее авторизации.
-- **Как проверить руками**: `docker compose exec bot python -m yt_dlp -f 140 <ссылка>`.
-  Ключ `--test` для проверки не подходит: он подменяет размер запрашиваемого куска
-  на 10 КБ, такой запрос проходит и скрывает поломку.
-- **Полная процедура разбора**:
-  [docs/technical/youtube-download-runbook.md](../technical/youtube-download-runbook.md) —
-  замеры инцидента, три ловушки ложноотрицательных проб, готовые команды пробы и
-  порядок обновления пина yt-dlp.
+- YouTube may block downloading without cookies. Upload a cookie file to `.secrets/www.youtube.com_cookies.txt` or through `/admin`.
+- Cookies expire. Check their current health and look for `cookie_status` in the administrative logs.
 
-### TikTok: видео не скачивается
+### YouTube returns `HTTP Error 403` during download
 
-- Возможны региональные блокировки — попробовать использовать VPN на сервере.
-- API-хосты могут быть недоступны — бот автоматически пробует несколько хостов с exponential backoff.
-- Если ни один хост не отвечает, проверить доступность сети на сервере.
+The yt-dlp version may be outdated. On 18 August 2026, YouTube changed direct `videoplayback` delivery for clients used by stable yt-dlp 2026.7.4: format listing still worked, but the first CDN request returned 403. This was reproduced from two outgoing IP addresses.
 
-### Instagram: rate limit
+- Update yt-dlp by building or pulling a new image with the exact version pinned in `requirements.in` and `requirements.txt`. Follow the [YouTube runbook](../technical/youtube-download-runbook.md).
+- A 403 from the media CDN is recorded as `MEDIA_FORBIDDEN` and may be retried; `ACCESS_RESTRICTED` indicates private, paid, or authorization-gated media.
+- For a manual probe, run `docker compose exec bot python -m yt_dlp -f 140 <URL>`. Do not use `--test`: its 10 KB range request can succeed while the full download fails.
+- The [runbook](../technical/youtube-download-runbook.md) records the incident, false-negative probe traps, commands, and pin-update procedure.
 
-- Instagram агрессивно ограничивает количество запросов.
-- **Решение**: загрузить cookies для авторизованного доступа — это увеличивает лимиты.
-- Между запросами бот автоматически делает паузы.
-- Для скачивания из приватных аккаунтов обязательно нужны cookies с авторизованной сессии.
+### TikTok video does not download
 
----
+- Check for regional blocking and, if applicable, server-side VPN connectivity.
+- The bot tries multiple API hosts with exponential backoff. If all fail, check the server network.
 
-## Проблемы с файлами
+### Instagram rate limit
 
-### "Файл слишком большой для Telegram"
+- Instagram limits request volume. Authorized cookies can raise the available limit.
+- The bot inserts pauses between requests. Private accounts require cookies from an authorized session.
 
-- В Docker локальный Bot API принимает файлы до 2 ГБ.
-- Проверить, что `telegram-bot-api` здоров, а бот запущен с
-  `TELEGRAM_LOCAL_MODE=true`.
-- При прямом запуске без локального API действует лимит 50 МБ; выберите меньший
-  формат или используйте Docker-стек.
+## File problems
 
-### Файлы не отправляются
+### File too large for Telegram
 
-- Проверить логи: `logs/bot.log`.
-- Найти код ошибки (формат `PREFIX-CATEGORY-RANDOM`) и искать его в логах для получения полной диагностики.
-- Проверить свободное место на диске — временные файлы хранятся в директориях `temp/` и `downloads/`.
+- In Docker, the local Bot API accepts files up to 2 GB.
+- Check that `telegram-bot-api` is healthy and that the bot has `TELEGRAM_LOCAL_MODE=true`.
+- A direct run without the local API is limited to 50 MB. Select a smaller format or use the Docker stack.
 
----
+### Files are not delivered
 
-## Коды ошибок
+- Check `logs/bot.log`.
+- Find the error ID (`PREFIX-CATEGORY-RANDOM`) in the logs for full diagnostics.
+- Check free disk space. Temporary files are stored under `temp/` or `downloads/`, depending on the path used.
 
-Пользователям показываются безопасное описание сбоя и код в формате
-`PREFIX-CATEGORY-RANDOM`. Внутренняя диагностика доступна только в логах.
-Подробное описание кодов: [docs/error-codes.md](../error-codes.md).
+## Error codes
 
-**Префиксы**:
-- `YT` — YouTube
-- `TT` — TikTok
-- `IG` — Instagram
-- `RU` — Rutube
-- `VK` — VK Video
-- `TG` — Telegram
-- `FILE` — файловая система
-- `BOT` — внутренние ошибки бота
+Users see a safe explanation and an ID in `PREFIX-CATEGORY-RANDOM` format. Internal diagnostics stay in the logs. See the [error code reference](../error-codes.md).
 
-**Поиск в логах**:
+| Prefix | Area |
+|---|---|
+| `YT` | YouTube |
+| `TT` | TikTok |
+| `IG` | Instagram |
+| `RU` | Rutube |
+| `VK` | VK Video |
+| `TG` | Telegram |
+| `FILE` | Local filesystem |
+| `BOT` | Internal bot workflow |
+
+Search for the actual ID received from the bot:
+
 ```bash
 # systemd
 journalctl -u nuvio.service -n 500 --no-pager | grep "ERROR_CODE"
 
-# файл логов
+# log file
 grep "ERROR_CODE" logs/bot.log
 ```
 
-Заменить `ERROR_CODE` на фактический код ошибки, полученный от бота.
+## WebUI problems
 
----
+### The page does not open
 
-## WebUI не работает
+- Check `WEB_PORT` (default: 8080).
+- With Docker, verify the published port in `compose.yaml`.
+- Check the firewall rules for that port.
 
-### Не открывается
+### Password is rejected
 
-- Проверить значение `WEB_PORT` (по умолчанию 8080).
-- При запуске через Docker убедиться, что порт задан в `compose.yaml`.
-- Проверить настройки файрвола — порт должен быть открыт.
+- The default credentials are `admin` / `changeme`; change the password before deployment.
+- Set `WEB_USERNAME` and `WEB_PASSWORD` in `.secrets/.env`.
 
-### Неверный пароль
+## Cache problems
 
-- Учетные данные по умолчанию: `admin` / `changeme`.
-- Задаются через переменные окружения `WEB_USERNAME` и `WEB_PASSWORD` в
-  `.secrets/.env`.
+### Cache uses too much space
 
----
+- `/cleanup_cache` removes entries older than 90 days.
+- `VACUUM` runs automatically once a week.
+- `/cache_stats` shows current cache statistics.
 
-## Кэш
+### A previously sent video downloads again
 
-### Кэш занимает много места
+- The cache stores Telegram `file_id` values in SQLite and survives bot restarts.
+- Check that `telegram_cache.db` has not been removed.
+- A damaged database is recreated on the next start, but its cache entries are lost.
 
-- Команда `/cleanup_cache` — очистка записей старше 90 дней.
-- `VACUUM` выполняется автоматически раз в неделю.
-- Команда `/cache_stats` — просмотр текущей статистики кэша.
+## Logs
 
-### Повторное видео скачивается заново
-
-- Кэш работает по `file_id` — при перезагрузке бота кэш SQLite сохраняется на диске.
-- Убедиться, что файл `video_cache.db` не был удален.
-- Если база повреждена, бот создаст новую при следующем запуске, но кэш будет пуст.
-
----
-
-## Логи
-
-- **Путь**: `logs/bot.log`
-- **Ротация**: 10 МБ на файл, хранится 5 файлов.
-- **Уровень логирования**: настраивается через переменную `LOG_LEVEL`. Для подробной диагностики установить значение `DEBUG`.
+- Path: `logs/bot.log`.
+- Rotation: 10 MB per file, with five backups.
+- Set `LOG_LEVEL=DEBUG` for detailed diagnostics.

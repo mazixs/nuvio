@@ -6,6 +6,8 @@
 повторный разбор ссылки, а не отказ пользователю.
 """
 
+import logging
+
 import pytest
 import yt_dlp
 
@@ -71,6 +73,34 @@ def test_execute_with_backoff_keeps_access_restriction_fatal(monkeypatch):
     with pytest.raises(yt_dlp.utils.DownloadError):
         execute_with_backoff("проба", restricted)
     assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "category"),
+    [
+        ("Sign in to confirm you’re not a bot", "ACCESS_RESTRICTED"),
+        ("HTTP Error 429: Too Many Requests", "RATE_LIMIT"),
+    ],
+)
+def test_youtube_access_failures_are_expected_without_retry_or_traceback(
+    monkeypatch, caplog, error, category
+):
+    monkeypatch.setattr("utils.ytdlp_common.time.sleep", lambda _: None)
+    attempts = []
+
+    def rejected():
+        attempts.append(1)
+        raise yt_dlp.utils.DownloadError(error)
+
+    assert classify_download_error_kind(error) == category
+    assert youtube_error_code(error) == category
+    with caplog.at_level(logging.WARNING, logger="utils.ytdlp_common"):
+        with pytest.raises(yt_dlp.utils.DownloadError):
+            execute_with_backoff("проба", rejected)
+
+    assert len(attempts) == 1
+    assert caplog.records[-1].levelno == logging.WARNING
+    assert caplog.records[-1].exc_info is None
 
 
 def test_media_403_reaches_admins():

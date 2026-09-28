@@ -1,74 +1,74 @@
 {% extends "base.html" %}
-{% block title %}Пользователь {{ user.user_id }}{% endblock %}
+{% block title %}{{ t('User') }} {{ user.user_id }}{% endblock %}
 {% block nav_users %}active{% endblock %}
 {% block content %}
 
-<a href="/users" class="btn btn-back">К пользователям</a>
+<a href="/users" class="btn btn-back">{{ t('Back to users') }}</a>
 
 <div class="page-header">
     <div>
-        <h1>Пользователь {{ user.user_id }}</h1>
-        <p class="subtitle">{{ user.username or 'Без юзернейма' }}</p>
+        <h1>{{ t('User') }} {{ user.user_id }}</h1>
+        <p class="subtitle">{{ user.username or t('No username') }}</p>
     </div>
 </div>
 
 <!-- Profile -->
 <div class="stats-divider">
-    <span class="label">Профиль</span>
+    <span class="label">{{ t('Profile') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid">
     <div class="card animate-in">
-        <div class="card-label">Юзернейм</div>
-        <div class="card-value small">{{ user.username or '—' }}</div>
+        <div class="card-label">{{ t('Handle') }}</div>
+        <div class="card-value small">{{ user.username or '-' }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Имя</div>
+        <div class="card-label">{{ t('Name') }}</div>
         <div class="card-value small">{{ user.first_name or '' }} {{ user.last_name or '' }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Язык</div>
-        <div class="card-value small">{{ user.language_code or '—' }}</div>
+        <div class="card-label">{{ t('Language') }}</div>
+        <div class="card-value small">{{ user.language_code or '-' }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Первый визит</div>
+        <div class="card-label">{{ t('First visit') }}</div>
         <div class="card-value small">{{ user.first_seen[:10] }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Последний визит</div>
+        <div class="card-label">{{ t('Last visit') }}</div>
         <div class="card-value small">{{ user.last_seen[:10] }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Запросов на скачивание</div>
+        <div class="card-label">{{ t('Download requests') }}</div>
         <div class="card-value">{{ user.total_downloads }}</div>
     </div>
 </div>
 
 <!-- Activity Stats -->
 <div class="stats-divider">
-    <span class="label">Статистика активности</span>
+    <span class="label">{{ t('Activity stats') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid">
     <div class="card animate-in">
-        <div class="card-label">Всего событий</div>
+        <div class="card-label">{{ t('Total events') }}</div>
         <div class="card-value">{{ user.recent_events | length }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Дней с нами</div>
+        <div class="card-label">{{ t('Days since first visit') }}</div>
         <div class="card-value small">{{ user.first_seen[:10] }}</div>
     </div>
     {% if user.downloads_by_platform %}
     <div class="card animate-in">
-        <div class="card-label">Платформ</div>
+        <div class="card-label">{{ t('Platforms') }}</div>
         <div class="card-value">{{ user.downloads_by_platform | length }}</div>
     </div>
     {% endif %}
     {% if user.total_downloads > 0 and user.downloads_by_platform %}
     <div class="card animate-in">
-        <div class="card-label">Основная платформа</div>
+        <div class="card-label">{{ t('Top platform') }}</div>
         {% set top_platform = user.downloads_by_platform | dictsort(by='value', reverse=true) | first %}
         <div class="card-value small">
             <span class="badge badge-{{ top_platform[0] }}"><span class="badge-dot"></span>{{ top_platform[0] }}</span>
@@ -79,7 +79,7 @@
 
 {% if user.downloads_by_platform %}
 <div class="stats-divider">
-    <span class="label">Запросы по платформам</span>
+    <span class="label">{{ t('Requests by platform') }}</span>
     <div class="line"></div>
 </div>
 
@@ -100,7 +100,7 @@
 {% endif %}
 
 <div class="stats-divider">
-    <span class="label">Последняя активность (50 записей)</span>
+    <span class="label">{{ t('Recent activity (50 events)') }}</span>
     <div class="line"></div>
 </div>
 
@@ -108,9 +108,9 @@
     <table class="table">
         <thead>
             <tr>
-                <th>Время</th>
-                <th>Событие</th>
-                <th>Платформа</th>
+                <th>{{ t('Time') }}</th>
+                <th>{{ t('Event') }}</th>
+                <th>{{ t('Platform') }}</th>
                 <th>URL</th>
             </tr>
         </thead>
@@ -122,17 +122,17 @@
                 <td>
                     {% if e.platform %}
                     <span class="badge badge-{{ e.platform }}"><span class="badge-dot"></span>{{ e.platform }}</span>
-                    {% else %}—{% endif %}
+                    {% else %}-{% endif %}
                 </td>
                 <td class="url-cell">
                     {% if e.url %}
                     <a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.url[:50] }}{% if e.url|length > 50 %}...{% endif %}</a>
-                    {% else %}—{% endif %}
+                    {% else %}-{% endif %}
                 </td>
             </tr>
             {% endfor %}
             {% if not user.recent_events %}
-            <tr><td colspan="4" class="empty">Нет событий</td></tr>
+            <tr><td colspan="4" class="empty">{{ t('No events') }}</td></tr>
             {% endif %}
         </tbody>
     </table>

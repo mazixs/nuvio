@@ -54,6 +54,8 @@ def test_login_page_is_available(client):
 
     assert response.status_code == 200
     assert "Nuvio" in response.text
+    assert '<html lang="en">' in response.text
+    assert "Analytics dashboard" in response.text
 
 
 def test_valid_login_opens_authenticated_summary(client, monkeypatch):
@@ -96,5 +98,28 @@ def test_invalid_login_does_not_authenticate(client):
     dashboard = client.get("/", follow_redirects=False)
 
     assert response.status_code == 200
-    assert "Неверный логин или пароль" in response.text
+    assert "Invalid username or password" in response.text
     assert dashboard.status_code == 303
+
+
+def test_language_switch_persists_in_session(client):
+    changed = client.get("/language/ru?next=/login", follow_redirects=False)
+    response = client.get("/login")
+
+    assert changed.status_code == 303
+    assert changed.headers["location"] == "/login"
+    assert '<html lang="ru">' in response.text
+    assert "Панель аналитики" in response.text
+
+    client.get("/logout")
+    assert '<html lang="ru">' in client.get("/login").text
+
+    client.get("/language/en?next=/login")
+    assert '<html lang="en">' in client.get("/login").text
+
+
+def test_language_switch_rejects_external_redirect(client):
+    response = client.get("/language/ru?next=//example.com", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"

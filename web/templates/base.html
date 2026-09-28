@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="{{ language }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Аналитика{% endblock %} | Nuvio</title>
+    <title>{% block title %}{{ t('Analytics') }}{% endblock %} | Nuvio</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -15,10 +15,14 @@
     <nav class="navbar">
         <a href="/" class="nav-brand"><img src="/static/logo.svg" alt="Nuvio" class="nav-logo">Nuvio</a>
         <div class="nav-links">
-            <a href="/" class="nav-link {% block nav_dashboard %}{% endblock %}">Дашборд</a>
-            <a href="/users" class="nav-link {% block nav_users %}{% endblock %}">Пользователи</a>
-            <a href="/settings" class="nav-link {% block nav_settings %}{% endblock %}">Настройки</a>
-            <a href="/logout" class="nav-link nav-logout">Выход</a>
+            <a href="/" class="nav-link {% block nav_dashboard %}{% endblock %}">{{ t('Dashboard') }}</a>
+            <a href="/users" class="nav-link {% block nav_users %}{% endblock %}">{{ t('Users') }}</a>
+            <a href="/settings" class="nav-link {% block nav_settings %}{% endblock %}">{{ t('Settings') }}</a>
+            <div class="language-switch" role="group" aria-label="{{ t('Language') }}">
+                <a href="/language/en?next={{ request.url.path | urlencode }}" lang="en" hreflang="en" aria-label="English" {% if language == 'en' %}aria-current="true"{% endif %}>EN</a>
+                <a href="/language/ru?next={{ request.url.path | urlencode }}" lang="ru" hreflang="ru" aria-label="Русский" {% if language == 'ru' %}aria-current="true"{% endif %}>RU</a>
+            </div>
+            <a href="/logout" class="nav-link nav-logout">{{ t('Log out') }}</a>
         </div>
     </nav>
     <main class="container">

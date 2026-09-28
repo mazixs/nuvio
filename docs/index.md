@@ -1,23 +1,28 @@
-# Документация Nuvio
+# Nuvio documentation
 
-## Содержание
+## Guides
 
-### Руководства
+- [Deployment](guides/deployment.md) - installation, Docker, systemd, and the WebUI.
+- [Configuration](guides/configuration.md) - environment variables, cookies, and limits.
 
-- [Развертывание](guides/deployment.md) -- установка, Docker, systemd, WebUI
-- [Конфигурация](guides/configuration.md) -- переменные окружения, cookies, ограничения
+## Technical reference
 
-### Техническая документация
+- [Product requirements](PRD.md) - product scope, user flows, and success criteria.
+- [Architecture](technical/architecture.md) - modules, data flow, design patterns, and SQLite WAL.
+- [FSM architecture](technical/fsm-architecture.md) - state machines, bottlenecks, and prioritized improvements.
+- [YouTube download runbook](technical/youtube-download-runbook.md) - incident analysis, reliable probes, diagnosis, and yt-dlp pin updates.
+- [Error codes](error-codes.md) - code format, platform prefixes, categories, and log lookup.
 
-- [Архитектура](technical/architecture.md) -- модули, поток данных, ключевые паттерны, SQLite WAL
-- [FSM-логика](technical/fsm-architecture.md) -- конечные автоматы, узкие места, оптимизации, ICE-приоритизация
-- [Runbook: YouTube перестал скачиваться](technical/youtube-download-runbook.md) -- инцидент 18.08.2026, ловушки ложноотрицательных проб, процедура разбора, обновление пина yt-dlp
-- [Коды ошибок](error-codes.md) -- формат кодов, префиксы (YT/TT/IG/RU/VK/TG/FILE/BOT), категории, поиск в логах
+## Development
 
-### Разработка
+- [Contributing](development/contributing.md) - local environment, tests, and code conventions.
 
-- [Участие в разработке](development/contributing.md) -- окружение, тесты, соглашения по коду
+## Troubleshooting
 
-### Устранение неполадок
+- [Common issues](troubleshooting/common-issues.md) - startup, platforms, files, and cache.
 
-- [Частые проблемы](troubleshooting/common-issues.md) -- запуск, платформы, файлы, кэш
+## Historical material
+
+- [Audits](audits/) - dated findings and implementation snapshots.
+- [Design decisions and research](technical/) - ADRs and technical investigations.
+- [Plans and specifications](superpowers/) - historical implementation plans and feature specifications.

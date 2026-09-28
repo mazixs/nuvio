@@ -1,144 +1,100 @@
-# Поддержка ссылок Instagram Highlight `/s/...`
+# Support for Instagram Highlight links `/s/...`
 
-> Архивное описание решения. Gokapi, упомянутый ниже в первоначальном потоке,
-> удалён; актуальная доставка выполняется через локальный Telegram Bot API.
+> Archived design. Gokapi, referenced in the original delivery flow below, has since been removed. Current delivery uses the local Telegram Bot API.
 
-## Цель
+## Goal
 
-Научить Nuvio обрабатывать опубликованные Instagram-ссылки вида
-`https://www.instagram.com/s/<token>?story_media_id=<id>`: преобразовывать их
-в канонический адрес Highlight, находить указанный элемент и скачивать только
-его. Если получить материал невозможно, пользователь должен увидеть короткое
-и полезное сообщение без внутренних подробностей о cookies и аккаунте бота.
+Handle published Instagram links of the form `https://www.instagram.com/s/<token>?story_media_id=<id>`. Nuvio should convert the link to a canonical Highlight URL, find the specified item, and download only that item. If it cannot retrieve the media, the user should receive a short, useful message without details about cookies or the bot account.
 
-## Подтверждённое поведение yt-dlp
+## Verified yt-dlp behavior
 
-Проверка выполнена на yt-dlp 2026.07.04:
+The following was verified with yt-dlp 2026.07.04:
 
-- исходный путь `/s/...` не распознаётся Instagram-экстрактором;
-- Base64URL-токен из проверенной ссылки декодируется в
-  `highlight:18061649159054050`;
-- канонический адрес
-  `https://www.instagram.com/stories/highlights/18061649159054050/`
-  распознаётся `InstagramStory`;
-- при авторизации через cookies экстрактор вернул 19 элементов;
-- элемент с `story_media_id=3570811163939920567` был найден и отдельно
-  скачан;
-- проверенный файл: MP4, H.264 + AAC, 720×1280, 14,9 секунды.
+- The Instagram extractor does not recognize the original `/s/...` path.
+- The Base64URL token in the tested link decodes to the `highlight:<numeric id>` form.
+- `InstagramStory` recognizes the corresponding canonical Highlight URL. The numeric ID is withheld because it identifies an unrelated creator's media.
+- With cookie authentication, the extractor returned 19 items.
+- The item matching the requested `story_media_id` was found and downloaded separately.
+- The tested file was MP4, H.264 + AAC, 720×1280, and 14.9 seconds long.
 
-## Область изменений
+## Scope
 
-Поддерживаются только опубликованные ссылки `/s/...`, в которых:
+Support only published `/s/...` links whose token decodes to `highlight:<numeric id>` and whose `story_media_id` parameter contains a numeric media ID.
 
-- токен корректно декодируется в `highlight:<цифровой id>`;
-- параметр `story_media_id` содержит цифровой идентификатор материала.
+Ordinary `/stories/<user>/<id>` links and links to an entire Highlight without `story_media_id` are outside this scope. Existing behavior for posts, Reels, photo posts, and Instagram Audio remains the same.
 
-Обычные ссылки `/stories/<user>/<id>` и ссылки на целый Highlight без
-`story_media_id` в эту задачу не входят. Текущее поведение для постов, Reels,
-фото-постов и Instagram Audio не меняется.
+## Design
 
-## Архитектура
+### Parse the link
 
-### Разбор ссылки
+Add a private `/s/...` link parser in `utils/tiktok_instagram_utils.py`. It should:
 
-В `utils/tiktok_instagram_utils.py` появится отдельный приватный разборщик
-ссылок `/s/...`. Он:
+1. Accept only the exact host `instagram.com` or `www.instagram.com`.
+2. Extract exactly one path segment after `/s/`.
+3. Decode the Base64URL token safely, restoring padding when needed.
+4. Accept only a result of the form `highlight:<numeric id>`.
+5. Extract a numeric `story_media_id`.
+6. Return the canonical Highlight URL, the original `story_media_id`, and the item's shortcode computed with yt-dlp's `_pk_to_id`.
 
-1. Проверяет точный хост `instagram.com` или `www.instagram.com`.
-2. Извлекает единственный сегмент после `/s/`.
-3. Безопасно декодирует Base64URL-токен с восстановлением padding.
-4. Принимает только результат `highlight:<цифровой id>`.
-5. Извлекает цифровой `story_media_id`.
-6. Возвращает канонический URL Highlight, исходный `story_media_id` и
-   shortcode элемента, рассчитанный функцией yt-dlp `_pk_to_id`.
+Do not pass damaged or incomplete `/s/...` links to yt-dlp's Generic extractor.
 
-Повреждённые или неполные `/s/...` ссылки не передаются Generic-экстрактору
-yt-dlp.
+### Retrieve metadata
 
-### Получение метаданных
+`get_instagram_info()` should recognize `/s/...` before the normal Instagram branch:
 
-`get_instagram_info()` определяет `/s/...` до обычной ветки Instagram:
+1. Convert the link to a canonical Highlight URL.
+2. Request the Highlight through yt-dlp with the project's Instagram cookie file.
+3. Find the entry whose `id` matches the shortcode derived from `story_media_id`.
+4. Return that entry as a single media item.
+5. Add the canonical URL, entry position, original numeric ID, and Highlight-share marker to internal result fields.
 
-1. Преобразует ссылку в канонический Highlight URL.
-2. Запрашивает Highlight через yt-dlp с проектным Instagram cookie-файлом.
-3. Ищет запись, чей `id` совпадает с shortcode из `story_media_id`.
-4. Возвращает найденную запись как одиночный материал.
-5. Добавляет во внутренние поля результата канонический URL, индекс записи,
-   исходный numeric id и признак Highlight share.
+Store those fields with `video_info` in the existing callback session. No separate database or migration is needed.
 
-Эти внутренние поля сохраняются в существующей callback-сессии вместе с
-`video_info`; отдельная база данных или миграция не нужна.
+### Download
 
-### Скачивание
+When `cached_info` has the Highlight-share marker, `download_instagram_video()` should:
 
-`download_instagram_video()` проверяет внутренний признак Highlight share в
-`cached_info`. Для такого материала функция:
+1. Replace the original `/s/...` URL with the saved canonical URL.
+2. Pass the saved `playlist_items` value to yt-dlp so it downloads only the selected position.
+3. Confirm that yt-dlp returned the expected shortcode.
+4. Continue the existing file processing flow, including codec checks and the Gokapi delivery step described at the time of this design.
 
-1. Подменяет исходный `/s/...` на сохранённый канонический URL.
-2. Передаёт yt-dlp сохранённый `playlist_items`, чтобы скачать только нужную
-   позицию.
-3. Проверяет, что yt-dlp вернул ожидаемый shortcode.
-4. Продолжает существующую обработку файла, включая проверку кодека и Gokapi.
+`download_instagram_audio()` already calls `download_instagram_video()` with the same `cached_info`, so audio does not need a separate Highlight-item selection path.
 
-`download_instagram_audio()` продолжает вызывать `download_instagram_video()`
-с тем же `cached_info`, поэтому отдельная реализация выбора Highlight-элемента
-для аудио не требуется.
+## Errors and user messages
 
-## Ошибки и сообщения
+The approved user message was:
 
-Пользовательское сообщение:
+> Could not retrieve this item from Instagram. The link may require authorization, the item may have been deleted, or the link may have expired. Try another link to the item.
 
-> Не удалось получить этот материал из Instagram. Возможно, ссылка требует
-> авторизации, материал удалён или ссылка больше не действует. Попробуйте
-> найти другую ссылку на этот материал.
+Keep the message in `messages.py`. Do not expose cookie state, a need to update cookies, bot-account subscriptions, or internal API/extractor responses to users.
 
-Сообщение хранится в `messages.py`. Пользователю не показываются:
+Use this message when the `/s/...` token or `story_media_id` is invalid, the Highlight is unavailable with current authorization, the selected entry has disappeared, the link or material is no longer available, Instagram changes its response, or yt-dlp cannot retrieve or download the selected item.
 
-- состояние или отсутствие cookies;
-- необходимость обновить cookies;
-- сведения о подписках аккаунта бота;
-- внутренние ответы API и экстрактора.
+Keep the exact underlying error, cookie state, and traceback in logs and the administrator crash report. Expected unavailability should have its own error category instead of `IG-UNKNOWN`.
 
-Сообщение используется, когда:
+The `igsh` parameter is unnecessary and should be omitted from the normalized URL. The callback session uses the canonical URL without `igsh`.
 
-- `/s/...` токен или `story_media_id` некорректен;
-- Highlight недоступен с текущей авторизацией;
-- нужного элемента больше нет в Highlight;
-- ссылка устарела, материал удалён или Instagram изменил ответ;
-- yt-dlp не смог получить или скачать выбранный элемент.
+## Compatibility
 
-Точная исходная ошибка, состояние cookies и traceback остаются в журнале и
-администраторском crash report. Ожидаемая недоступность материала получает
-отдельную категорию ошибки вместо `IG-UNKNOWN`.
+- Public posts, Reels, carousels, and photo posts keep their existing paths.
+- `/stories/...` still receives the existing unsupported-Stories response.
+- Without the project's Instagram cookie file, `/s/...` ends with the approved user message.
+- Browser cookies were used only for diagnosis and must not become a production dependency.
 
-Параметр `igsh` не нужен для обработки и не должен попадать в нормализованный
-URL. Внутри callback-сессии используется канонический URL без `igsh`.
+## Tests
 
-## Совместимость
+Regression tests should cover:
 
-- Публичные посты, Reels, карусели и фото-посты продолжают использовать
-  существующие ветки.
-- `/stories/...` по-прежнему получает существующий отказ о неподдерживаемых
-  Stories.
-- Если проектного Instagram cookie-файла нет, `/s/...` завершается
-  утверждённым пользовательским сообщением.
-- Браузерные cookies применялись только в диагностическом эксперименте и не
-  становятся зависимостью production-кода.
+1. Valid `/s/...` decoding and canonical URL construction.
+2. Tokens without Base64 padding.
+3. Damaged tokens, an incorrect prefix, and missing `story_media_id`.
+4. Selection of an entry that is not first in the playlist.
+5. A missing requested entry.
+6. Cookie and `playlist_items` use during download.
+7. Verification of the downloaded item's shortcode.
+8. The approved user message without cookie or subscription details.
+9. An expected-unavailability category instead of `IG-UNKNOWN`.
+10. Unchanged behavior for ordinary Instagram posts, Reels, and `/stories/...`.
 
-## Тестирование
-
-Регрессионные тесты должны проверять:
-
-1. Корректное декодирование `/s/...` и построение канонического URL.
-2. Поддержку токена без Base64 padding.
-3. Отказ для повреждённого токена, неверного префикса и отсутствующего
-   `story_media_id`.
-4. Поиск нужной записи не на первой позиции плейлиста.
-5. Ошибку, когда требуемой записи нет.
-6. Использование cookies и `playlist_items` при скачивании.
-7. Проверку shortcode загруженного элемента.
-8. Утверждённое пользовательское сообщение без упоминаний cookies и подписок.
-9. Категорию ожидаемой недоступности вместо `IG-UNKNOWN`.
-10. Неизменное поведение обычных Instagram-постов, Reels и `/stories/...`.
-
-После целевых тестов выполняются `ruff check .` и полный `pytest`.
+Run targeted tests, `ruff check .`, and the full `pytest` suite.

@@ -110,6 +110,8 @@ def classify_download_error_kind(message: str) -> str:
     msg_lower = message.lower()
     if "requested format is not available" in msg_lower:
         return "FORMAT_UNAVAILABLE"
+    if "http error 429" in msg_lower or "too many requests" in msg_lower:
+        return "RATE_LIMIT"
     # Проверяется до ACCESS_RESTRICTED: 403 на самом медиафайле — протухшая или
     # подписанная на другой исходящий IP ссылка, а не запрет доступа к видео.
     if is_media_forbidden_error(message):
@@ -121,6 +123,7 @@ def classify_download_error_kind(message: str) -> str:
             "forbidden",
             "login required",
             "private video",
+            "sign in to confirm you",
         )
     ):
         return "ACCESS_RESTRICTED"
@@ -137,7 +140,7 @@ def classify_download_error_kind(message: str) -> str:
         return "EXTRACTOR_RUNTIME"
     if any(signature.lower() in msg_lower for signature in _NETWORK_TIMEOUT_SIGNATURES):
         return "NETWORK_TIMEOUT"
-    return "UNKNOWN"
+    return "DOWNLOAD"
 
 
 def apply_network_opts(options: dict[str, Any], session_id: str | None = None) -> None:
@@ -192,7 +195,7 @@ def execute_with_backoff(
                 )
                 time.sleep(delay)
                 continue
-            if error_kind in {"FORMAT_UNAVAILABLE", "ACCESS_RESTRICTED"}:
+            if error_kind in {"FORMAT_UNAVAILABLE", "ACCESS_RESTRICTED", "RATE_LIMIT"}:
                 logger.warning(
                     "%s: expected yt-dlp error (%s): %s",
                     description,

@@ -88,14 +88,15 @@ def _error_code(category: str) -> str:
     `utils/telegram_utils.py` вместе с хэндлерами и антиспамом, а канарейке из
     этого модуля не нужно ничего, кроме одной строки формата.
     """
-    return f"YT-{category.upper()[:8]}-{uuid.uuid4().hex[:6].upper()}"
+    normalized = "UNEXPECT" if category.upper() == "UNKNOWN" else category.upper()
+    return f"YT-{normalized[:8]}-{uuid.uuid4().hex[:6].upper()}"
 
 
 def _failure(
     stage: str, exc: BaseException, format_id: str | None = None
 ) -> CanaryOutcome:
     """Превращает исключение в итог с категорией и кодом ошибки."""
-    category = classify_internal_error_category("youtube", str(exc))
+    category = classify_internal_error_category("youtube", exc)
     return CanaryOutcome(
         ok=False,
         stage=stage,
@@ -148,8 +149,8 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
                 ok=False,
                 stage="download",
                 detail="размер файла вне бюджета проверки",
-                category="UNKNOWN",
-                error_code=_error_code("UNKNOWN"),
+                category="FILE" if size_bytes <= 0 else "LARGE",
+                error_code=_error_code("FILE" if size_bytes <= 0 else "LARGE"),
                 format_id=format_id,
             )
         return CanaryOutcome(
@@ -164,6 +165,8 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
             ok=False,
             stage="cancelled",
             detail="проверка прервана по таймауту",
+            category="TIMEOUT",
+            error_code=_error_code("TIMEOUT"),
             format_id=format_id,
         )
     except Exception as exc:  # noqa: BLE001
@@ -209,7 +212,7 @@ def _build_report(outcome: CanaryOutcome, reaction: list[str]) -> str:
         f"Проверял: скачивание {canary_video_url()}",
         f"Формат: {outcome.format_id or '—'}",
         f"Этап: {outcome.stage}",
-        f"Код: {outcome.error_code or '—'} ({outcome.category or 'UNKNOWN'})",
+        f"Код: {outcome.error_code or '—'} ({outcome.category or 'UNEXPECT'})",
         f"Причина: {outcome.detail[:400]}",
         "",
         *reaction,

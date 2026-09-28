@@ -166,5 +166,5 @@ def test_link_handoff_keeps_the_requested_key(stored):
         )
     )
 
-    assert delivered is True
+    assert delivered.state == "delivered"
     assert _keys(stored) == [FORMAT_KEY]

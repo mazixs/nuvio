@@ -215,10 +215,41 @@ def test_preview_endpoint_reports_the_examined_interval(
 
     assert payload["days"] == 7
     assert payload["zone"] == "dense"
-    assert payload["cadence"] == "раз в неделю"
+    assert payload["cadence"] == "once a week"
+    assert payload["unit"] == "days"
     assert payload["queue_size"] == 2
+    assert payload["queue_hint"] == "people will receive a survey at the next check"
     assert payload["per_year"] == 52
     assert len(payload["offsets"]) == 13
+
+
+def test_settings_preview_uses_selected_language(authenticated_client, monkeypatch):
+    from web import app as web_app
+
+    monkeypatch.setattr(web_app, "get_csi_interval_days", lambda: 14)
+    monkeypatch.setattr(
+        web_app, "get_csi_metrics", lambda: {"total_responses": 0, "avg_rating": 0}
+    )
+    monkeypatch.setattr(web_app, "get_users_for_csi", lambda **kwargs: [])
+    authenticated_client.get("/language/ru?next=/settings")
+
+    page = authenticated_client.get("/settings")
+    preview = authenticated_client.get("/api/csi/preview?days=7").json()
+
+    assert '<html lang="ru">' in page.text
+    assert "Сохранить интервал" in page.text
+    assert preview["cadence"] == "раз в неделю"
+
+
+@pytest.mark.parametrize(
+    "days, english, russian",
+    [(1, "day", "день"), (2, "days", "дня"), (5, "days", "дней"), (21, "days", "день")],
+)
+def test_interval_units_follow_the_selected_language(days, english, russian):
+    from web.i18n import day_unit
+
+    assert day_unit("en", days) == english
+    assert day_unit("ru", days) == russian
 
 
 def test_preview_rejects_an_interval_the_form_would_reject(authenticated_client):

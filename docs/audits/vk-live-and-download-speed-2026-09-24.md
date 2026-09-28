@@ -1,45 +1,45 @@
-# VK live и скорость скачивания
+# VK live archives and download speed
 
-Дата: 2026-09-24. Исходный адрес: `https://vk.ru/live-22522055_456248075`.
+Date: 2026-09-24. Source: a public VK live archive. Its identifier is withheld to avoid identifying an unrelated publisher.
 
-## Что произошло
+## Findings
 
-1. [Проверка VK-ссылок](../../utils/rutube_vk_utils.py) до исправления не принимала домен `vk.ru` и путь `/live-...`. Запрос попадал в общий ответ о неверной ссылке. [Текст ответа](../../messages.py) перечислял только YouTube, TikTok и Instagram, хотя обычные VK и Rutube уже обрабатывались ботом.
-2. Закрепленный yt-dlp `2026.08.18.122307` сам не понимает исходный путь: воспроизведено `Unsupported URL`. У проекта yt-dlp есть [открытая задача о новом формате ссылок VK live](https://github.com/yt-dlp/yt-dlp/issues/17420). Архив доступен по `https://vk.com/video-22522055_456248075`: в текущей среде извлечены заголовок, форматы и длительность 28 522 секунды.
-3. Даже после нормализации старый код отказал бы по общему пределу 3 часа: запись длится примерно 7 ч 55 мин. Для этого архива продолжительность сама по себе не определяет, помещается ли файл в Telegram.
-4. Старый селектор VK `best[protocol=https]/best` выбирал прямой `url1080` с неизвестным yt-dlp размером. Проверка CDN по HEAD дала: 1080p - 10 273 644 286 байт, 720p - 2 813 877 807, 480p - 1 413 429 913, 360p - 880 846 165. В локальном режиме лимит бота равен 2000 МиБ, поэтому для этой записи подходит 480p. Запрос первого килобайта 480p вернул HTTP 206 и диапазон `0-1023/1413429913`.
+1. Before the fix, [VK URL validation](../../utils/rutube_vk_utils.py) rejected the `vk.ru` domain and `/live-...` path. The request received a generic invalid-link response. The [message](../../messages.py) listed only YouTube, TikTok, and Instagram even though the bot already handled regular VK and Rutube URLs.
+2. Pinned yt-dlp `2026.08.18.122307` did not recognize the source path and returned `Unsupported URL`. An upstream yt-dlp issue for this VK live URL format was open at the time. The corresponding `vk.com/video-...` archive yielded title, formats, and a duration of 28,522 seconds in the local environment.
+3. Even after URL normalization, the old three-hour limit would have rejected this roughly 7-hour-55-minute recording. Duration alone does not determine whether the file fits within Telegram limits.
+4. The previous VK selector, `best[protocol=https]/best`, chose direct `url1080` without a known yt-dlp size. CDN HEAD requests measured 10,273,644,286 bytes at 1080p; 2,813,877,807 at 720p; 1,413,429,913 at 480p; and 880,846,165 at 360p. The local bot limit is 2,000 MiB, so 480p fits. A request for the first kilobyte of 480p returned HTTP 206 with range `0-1023/1413429913`.
 
-Проверка выполнена с текущего компьютера без cookies. Полный файл и отправка в Telegram не выполнялись. Доступность CDN и скорость с production-сервера могут отличаться.
+These checks ran from the current computer without cookies. The full file was not downloaded or sent to Telegram at this stage. CDN access and speed from production may differ.
 
-## Изменения в рабочей копии
+## Changes in the working copy
 
-- Новый VK live URL распознается и для yt-dlp превращается в адрес архива `vk.com/video-...`. Активная трансляция получает отдельное понятное сообщение.
-- Для прямых MP4 перед показом меню читается `Content-Length`; выбирается самое высокое разрешение, которое укладывается в 95% лимита файла. Длинный архив принимается при таком варианте. Если безопасного прямого варианта нет, бот сообщает о лимите до скачивания.
-- Выбранный ID формата применяется после нажатия кнопки и входит в ключ кэша `file_id`. Для большого файла время ожидания загрузки рассчитывается от размера, а отмена передается в загрузчик. Повтор прямой загрузки использует `.part` и HTTP Range, вместо старта гигабайтного файла с нуля.
-- Убрана искусственная пауза 1 секунда перед отправкой файла. Исправлены подсказка о платформах и устаревшие утверждения о размере файлов.
+- VK live URLs are recognized and normalized to `vk.com/video-...` archive URLs for yt-dlp. An active live stream receives a separate, clear response.
+- Before displaying the menu for a direct MP4, the bot reads `Content-Length` and selects the highest resolution within 95% of the file limit. A long archive can therefore be accepted when its file fits. If no safe direct option exists, the bot reports the size limit before downloading.
+- The selected format ID is used after the button press and included in the `file_id` cache key. Large-file download timeouts are based on size, cancellation reaches the downloader, and a resumed direct download uses `.part` and HTTP Range instead of restarting a gigabyte file.
+- Removed an artificial one-second delay before delivery. Updated the platform hint and stale claims about file size.
 
-Изменения еще не опубликованы и не проверены полной отправкой этой записи.
+These changes had not yet been published or verified with a complete Telegram delivery of this recording.
 
-## Где тратится время
+## Where time is spent
 
-| Этап | Наблюдение | Действие |
+| Stage | Observation | Action |
 |---|---|---|
-| Разбор VK | В текущей среде получение метаданных и выбор безопасного формата заняли около 3 секунд | Повторный разбор перед загрузкой нужен для свежей подписанной медиа-ссылки; не передавать старый CDN URL из меню напрямую |
-| Загрузка архива | Для 480p передается около 1,41 ГБ, поэтому основное время зависит от CDN и канала сервера | Прямой MP4 избегает HLS-фрагментов и склейки; ограничивать размер до загрузки |
-| Сетевые настройки yt-dlp | Общие настройки задают `http_chunk_size=10 МиБ` и `continuedl=False`. Для этой записи это означает множество Range-запросов и полный повтор после сбоя; CDN подтвердил поддержку Range | Продолжение прямого MP4 включено. Влияние отключения нарезки по 10 МиБ сначала сравнить на одинаковом фрагменте и сервере: нарезка иногда помогает при ограничении скорости CDN |
-| Обработка видео | [ensure_ios_compatible_video](../../utils/media_processor.py#L560) запускает `ffprobe` и перекодирует только неподходящий видеокодек; прямой совместимый MP4 не перекодируется. Перед отправкой [геометрия](../../utils/telegram_utils.py#L3450) проверяется еще одним `ffprobe` | Замерить обе пробы на настоящем файле; объединять только при подтвержденной задержке |
-| Отправка Telegram | В локальном режиме бот передает Bot API путь к файлу. Сам Bot API затем отправляет большой файл в Telegram | Измерять этот этап отдельно от загрузки с VK; убрать искусственную задержку, что сделано |
-| Звук MP3 | Текущая кнопка обещает MP3 и всегда использует FFmpeg для перекодирования | Быстрый исходный M4A можно предложить отдельным действием после проверки качества и лимита, сохранив MP3 как явный выбор |
+| VK extraction | Local metadata extraction and safe format selection took about three seconds. | Extract again before download to obtain a fresh signed media URL. Do not pass an old CDN URL directly from the menu. |
+| Archive download | The 480p file is about 1.41 GB, so most time depends on the CDN and server connection. | Direct MP4 avoids HLS fragments and merging. Check size before download. |
+| yt-dlp network options | Shared options set `http_chunk_size=10 MiB` and `continuedl=False`. That caused many Range requests and a complete retry after failure; the CDN supports Range. | Direct MP4 resume is enabled. Compare chunking on the same file segment and server before disabling it: chunking can help when a CDN throttles speed. |
+| Video processing | [ensure_ios_compatible_video](../../utils/media_processor.py#L560) runs `ffprobe` and transcodes only incompatible codecs. A compatible direct MP4 is not transcoded. [Geometry](../../utils/telegram_utils.py#L3450) is probed again before delivery. | Time both probes on a real file and combine them only if delay is confirmed. |
+| Telegram delivery | In local mode, the bot passes a file path to the Bot API, which then uploads the large file to Telegram. | Measure delivery separately from VK download. The artificial delay was removed. |
+| MP3 audio | The current button promises MP3 and always uses FFmpeg conversion. | A direct source M4A could be offered as a separate action after checking quality and limits, while keeping MP3 as an explicit choice. |
 
-Самостоятельный универсальный движок загрузки пока не обоснован замерами. yt-dlp берет на себя извлечение подписанных URL, заголовки, сетевые повторы и изменения платформ. Для этой записи основное ускорение дает выбор прямого файла подходящего размера; [документация yt-dlp](https://github.com/yt-dlp/yt-dlp#download-options) подтверждает, что параллельная загрузка фрагментов относится к DASH/HLS, а не к прямому MP4.
+A custom universal downloader is not justified by these measurements. yt-dlp handles signed URL extraction, headers, retries, and platform changes. The main improvement for this recording is selecting a direct file of suitable size. The [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp#download-options) describes concurrent fragment downloads for DASH/HLS, not direct MP4.
 
-## Библиотеки и сложность
+## Dependencies and complexity
 
-Прямые зависимости указаны в [requirements.in](../../requirements.in). В пути этой VK-записи участвуют yt-dlp, HTTP-клиент для короткой проверки размера, FFmpeg/ffprobe при необходимости и Telegram-клиент при отправке. FastAPI и Uvicorn обслуживают отдельный WebUI и не участвуют в загрузке файла. Локально yt-dlp имеет закрепленную версию августа 2026 года, FFmpeg - 8.0.1; по одному возрасту пакета нельзя объяснить скорость. Обновление yt-dlp само по себе не решает этот URL: проблема `/live-...` в upstream остается открытой. Замена yt-dlp собственным extractor потребовала бы поддерживать меняющиеся адреса и подписи VK; измерений, оправдывающих это, нет.
+Direct dependencies are listed in [requirements.in](../../requirements.in). This VK path uses yt-dlp, an HTTP client for a short size probe, optional FFmpeg/ffprobe, and the Telegram client for delivery. FastAPI and Uvicorn serve the separate WebUI and are not part of file downloading. Locally, yt-dlp was pinned to an August 2026 version and FFmpeg was 8.0.1; package age alone does not explain speed. Updating yt-dlp alone does not solve `/live-...`, which remained an open upstream issue at the time. Replacing yt-dlp with a custom extractor would require maintaining changing VK URLs and signatures without measurements to justify that cost.
 
-## Следующие проверки
+## Next checks
 
-1. На сервере с локальным Bot API проверить путь URL -> меню 480p -> файл -> отправка -> повтор из кэша. Отдельно проверить облачный режим: запись должна быть отклонена до загрузки с фактическим лимитом 50 МиБ.
-2. Записать время каждой стадии и объем трафика на реальной загрузке: извлечение, HEAD, получение файла, проверка кодека, Telegram. Сравнить прямой MP4 и HLS только на одной и той же записи и качестве; отдельно сравнить прямую загрузку с `http_chunk_size=10 МиБ` и без нарезки.
-3. Проверить архив VK с отсутствующим `Content-Length`, истекшим CDN URL, приватным доступом и действующую трансляцию. При изменении extractor нужно заново проверить нормализацию `/live-...`.
-4. После измерений решить, стоит ли объединять две пробы `ffprobe` и предлагать исходный M4A для аудио. Не удалять совместимость с iOS и лимиты Telegram ради небольшой экономии времени.
+1. On a server with the local Bot API, verify URL -> 480p menu -> file -> Telegram delivery -> cache hit. Test cloud mode separately: the recording should be rejected before download under the actual 50 MiB limit.
+2. Record time and traffic for extraction, HEAD, file download, codec probe, and Telegram delivery. Compare direct MP4 with HLS only for the same recording and quality. Compare direct downloads with `http_chunk_size=10 MiB` and without chunking separately.
+3. Test a VK archive without `Content-Length`, an expired CDN URL, private access, and an active live stream. Recheck `/live-...` normalization whenever the extractor changes.
+4. After measurement, decide whether to combine ffprobe calls or offer source M4A audio. Preserve iOS compatibility and Telegram limits even if a shortcut saves a little time.
