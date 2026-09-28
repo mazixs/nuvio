@@ -1,286 +1,258 @@
-# Актуализация зависимостей, конфигурации и локальный Telegram Bot API
+# Dependency, Configuration, and Local Telegram Bot API Update
 
-Дата: 2026-07-23
-Статус: реализовано
+Date: 2026-07-23
+Status: Implemented
+> Archive of the adopted solution. Current startup commands and parameters are located in `README.md`, `docs/guides/deployment.md`, and `docs/guides/configuration.md`.
 
-> Архивное описание принятого решения. Актуальные команды запуска и параметры
-> находятся в `README.md`, `docs/guides/deployment.md` и
-> `docs/guides/configuration.md`.
+## 1. Objective
 
-## 1. Цель
+Update the operational environment of Nuvio without altering user workflows:
+1. Lock in current versions of Python dependencies and GitHub Actions;
+2. Make `.env.example` the sole configuration template, and `.secrets/.env` the only active configuration file;
+3. Remove Gokapi and send files up to 2 GB via the local Telegram Bot API;
+4. Run the bot, WebUI, and Telegram Bot API within a single Compose project, but in separate containers;
+5. Maintain clear user-facing error messages without exposing internal issues such as cookie state or local API status.
 
-Обновить эксплуатационный контур Nuvio без изменения пользовательских сценариев:
+## 2. Scope of Changes
 
-1. зафиксировать актуальные версии Python-зависимостей и GitHub Actions;
-2. сделать `.env.example` единственным шаблоном конфигурации, а `.secrets/.env` — единственным рабочим файлом настроек;
-3. убрать Gokapi и отправлять файлы размером до 2 ГБ через локальный Telegram Bot API;
-4. запускать бот, WebUI и Telegram Bot API одним Compose-проектом, но отдельными контейнерами;
-5. сохранить понятные пользовательские ошибки без раскрытия внутренних причин вроде состояния cookies или локального API.
+Changes include:
+- Python dependencies, Python version in the image, and GitHub Actions versions;
+- Structure of dependency files;
+- `.env.example`, configuration loading, and Compose files;
+- Integration of `python-telegram-bot` with the local Telegram Bot API;
+- Limiting media size, sending local files, and removing Gokapi;
+- Tests, deployment documentation, and migration instructions.
 
-## 2. Границы изменения
+Excluded:
+- Automatic switching between cloud and local Telegram Bot API;
+- Exposing the Telegram Bot API port externally;
+- Changes to WebUI functionality;
+- Automatic call to `logOut` for the working bot;
+- Implementation of previously designed Instagram Highlight support.
 
-В изменение входят:
+## 3. Locked Versions and Dependency Management
 
-- Python-зависимости, версия Python в образе и версии GitHub Actions;
-- структура файлов зависимостей;
-- `.env.example`, загрузка настроек и Compose-файлы;
-- интеграция `python-telegram-bot` с локальным Telegram Bot API;
-- ограничение размера медиа, отправка локальных файлов и удаление Gokapi;
-- тесты, документация развёртывания и инструкция миграции.
+As of the review date, the following direct dependencies are in use:
 
-Не входят:
+| Package            | Version     |
+|--------------------|-------------|
+| `python-telegram-bot` | 22.8        |
+| `yt-dlp`            | 2026.7.4    |
+| `curl_cffi`         | 0.15.0      |
+| `httpx`             | 0.28.1      |
+| `python-dotenv`     | 1.2.2       |
+| `fastapi`           | 0.139.2     |
+| `uvicorn`           | 0.51.0      |
+| `jinja2`            | 3.1.6       |
+| `itsdangerous`      | 2.2.0       |
+| `python-multipart`  | 0.0.32      |
+| `pytest`            | 9.1.1       |
 
-- автоматический переход между облачным и локальным Telegram Bot API;
-- публикация порта Telegram Bot API наружу;
-- изменение функциональности WebUI;
-- автоматический вызов `logOut` для рабочего бота;
-- реализация ранее спроектированной поддержки Instagram Highlight.
+`pydantic-core` is not updated separately: its version is determined by the strict dependency of the current `pydantic`.
 
-## 3. Зафиксированные версии и управление зависимостями
+### 3.1. Dependency Files
 
-На дату проверки актуальны следующие прямые зависимости:
+Proposed separation of declarations and reproducible installation:
+- `requirements.in` - direct application dependencies with exact, verified versions;
+- `requirements-dev.in` - includes `-r requirements.in`, `pytest`, and `ruff`;
+- `requirements.txt` - compiled full set for the production image;
+- `requirements-dev.txt` - compiled full set for development and CI.
 
-| Пакет | Версия |
-|---|---:|
-| `python-telegram-bot` | 22.8 |
-| `yt-dlp` | 2026.7.4 |
-| `curl_cffi` | 0.15.0 |
-| `httpx` | 0.28.1 |
-| `python-dotenv` | 1.2.2 |
-| `fastapi` | 0.139.2 |
-| `uvicorn` | 0.51.0 |
-| `jinja2` | 3.1.6 |
-| `itsdangerous` | 2.2.0 |
-| `python-multipart` | 0.0.32 |
-| `pytest` | 9.1.1 |
+Both final files are generated via `uv pip compile --generate-hashes`. The production Docker image installs only `requirements.txt`; CI installs `requirements-dev.txt`. This excludes `pytest` and `ruff` from the production image and ensures reproducible builds.
 
-`pydantic-core` не обновляется отдельно: установленная версия определяется строгой зависимостью актуального `pydantic`.
+### 3.2. Python and GitHub Actions
 
-### 3.1. Файлы зависимостей
+- Base image is migrated from `python:3.13-slim` to `python:3.14-slim`;
+- CI checks both Python 3.13 and 3.14, while Python 3.13 remains the officially declared minimum version;
+- `actions/checkout` is updated to version `v7`;
+- `actions/setup-python` is updated to version `v7`;
+- All other used actions remain on their current main versions.
 
-Предлагается разделить декларации и воспроизводимую установку:
+Automatic updating of `yt-dlp` on container startup is disabled by default. The production image must start with a verified version from the lock file. Nightly and master channels remain available for diagnostic purposes but do not alter the working container environment without operator intervention.
 
-- `requirements.in` — прямые зависимости приложения с точными проверенными версиями;
-- `requirements-dev.in` — `-r requirements.in`, `pytest` и `ruff`;
-- `requirements.txt` — скомпилированный полный набор для рабочего образа;
-- `requirements-dev.txt` — скомпилированный полный набор для разработки и CI.
+## 4. Unified Environment Configuration
 
-Оба итоговых файла создаются через `uv pip compile --generate-hashes`. Рабочий Docker-образ устанавливает только `requirements.txt`; CI устанавливает `requirements-dev.txt`. Это исключает `pytest` и `ruff` из рабочего образа и делает сборки воспроизводимыми.
+### 4.1. Configuration Source
 
-### 3.2. Python и GitHub Actions
-
-- базовый образ переводится с `python:3.13-slim` на `python:3.14-slim`;
-- CI проверяет Python 3.13 и 3.14, пока 3.13 остаётся заявленной нижней границей;
-- `actions/checkout` обновляется до `v7`;
-- `actions/setup-python` обновляется до `v7`;
-- остальные используемые действия остаются на актуальных основных версиях.
-
-Автообновление `yt-dlp` при каждом старте контейнера по умолчанию отключается. Рабочий образ должен запускаться с проверенной версией из lock-файла. Каналы `nightly` и `master` остаются явной диагностической возможностью, но не меняют окружение рабочего контейнера без решения оператора.
-
-## 4. Единая конфигурация окружения
-
-### 4.1. Источник настроек
-
-Используются только:
-
-- `.env.example` — версионируемый шаблон без секретов;
-- `.secrets/.env` — локальный рабочий файл, исключённый из Git.
-
-Команда подготовки:
+Only the following are used:
+- `.env.example` - versioned template without secrets;
+- `.secrets/.env` - local working file, excluded from Git.
+Preparation command:
 
 ```bash
 mkdir -p .secrets
 cp .env.example .secrets/.env
 ```
 
-Compose получает один и тот же файл и для подстановки `${VARIABLE}`, и как `env_file` сервисов. Корневой `.env` больше не требуется. Поддержка чтения старых `.env.local` и `.env` в Python сохраняется на один переходный цикл только для запуска без Docker; она помечается как устаревшая и не используется документацией.
+Compose receives the same file for variable substitution using `${VARIABLE}` and as an `env_file` for services. The root `.env` file is no longer required. Support for reading old `.env.local` and `.env` files in Python is preserved for one transitional cycle only when running without Docker; it is marked as deprecated and not used in documentation.
 
-### 4.2. Состав `.env.example`
+### 4.2. `.env.example` Template
 
-Шаблон содержит только настраиваемые оператором параметры:
-
+The template contains only operator-configurable parameters:
 - `TELEGRAM_TOKEN`, `ADMIN_IDS`;
 - `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`;
 - `WEB_USERNAME`, `WEB_PASSWORD`, `WEB_SECRET_KEY`, `WEB_PORT`;
 - `DOWNLOAD_WORKERS`, `BLOCKING_TASK_TIMEOUT`, `LOG_LEVEL`;
 - `FAIL2BAN_RETRIES`, `FAIL2BAN_TIME`;
-- пути к cookies при необходимости;
-- параметры `yt-dlp`, включая отключённое по умолчанию автообновление;
-- `TAG` для выбора версии образа.
+- paths to cookies if needed;
+- `yt-dlp` parameters, including disabled default auto-updating;
+- `TAG` for selecting the image version.
 
-Внутренние пути контейнеров (`DATA_DIR`, каталог обмена медиа, адреса сервисов внутри сети) задаются в Compose и не дублируются в пользовательском шаблоне.
+Internal container paths (`DATA_DIR`, media exchange directory, internal service addresses) are defined in Compose and are not duplicated in the user-provided template.
 
-Переменные Gokapi удаляются. Устаревшая инструкция о ручном добавлении `python-dotenv` удаляется.
+Gokapi variables are removed. The outdated instruction about manually adding `python-dotenv` is removed.
 
-### 4.3. Проверка конфигурации
+### 4.3. Configuration Validation
 
-- `TELEGRAM_TOKEN` и `ADMIN_IDS` обязательны для бота;
-- `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` обязательны для локального Telegram Bot API;
-- пустые значения и шаблонный пароль `changeme` не допускаются для рабочего WebUI;
-- секреты никогда не выводятся в логах;
-- сообщения пользователю не содержат сведения о cookies, внутренних сервисах или причинах авторизации бота.
+- `TELEGRAM_TOKEN` and `ADMIN_IDS` are required for the bot;
+- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are required for the local Telegram Bot API;
+- empty values and the default template password `changeme` are not allowed for the WebUI;
+- secrets are never logged;
+- user messages do not contain information about cookies, internal services, or reasons for bot authentication.
 
-## 5. Структура Compose
+## 5. Compose Structure
 
-Вместо двух почти одинаковых файлов вводятся:
+Instead of two nearly identical files, the following are introduced:
+- `compose.yaml` - the main working configuration with images from GHCR;
+- `compose.dev.yaml` - a small addition for local builds from source.
 
-- `compose.yaml` — общая рабочая конфигурация с образами из GHCR;
-- `compose.dev.yaml` — небольшое дополнение для локальной сборки из исходников.
+Services:
+1. `telegram-bot-api` - a local API accessible only within the internal network;
+2. `bot` - the main Telegram bot;
+3. `web` - the WebUI.
 
-Сервисы:
+Shared volume mounts:
+- Nuvio data;
+- Telegram Bot API state;
+- media exchange directory between `bot` and `telegram-bot-api`.
 
-1. `telegram-bot-api` — локальный API, доступный только во внутренней сети;
-2. `bot` — основной Telegram-бот;
-3. `web` — WebUI.
+The media exchange directory is mounted into both containers at the same absolute path. This is a mandatory requirement for local mode: the path passed to the library must point to the same file inside the API container.
 
-Общие постоянные тома:
+The `telegram-bot-api` service does not expose a port to the host. The `bot` service depends on its readiness check. The WebUI still exposes only the configured port.
 
-- данные Nuvio;
-- состояние Telegram Bot API;
-- каталог обмена медиа между `bot` и `telegram-bot-api`.
+## 6. Telegram Bot API Image
 
-Каталог обмена монтируется в оба контейнера по одинаковому абсолютному пути. Это обязательное условие локального режима: путь, переданный библиотекой, должен указывать на тот же файл внутри контейнера API.
+Since the official TDLib project does not publish an official Docker image, a separate multi-stage `Dockerfile.telegram-bot-api` is created in the repository:
+- source code is taken from the official `tdlib/telegram-bot-api`;
+- the revision is fixed using a full commit identifier;
+- compilation is performed in the build stage;
+- only the binary and required libraries are copied into the final minimal image;
+- the server is started with `--local`;
+- `api_id` and `api_hash` are provided only via environment variables;
+- state is stored in a separate persistent volume.
 
-`telegram-bot-api` не публикует порт на хост. `bot` зависит от его проверки готовности. WebUI по-прежнему публикует только настроенный порт.
+Updates to the fixed revision are performed deliberately, alongside build verification and migration notes for the Telegram Bot API.
 
-## 6. Образ Telegram Bot API
+## 7. Application Integration with Local API
 
-Так как официальный проект TDLib не публикует официальный Docker-образ, в репозитории создаётся отдельный многоэтапный `Dockerfile.telegram-bot-api`:
+### 7.1. Client Configuration
 
-- исходный код берётся из официального `tdlib/telegram-bot-api`;
-- ревизия фиксируется полным идентификатором коммита;
-- компиляция выполняется в сборочном этапе;
-- в итоговый минимальный образ копируются только бинарный файл и необходимые библиотеки;
-- сервер запускается с `--local`;
-- `api_id` и `api_hash` поступают только из окружения;
-- состояние хранится в отдельном постоянном томе.
+Internal parameters are added to the application configuration:
+- base URL for bot methods: `http://telegram-bot-api:8081/bot`;
+- base URL for files: `http://telegram-bot-api:8081/file/bot`;
+- local mode;
+- maximum file size for uploads, defaulting to 2000 MB.
 
-Обновление зафиксированной ревизии выполняется осознанно вместе с проверкой сборки и миграционных примечаний Telegram Bot API.
-
-## 7. Интеграция приложения с локальным API
-
-### 7.1. Настройки клиента
-
-В конфигурацию приложения добавляются внутренние параметры:
-
-- базовый адрес методов бота: `http://telegram-bot-api:8081/bot`;
-- базовый адрес файлов: `http://telegram-bot-api:8081/file/bot`;
-- локальный режим;
-- максимальный размер отправляемого файла, по умолчанию 2000 МБ.
-
-При создании `Application` используются:
-
+When creating an `Application`, the following are used:
 - `base_url(...)`;
 - `base_file_url(...)`;
 - `local_mode(True)`;
-- увеличенный `media_write_timeout(...)`.
+- increased `media_write_timeout(...)`.
+Cloud API mode remains available for use without Compose: if the local mode is disabled, standard Telegram addresses and a 50 MB limit are used.
 
-Режим облачного API остаётся доступен для запуска без Compose: если локальный режим отключён, используются стандартные адреса Telegram и лимит 50 МБ.
+### 7.2. File Handling
 
-### 7.2. Работа с файлами
+In the internal interface, the download result is always presented as a local `Path`. In local mode, `python-telegram-bot` sends the server an absolute path; in cloud mode, the library sends the file content directly.
+`MAX_FILE_SIZE` is no longer a fixed 50 MB value - it is calculated based on the mode and configuration. All format filters for YouTube, TikTok, Instagram, Rutube, and VK use the same limit.
+If the final file exceeds the set limit, it is not uploaded to the external service. The user receives a general message:
+> Failed to retrieve this material from the specified source. The link may require authentication, the content may have been removed, or the link may no longer be valid.
+The specific source is inserted into the existing notification system. Internal reasons and error codes are logged.
 
-Во внутреннем интерфейсе результат скачивания всегда представлен локальным `Path`. В локальном режиме `python-telegram-bot` передаёт серверу абсолютный путь; в облачном режиме библиотека отправляет содержимое файла.
+### 7.3. Removal of Gokapi
 
-`MAX_FILE_SIZE` перестаёт быть константой 50 МБ и вычисляется из режима и конфигурации. Все фильтры форматов YouTube, TikTok, Instagram, Rutube и VK используют единый предел.
-
-Если итоговый файл превышает установленный предел, он не загружается во внешний сервис. Пользователь получает общее сообщение:
-
-> Не удалось получить этот материал из указанного источника. Возможно, ссылка требует авторизации, материал удалён или ссылка больше не действует.
-
-Конкретный источник подставляется существующей системой сообщений. Внутренняя причина и код ошибки сохраняются в логах.
-
-### 7.3. Удаление Gokapi
-
-Удаляются:
-
+The following are removed:
 - `utils/gokapi_utils.py`;
-- настройки и проверки Gokapi;
-- ветки, возвращающие внешнюю ссылку вместо файла;
-- подписи и пункты меню, связанные с Gokapi;
-- документация и тесты внешней выгрузки.
+- Gokapi settings and checks;
+- branches returning external links instead of files;
+- signatures and menu items related to Gokapi;
+- documentation and tests for external file export.
+After these changes, the external file service is no longer required.
 
-После изменения внешний файловый сервис не требуется.
+## 8. Migration of the Working Bot
 
-## 8. Миграция рабочего бота
+Telegram does not support reliable simultaneous operation of a single token through both cloud and local Bot APIs. Therefore, migration is performed with a short scheduled downtime:
+1. Stop the current bot;
+2. Call `logOut` in the cloud Bot API for its token;
+3. Start the Compose project with local API;
+4. Wait for the API to become ready and for the bot to start;
+5. Verify receipt of updates and sending of a small file;
+6. Verify sending of a file between 60–100 MB;
+7. Only after successful verification is the migration considered complete.
+The `logOut` operation is not performed automatically by the application because it changes the service mode for the working token.
+To return to the cloud API, the local bot is stopped, `logOut` is executed on the local server, and then the application is restarted with the local mode disabled.
 
-Telegram не поддерживает надёжную одновременную работу одного токена через облачный и локальный Bot API. Поэтому миграция выполняется с коротким плановым простоем:
+## 9. Failures and User Messages
 
-1. остановить текущий бот;
-2. вызвать `logOut` в облачном Bot API для его токена;
-3. запустить Compose-проект с локальным API;
-4. дождаться готовности API и запуска бота;
-5. проверить приём обновлений и отправку небольшого файла;
-6. проверить отправку файла размером 60–100 МБ;
-7. только после успешной проверки считать миграцию завершённой.
+| Situation | Behavior |
+|---------|---------|
+| Local API not ready at startup | Compose does not start the bot until readiness is confirmed |
+| API becomes unavailable during operation | Request ends with a general error; details are logged |
+| File larger than 2 GB | General error when retrieving material; file is deleted |
+| Insufficient disk space | General error; temporary files are cleared; details logged |
+| Link requires authentication or content has been removed | General message with possible external reasons |
+| Cookies have expired or the service account lacks access | This internal detail is not shown to the user |
+Automatic switching to the cloud API is not available: after `logOut`, there is a risk of losing updates and unpredictable behavior.
 
-Операция `logOut` не выполняется приложением автоматически, потому что меняет режим обслуживания рабочего токена.
+## 10. Security and Operational Limits
 
-Для возврата к облачному API локальный бот останавливается, выполняется `logOut` на локальном сервере, после чего приложение запускается с отключённым локальным режимом.
+- The Telegram Bot API port is accessible only to Compose project containers;
+- Tokens, `api_id`, `api_hash`, cookies, and passwords do not appear in images, Git repositories, or logs;
+- The media directory is accessible only to containers that need it;
+- Temporary files are deleted after successful delivery and after errors;
+- Operators must ensure sufficient free disk space - at least the product of the maximum file size and the number of simultaneous uploads, with a buffer for re-encoding;
+- The local Telegram Bot API eliminates dependency on Gokapi but does not eliminate network dependency on Telegram data centers.
 
-## 9. Отказы и пользовательские сообщения
+## 11. Verification
 
-| Ситуация | Поведение |
-|---|---|
-| Локальный API не готов при старте | Compose не запускает бот до успешной проверки готовности |
-| API стал недоступен во время работы | запрос завершается общей ошибкой, подробность пишется в лог |
-| Файл больше 2 ГБ | общая ошибка получения материала, файл удаляется |
-| Недостаточно места на диске | общая ошибка, очистка временных файлов, подробность в лог |
-| Ссылка требует авторизации или материал удалён | общее сообщение с возможными внешними причинами |
-| Cookies устарели или аккаунт сервиса не имеет доступа | пользователю эта внутренняя подробность не показывается |
+### 11.1. Automated Tests
 
-Автоматического перехода на облачный API нет: после `logOut` он создаёт риск потери обновлений и непредсказуемого поведения.
-
-## 10. Безопасность и эксплуатационные ограничения
-
-- порт Telegram Bot API доступен только контейнерам Compose-проекта;
-- токен, `api_id`, `api_hash`, cookies и пароли не попадают в образ, Git или логи;
-- каталог медиа доступен только контейнерам, которым он нужен;
-- временные файлы удаляются после успешной отправки и после ошибок;
-- оператору нужно предусмотреть свободное место не меньше произведения максимального размера файла на число одновременных загрузок, с запасом на перекодирование;
-- локальный Telegram Bot API устраняет зависимость от Gokapi, но не устраняет сетевую зависимость от дата-центров Telegram.
-
-## 11. Проверка
-
-### 11.1. Автоматические тесты
-
-- разбор и валидация новых переменных окружения;
-- выбор облачного и локального режима;
-- настройка `ApplicationBuilder`;
-- единый предел размера для всех загрузчиков;
-- возврат `Path` вместо URL;
-- удаление временного файла при превышении лимита и ошибке;
-- отсутствие пользовательских сообщений о cookies и внутренних сервисах;
-- полный набор `pytest`;
+- Parsing and validation of new environment variables;
+- Selection of cloud and local modes;
+- Configuration of `ApplicationBuilder`;
+- Unified size limit for all loaders;
+- Return of `Path` instead of URL;
+- Temporary file deletion upon limit exceedance or error;
+- No user-facing messages about cookies or internal services;
+- Full set of `pytest`;
 - `ruff check`.
 
-### 11.2. Проверка инфраструктуры
+### 11.2. Infrastructure Checks
 
 - `docker compose --env-file .secrets/.env config`;
-- сборка основного образа;
-- сборка образа Telegram Bot API;
-- проверка готовности API;
-- запуск сервисов с временными тестовыми значениями без публикации порта API.
+- Building the main image;
+- Building the Telegram Bot API image;
+- Checking API readiness;
+- Starting services with temporary test values without publishing the API port.
 
-### 11.3. Ручная приёмка
+### 11.3. Manual Acceptance
 
-- обычное видео меньше 50 МБ;
-- файл 60–100 МБ, подтверждающий обход облачного лимита;
-- файл около настроенного предела;
-- недоступная, удалённая и требующая авторизации ссылка;
-- перезапуск контейнеров с сохранением состояния;
-- проверка отсутствия секретов в логах и выводе `docker compose config`.
+- Regular video under 50 MB;
+- A 60–100 MB file confirming cloud limit bypass;
+- A file close to the configured limit;
+- An inaccessible, deleted, or authorization-required link;
+- Container restart with state preservation;
+- Verification of no secrets in logs and output of `docker compose config`.
 
-## 12. Критерии готовности
+## 12. Readiness Criteria
 
-Изменение считается завершённым, когда:
-
-1. прямые зависимости закреплены на проверенных актуальных версиях, рабочие и тестовые зависимости разделены;
-2. CI проходит на Python 3.13 и 3.14 с актуальными основными версиями Actions;
-3. `docker compose` не требует корневой `.env`;
-4. документация ведёт только от `.env.example` к `.secrets/.env`;
-5. все три сервиса запускаются одним Compose-проектом;
-6. Telegram Bot API не доступен извне;
-7. бот отправляет локальный файл размером более 50 МБ;
-8. Gokapi полностью удалён из кода, настроек и документации;
-9. внутренние причины авторизации и cookies не показываются пользователю;
-10. `pytest`, `ruff` и сборка обоих образов проходят успешно.
+A change is considered complete when:
+1. Direct dependencies are pinned to verified, up-to-date versions, and production and test dependencies are separated;
+2. CI passes on Python 3.13 and 3.14 with current major versions of Actions;
+3. `docker compose` does not require a root `.env` file;
+4. Documentation flows only from `.env.example` to `.secrets/.env`;
+5. All three services are launched within a single Compose project;
+6. The Telegram Bot API is not accessible from outside;
+7. The bot sends a local file larger than 50 MB;
+8. Gokapi is completely removed from the code, configurations, and documentation;
+9. Internal authentication and cookie reasons are not shown to users;
+10. `pytest`, `ruff`, and building both images pass successfully.

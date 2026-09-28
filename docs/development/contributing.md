@@ -1,6 +1,6 @@
-# Руководство для разработчиков
+# Contributor guide
 
-## Подготовка окружения
+## Local environment
 
 ```bash
 git clone https://github.com/mazixs/nuvio.git
@@ -10,93 +10,81 @@ source .venv/bin/activate
 python -m pip install --requirement requirements-dev.txt
 ```
 
-Системные зависимости: FFmpeg, git, Python 3.14+
+System dependencies: Python 3.14+, FFmpeg, and git.
 
-Прямые зависимости редактируются в `requirements.in` и
-`requirements-dev.in`. После изменения пересоберите lock-файлы с хешами:
+Edit direct dependencies in `requirements.in` and `requirements-dev.in`. Rebuild the hash-pinned lock files after a dependency change:
 
 ```bash
 uv pip compile --python-version 3.14 --generate-hashes --output-file requirements.txt requirements.in
 uv pip compile --python-version 3.14 --generate-hashes --output-file requirements-dev.txt requirements-dev.in
 ```
 
-## Структура кодовой базы
+## Code layout
 
-- `main.py` — точка входа, регистрация хэндлеров, event loop, scheduled tasks
-- `config.py` — парсинг конфигурации из env
-- `messages.py` — все пользовательские тексты (централизовано)
-- `pyproject.toml` — конфигурация ruff (per-file-ignores, правила линтинга)
-- `utils/` — основная бизнес-логика
-- `web/` — FastAPI WebUI дашборд
-- `tests/` — pytest тесты
-- `docs/` — документация
+- `main.py` - entry point, handler registration, event loop, scheduled tasks.
+- `config.py` - environment configuration.
+- `messages.py` - centralized bot-facing text.
+- `pyproject.toml` - ruff configuration.
+- `utils/` - core application logic.
+- `web/` - FastAPI analytics WebUI.
+- `tests/` - pytest tests.
+- `docs/` - documentation.
 
-## Тестирование
+## Tests
 
 ```bash
-# Все тесты
 pytest
-
-# Конкретный файл
 pytest tests/test_youtube_smoke.py -v
-
-# По имени
 pytest -k "test_name"
-
-# Полный набор с покрытием, как в CI
 coverage run --branch -m pytest tests/
 coverage report --fail-under=70
 ```
 
-### Маркеры pytest
+Pytest markers:
 
-- `syntax` — синтаксическая корректность, импорты и линтинг (ruff)
-- `unit` — юнит-тесты с моками
-- `integration` — интеграционные (SQLite кэш, CSI)
+- `syntax` - syntax, imports, and ruff checks.
+- `unit` - tests with mocked boundaries.
+- `integration` - SQLite cache and CSI integration.
 
-### Принципы тестирования
+YouTube tests use a mocked `YoutubeDL` and make no network requests. Real cookie files are disabled during tests. Shared fixtures and hooks live in `tests/conftest.py`.
 
-- YouTube тесты используют мокированный YoutubeDL (без сети)
-- Реальные cookies автоматически отключаются в тестах
-- Fixtures и hooks в `tests/conftest.py`
+## Code conventions
 
-## Соглашения по коду
+### User-facing text
 
-### Тексты пользователю
+Keep bot-facing messages in `messages.py` rather than embedding them in handlers. Bot messages, comments, and docstrings remain Russian. Documentation is written in English, and the WebUI defaults to English with an optional Russian translation.
 
-Все user-facing сообщения — в `messages.py`. Не хардкодить тексты в хэндлерах.
+### Errors
 
-### Обработка ошибок
+- Error IDs use `PREFIX-CATEGORY-RANDOM`, for example `YT-ACCESS-A1B2C3`.
+- Prefixes: `YT`, `TT`, `IG`, `RU`, `VK`, `TG`, `FILE`, and `BOT`.
+- Show users a safe platform-specific explanation and an error ID. Keep tracebacks and operational details in administrative logs.
+- Use `Exception.add_note()` to attach diagnostic context.
+- The [error code reference](../error-codes.md) defines current categories and their eight-character IDs.
 
-- Коды ошибок: формат `PREFIX-CATEGORY-RANDOM` (например `YT-ACCESS-A1B2C3`)
-- Prefixes: `YT` (YouTube), `TT` (TikTok), `IG` (Instagram), `RU` (Rutube), `VK` (VK Video), `TG` (Telegram), `FILE`, `BOT`
-- Пользователю показывается только код, traceback уходит в логи
-- Используется `Exception.add_note()` для контекста
+### Async work
 
-### Асинхронность
+- Run blocking yt-dlp and FFmpeg operations in `ThreadPoolExecutor`.
+- `DOWNLOAD_WORKERS` defaults to 8.
+- Use `match`/`case` for platform and format selection where appropriate.
 
-- Блокирующие операции (yt-dlp, ffmpeg) выполняются в `ThreadPoolExecutor`
-- `DOWNLOAD_WORKERS=8` по умолчанию
-- `match-case` для выбора платформы/формата
+### Databases
 
-### Базы данных
+- SQLite uses WAL for concurrent access (`PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`).
+- `_cursor_read()` handles reads; `_cursor_write()` starts writes with `BEGIN IMMEDIATE`.
+- `telegram_cache.db` stores Telegram file IDs; `analytics.db` stores users, events, CSI feedback, and settings.
 
-- SQLite с WAL mode для конкурентного доступа (`PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`)
-- Ручные транзакции: `_cursor_read()` для SELECT, `_cursor_write()` с `BEGIN IMMEDIATE` для записи
-- `video_cache.db` — кэш file_id
-- `analytics.db` — аналитика: пользователи, события, CSI-ответы
+### Logging
 
-### Логирование
+- Configure logging through `utils/logger.py` and `setup_logger`.
+- Logs rotate at 10 MB with five backups.
+- Set the level with `LOG_LEVEL`.
 
-- Используется `utils/logger.py` (`setup_logger`)
-- Rotating file handler: 10MB, 5 backups
-- Уровень через `LOG_LEVEL` env var
-
-## Docker
+## Docker development
 
 ```bash
 docker compose --env-file .secrets/.env \
   -f compose.yaml -f compose.dev.yaml up --build
 ```
 
-Два сервиса: `bot` и `web`. Общий volume `bot-data` для аналитической БД.
+The stack runs `bot` and `web`; both use the `bot-data` volume for the analytics database.

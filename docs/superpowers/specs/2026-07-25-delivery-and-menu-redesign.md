@@ -1,185 +1,158 @@
-# Доставка без диска и переработка меню форматов
+# Disk-free delivery and format menu redesign
 
-Дата: 2026-07-25. Статус: спецификация, к реализации не начата.
+Date: 2026-07-25. Status: specification; implementation has not started.
 
-Документ фиксирует четыре требования и, главное, **измеренные границы**, внутри
-которых их можно выполнять. Все числа получены на живой системе — продакшен-хост
-`dockge`, локальный Bot API, реальные ссылки. Ни одно не взято из документации
-без проверки.
+This document records four requirements and the **measured limits** within which they can be met. All measurements came from a live system: a production host, the local Bot API, and real links. The host name is withheld; documentation values were not used without verification.
 
 ---
 
-## 1. Каскад качества по бюджету
+## 1. Quality fallback within the size limit
 
-### Требование
-Для многочасового видео 1080p не влезает в лимит доставки. Вместо отказа нужно
-опускаться на следующее проходное разрешение.
+### Requirement
 
-### Статус: **уже работает**
+A multi-hour 1080p video can exceed the delivery limit. In that case, try the next lower resolution that fits instead of rejecting the video.
 
-`select_tg_video_format` перебирает форматы от высокого разрешения к низкому и
-берёт первую пару, влезающую в бюджет. Требование закреплено тестами
-`test_long_video_cascades_down_to_the_next_fitting_resolution` и
-`test_cascade_continues_until_something_fits` — оба прошли без правок кода.
+### Status: **already works**
 
-Арифметика на измеренных битрейтах 32-минутного ролика, пересчитанных на 4 часа:
+`select_tg_video_format` considers formats from high to low resolution and selects the first video/audio pair that fits. The tests `test_long_video_cascades_down_to_the_next_fitting_resolution` and `test_cascade_continues_until_something_fits` both passed without code changes.
 
-| разрешение | 32 минуты | 4 часа | влезает в 2000 МБ |
-|---|---|---|---|
-| 1080p H.264 | 301.2 МБ | 2.26 ГБ | нет |
-| 720p H.264 | 183.9 МБ | 1.38 ГБ | да ← выбор |
-| 480p H.264 | 67.1 МБ | 504 МБ | да |
+Measured bitrates from a 32-minute video, projected to four hours:
 
-Потолок 1080p подтверждён владельцем. Он задан константой
-`TG_VIDEO_MAX_HEIGHT` в `utils/tg_video_choice.py`.
+| Resolution | 32 minutes | 4 hours | Fits within 2,000 MB? |
+|---|---:|---:|---|
+| 1080p H.264 | 301.2 MB | 2.26 GB | No |
+| 720p H.264 | 183.9 MB | 1.38 GB | Yes, selected |
+| 480p H.264 | 67.1 MB | 504 MB | Yes |
+
+The owner confirmed the 1080p ceiling. It is set by `TG_VIDEO_MAX_HEIGHT` in `utils/tg_video_choice.py`.
 
 ---
 
-## 2. Отдавать ссылку вместо файла
+## 2. Send a link instead of a file
 
-### Требование
-Не качать на диск и не выгружать повторно, а передавать прямую ссылку — пусть
-Telegram забирает сам.
+### Requirement
 
-### Измеренная граница: **20 МБ, и локальный сервер её не снимает**
+Pass a direct media URL to Telegram so it fetches the file, avoiding a local download followed by another upload.
 
-Проверено отправкой `sendVideo` с HTTP-ссылкой через локальный Bot API на файлы
-точного размера с корректным `content-length`:
+### Measured limit: **20 MB, including with the local Bot API**
 
-| файл | результат | время |
+The following results came from `sendVideo` requests with HTTP URLs, known file sizes, and correct `content-length` headers through the local Bot API:
+
+| File | Result | Time |
+|---|---|---:|
+| 9.7 MB, `video/mp4` | Accepted | 0.1 s |
+| 19.5 MB, `video/mp4` | Accepted | 0.1 s |
+| 30.6 MB, `video/mp4` | Rejected: `failed to get HTTP URL content` | 0.5 s |
+| Instagram CDN, 4.6 MB | Accepted | 1.0 s |
+
+The Bot API documentation gives a 5 MB URL limit for photos and 20 MB for other media. The local server raises the limit for **file uploads** to 2,000 MB; it does not raise the URL limit.
+
+The local server also rejected an internal Compose media URL with `wrong HTTP URL specified`. This Bot API behavior does not replace Nuvio's own domain allowlist.
+
+### Expected benefit
+
+The 20 MB limit covers most measured TikTok and Instagram traffic:
+
+| Source | Measured sizes | Below 20 MB? |
 |---|---|---|
-| 9.7 МБ, `video/mp4` | **принят** | 0.1 с |
-| 19.5 МБ, `video/mp4` | **принят** | 0.1 с |
-| 30.6 МБ, `video/mp4` | отказ: `failed to get HTTP URL content` | 0.5 с |
-| Instagram CDN, 4.6 МБ | **принят** | 1.0 с |
+| TikTok fast path | 0.27, 2.5, 3.2, 3.3, 5.3, 18.6 MB | Almost always |
+| Instagram reels | 4.6, 5.9 MB | Yes |
+| YouTube 1080p | 331 MB | No |
 
-Документация Bot API это подтверждает: HTTP-ссылка — 5 МБ для фото и 20 МБ для
-остального. Раздел про локальный сервер снятия этого лимита не упоминает: он
-поднимает до 2000 МБ загрузку **файлом**, а не по ссылке.
+For one measured TikTok request, 2.65 s downloading plus 1.89 s sending, or **4.54 s**, could be replaced with a **0.1-1.0 s** URL delivery without using local disk.
 
-Побочно выяснено: локальный сервер отвергает внутренние адреса
-(`http://bot:8099/...` → `wrong HTTP URL specified`). Это защита самого Bot API,
-но полагаться на неё вместо своего allowlist нельзя.
+### Link expiration
 
-### Что это даёт
+The owner's reasoning was that a link which remains valid long enough for Nuvio to download should also remain valid while Telegram fetches it. Telegram fetched the measured link in 0.1 s, compared with Nuvio's 2.65 s download. This addressed the objection in the measured case.
 
-Порог 20 МБ покрывает большую часть трафика. Реальные размеры из логов и замеров:
+### Accepted tradeoffs
 
-| источник | размеры | попадает под 20 МБ |
-|---|---|---|
-| TikTok (быстрый путь) | 0.27, 2.5, 3.2, 3.3, 5.3, 18.6 МБ | почти всегда |
-| Instagram (рилсы) | 4.6, 5.9 МБ | всегда |
-| YouTube 1080p | 331 МБ | никогда |
+- **The codec cannot be checked locally.** The media does not pass through Nuvio, so `ffprobe` has no file to inspect. ADR-001 requires H.264. The TikTok resolver returned it in three tested videos, and two Instagram reels used H.264 + AAC, but this relies on a third party's output.
+- **The `file_id` cache still works.** `sendVideo` returns a `Message` with `video.file_id`, which can be cached as before.
+- **The domain allowlist remains required.** Nuvio sends the URL directly to Telegram.
 
-Экономия на измеренном запросе TikTok: скачивание 2.65 с + отправка 1.89 с =
-**4.54 с** заменяются на **0.1–1.0 с**, и диск не трогается вовсе.
+### Decision
 
-### Ответ на возражение про «ссылка может устареть»
-
-Владелец прав: если ссылка живёт достаточно, чтобы мы её скачали, она живёт и
-для того, чтобы её забрал Telegram — а забирает он быстрее нас (0.1 с против
-2.65 с). Возражение снято.
-
-### Цена, которую надо принять осознанно
-
-- **Проверки кодека не будет.** Файл через нас не проходит, `ffprobe` запустить
-  не на чем. ADR-001 требует H.264: на быстром пути TikTok резолвер отдаёт его
-  устойчиво (проверено на трёх роликах), Instagram — тоже (H.264 + AAC на двух
-  рилсах). Но это доверие к третьей стороне без страховки.
-- **Кэш `file_id` продолжает работать:** `sendVideo` возвращает `Message` с
-  `video.file_id`, писать в кэш по-прежнему есть что.
-- **allowlist доменов обязателен** и уже есть — ссылка уходит наружу как есть.
-
-### Решение
-
-Пробовать ссылку, когда размер известен и ≤ 20 МБ; при любом отказе Telegram —
-падать на текущий путь через диск. Ровно та же схема отката, что у быстрых путей.
+Try URL delivery when the size is known and at most 20 MB. If Telegram rejects it, fall back to the existing disk-based path, as the fast paths already do.
 
 ---
 
-## 3. Каскадное меню форматов
+## 3. Hierarchical format menu
 
-### Что сейчас
+### Current menu
 
-Первый экран: `Скачать видео для ТГ`, `Скачать только звук`, `Дополнительно`.
+The first screen offers `Скачать видео для ТГ` (download video for Telegram), `Скачать только звук` (download audio only), and `Дополнительно` (more options).
 
-Экран «Дополнительно» (`_build_youtube_more_menu`) — плоский список с
-произвольными ограничениями:
+The more-options screen, built by `_build_youtube_more_menu`, is a flat list with arbitrary limits:
 
-| элемент | ограничение | проблема |
+| Item | Limit | Problem |
 |---|---|---|
-| combined `📹+🔊 {H}p` | не более 3 | у YouTube их обычно один, 360p |
-| video_only `📹 {H}p (без звука)` | не более 3 | из 22 форматов видно 3 |
-| audio_only `🔊 Только аудио - {EXT}` | не более 2 | в метке нет качества, WebM/opus попадает |
-| `MP3 (минимальный размер)` | — | лишнее перекодирование |
-| `Лучшее качество (видео + аудио)` | — | дублирует первый экран |
-| `Лучшее аудио` | — | дублирует «оригинальный звук» |
-| `Скачать субтитры (SRT)` | — | формат и язык не выбираются |
+| Combined `📹+🔊 {H}p` | At most 3 | YouTube usually offers just one, at 360p |
+| Video only `📹 {H}p (без звука)` | At most 3 | Only 3 of 22 formats are visible |
+| Audio only `🔊 Только аудио - {EXT}` | At most 2 | No quality in the label; WebM/Opus can appear |
+| `MP3 (минимальный размер)` | None | Unnecessary transcoding |
+| `Лучшее качество (видео + аудио)` | None | Duplicates the first screen |
+| `Лучшее аудио` | None | Duplicates the original-audio option |
+| `Скачать субтитры (SRT)` | None | Neither format nor language can be selected |
 
-Дедупликация идёт **по тексту метки**, поэтому два формата одного разрешения
-скрывают друг друга — так 1080p H.264 мог не показаться вовсе.
+Formats are deduplicated **by button label**. Two formats at the same resolution can therefore hide each other; 1080p H.264 could disappear entirely.
 
-### Целевая структура
+### Target structure
 
-Три раздела вместо плоского списка:
+Replace the flat list with three sections:
 
-```
-Дополнительно
-├── 🎬 Видео    → 8K / 4K / 1440p / 1080p / 720p / 480p / 360p (что доступно)
-├── 🎵 Аудио    → оригинальная дорожка (M4A/AAC)
-└── 📝 Субтитры → доступные языки × форматы
+```text
+More options
+├── 🎬 Video     -> available 8K / 4K / 1440p / 1080p / 720p / 480p / 360p
+├── 🎵 Audio     -> original track (M4A/AAC)
+└── 📝 Subtitles -> available languages and formats
 ```
 
-Правила раздела «Видео»:
-- одна кнопка на разрешение, а не на формат: внутри разрешения выбор делает та
-  же логика, что у кнопки для Telegram (H.264 приоритетнее при равной высоте);
-- показывать размер: `1080p · 301 МБ`;
-- не показывать разрешения, которые не влезают в лимит доставки;
-- отдельная ветка «без звука» убирается: это не то, за чем приходят.
+Video section rules:
 
-Правила раздела «Аудио»:
-- **только родная дорожка** — у YouTube это M4A/AAC (формат 140);
-- WebM/opus не предлагать: Telegram его как аудио не принимает;
-- перекодирование в MP3 убрать — родная дорожка уже пригодна;
-- `Лучшее аудио` убрать: это и есть родная дорожка.
+- Show one button per resolution, not per format. Within a resolution, use the same selection rule as the Telegram button, preferring H.264 at equal height.
+- Show estimated size, for example `1080p · 301 MB`.
+- Hide resolutions that exceed the delivery limit.
+- Remove the separate video-without-audio branch.
 
-Правила раздела «Субтитры»:
-- сейчас жёстко зашит `subtitlesformat: "srt"`, язык не выбирается;
-- предложить доступные языки и форматы, которые отдаёт сам YouTube.
+Audio section rules:
 
-### Что удаляется
+- Offer **only the original track**, usually YouTube M4A/AAC format 140.
+- Do not offer WebM/Opus, which Telegram does not accept as audio here.
+- Remove MP3 transcoding; the original track is already usable.
+- Remove `Лучшее аудио`, which duplicates that track.
 
-`Лучшее качество (видео + аудио)`, `Лучшее аудио`, `MP3 (минимальный размер)`,
-ветка `video_only` «без звука», ограничения «не более 3 / не более 2».
+Subtitle section rules:
 
-Удаление кнопок меняет `callback_data`, поэтому потребуется правка
-`callback_fsm.py` и тестов разбора событий — уже отправленные пользователям
-кнопки перестанут работать (см. CLAUDE.md, раздел «Что изменять осторожно»).
+- The current `subtitlesformat: "srt"` is fixed and offers no language selection.
+- Offer the languages and formats that YouTube makes available.
 
----
+### Remove
 
-## 4. Звук на первом экране
+Remove the buttons `Лучшее качество (видео + аудио)`, `Лучшее аудио`, and `MP3 (минимальный размер)`, the video-only branch, and the two arbitrary item limits.
 
-### Требование
-На первом экране рядом с видео должна быть кнопка родного звука, и она должна
-проверять, что такой звук вообще доступен и отличается от дорожки видео.
-
-### Что сейчас
-`Скачать только звук` (`audio_m4a`) есть и берёт M4A. Проверки доступности перед
-показом кнопки нет: она рисуется всегда.
-
-### Решение
-Показывать кнопку, только если среди `audio_only` есть дорожка с
-Telegram-совместимым кодеком (`mp4a`/`aac`). Иначе не рисовать — вместо отказа
-после нажатия.
+Removing buttons changes `callback_data`. Update `callback_fsm.py` and event parsing tests; buttons already sent to users will stop working. See the cautionary section in `CLAUDE.md`.
 
 ---
 
-## Открытые вопросы
+## 4. Audio on the first screen
 
-1. **Субтитры.** Какие форматы предлагать — SRT, VTT, TXT? И как показывать
-   языки, если их у видео десятки: списком или только родной + автоперевод?
-2. **Размер в кнопках видео.** Показывать МБ всегда или только когда размер
-   известен? У части форматов YouTube его не отдаёт.
-3. **Порядок работ.** Ссылка вместо файла даёт измеримые 4.5 с на каждом
-   TikTok-запросе; меню — удобство. Предлагаю начать со ссылки.
+### Requirement
+
+Place an original-audio button beside the video button, but show it only when a distinct audio track is available.
+
+### Current behavior
+
+`Скачать только звук` (`audio_m4a`) downloads M4A. The button is always shown without checking track availability.
+
+### Decision
+
+Show the button only if an `audio_only` track has a Telegram-compatible codec (`mp4a` or `aac`). Otherwise, hide it instead of rejecting the request after the click.
+
+---
+
+## Open questions
+
+1. **Subtitles:** Which formats should be offered: SRT, VTT, TXT? If a video has dozens of languages, should the menu show all of them or only the original language and automatic translations?
+2. **Sizes on video buttons:** Should the size always appear, or only when YouTube reports one?
+3. **Implementation order:** Link delivery saved a measured 4.5 s for a TikTok request; the menu changes usability. The proposed first step is link delivery.

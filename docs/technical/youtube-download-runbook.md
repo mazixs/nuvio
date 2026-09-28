@@ -1,108 +1,71 @@
-# Runbook: YouTube перестал скачиваться
+# Runbook: YouTube downloads stop working
 
-> Дата: 2026-08-19
-> Повод: инцидент 18.08.2026 — YouTube сломал выдачу медиа по прямым ссылкам
-> Область: YouTube, yt-dlp, категории ошибок, обновление пина версии
-> Метод: замеры на живом контейнере продакшена, воспроизведение с двух разных
-> исходящих адресов
+> Date: 2026-08-19
+> Incident: 2026-08-18, when YouTube changed direct media delivery
+> Scope: YouTube, yt-dlp, error categories, and the pinned yt-dlp version
+> Evidence: measurements in the production container and reproduction from two outgoing IP addresses
 
-Документ отвечает на один вопрос: пользователи жалуются, что YouTube не
-качается — что делать. Августовский разбор занял сутки, и большая часть времени
-ушла не на поиск причины, а на ложноотрицательные пробы. §2 существует ровно для
-того, чтобы это не повторилось: начинать чтение стоит с него, а не с §1.
+This runbook answers what to do when users report that YouTube videos no longer download. The August investigation took a day, mostly because early tests gave false negatives. **Start with section 2**, which explains those traps.
 
 ---
 
-## 1. Инцидент 18.08.2026: что именно сломалось
+## 1. What failed on 2026-08-18
 
-Стабильная yt-dlp 2026.7.4, зажатая в образе, запрашивала форматы клиентами,
-которым YouTube в тот день перестал отдавать `videoplayback`. Список форматов
-приходил нормально — ломалось только скачивание, и ломалось не целиком:
+The pinned stable yt-dlp 2026.7.4 requested formats with clients for which YouTube had stopped serving `videoplayback` responses. Format extraction still worked, but downloading failed selectively:
 
-| Запрос к CDN | Ответ |
+| CDN request | Response |
 |---|---|
-| без заголовка `Range` | **403**, ни одного байта |
-| `Range` на 10 МБ — штатный `http_chunk_size` бота | **403** |
-| `Range` на 64 КБ | 206 |
-| скачивание куском 1 МБ | приходит ровно первый мегабайт, дальше 403 |
+| Without a `Range` header | **403**, no bytes |
+| `Range` for 10 MB, the bot's normal `http_chunk_size` | **403** |
+| `Range` for 64 KB | 206 |
+| Download in 1 MB chunks | First megabyte received, then 403 |
 
-Порог совпадал примерно с минутой воспроизведения: короткие ролики качались, всё
-длиннее минуты — нет. Воспроизведено с двух разных исходящих адресов, то есть
-маршрут и репутация IP тут не при чём.
+The apparent threshold was roughly one minute of video: short videos downloaded, longer ones failed. The same behavior appeared from two outgoing IP addresses, ruling out the particular route or IP reputation in that incident.
 
-Это общая поломка YouTube, а не наша:
-[yt-dlp#17456](https://github.com/yt-dlp/yt-dlp/issues/17456). Nightly
-`2026.8.18.122307.dev0` перешла на клиент `visionos`, и те же форматы с теми же
-опциями бота качаются целиком.
+This matched a broader YouTube/yt-dlp issue: [yt-dlp#17456](https://github.com/yt-dlp/yt-dlp/issues/17456). Nightly `2026.8.18.122307.dev0` switched to the `visionos` client; the same formats downloaded fully with the bot's options.
 
-**Что из этого переносится на следующий раз.** Признак поломки платформы — не
-«ничего не работает», а «часть работает». Разбор ссылки живёт отдельно от
-скачивания и может остаться исправным; размер запрашиваемого куска влияет на
-исход; короткое видео проходит там, где длинное падает. Проба, которая не
-воспроизводит все три условия продакшена, врёт.
+**Lesson for the next incident:** Partial success is expected. Extraction can work while media download fails; request chunk size matters; a short video may work while a long one fails. A probe must reproduce all three production conditions.
 
 ---
 
-## 2. Три ловушки: почему пробы были зелёными при сломанном YouTube
+## 2. Three false-negative traps
 
-**1. Ключ `--test` подменяет размер запрашиваемого куска на 10 КБ.** Именно
-такой маленький запрос в инцидент проходил всегда, при полностью сломанном
-скачивании. Все ручные пробы поэтому давали успех, поломка выглядела случайными
-вспышками, и первая версия диагноза оказалась неверной — её пришлось отзывать
-вместе с уже написанным объяснением. Пробу делай полным скачиванием и с
-`--http-chunk-size 10M`, `--test` не используй вообще.
-
-**2. Кэш `file_id` отдаёт готовый файл, минуя платформу.** Проверка на ссылке,
-которую бот уже качал, мерит SQLite, а не YouTube: ответ приходит мгновенно и
-всегда успешный. В логе такой исход видно по строке
-`Видео доставлено из кэша (key=...)`. `/cleanup_cache` тут не поможет, он снимает
-только записи старше 90 дней, — бери ссылку, которой в кэше нет.
-
-**3. Ролик короче минуты проходил проверку при сломанном YouTube.** Порог был
-около минуты воспроизведения, так что Shorts и любой короткий тест давали
-зелёный результат. Пробуй на видео минут на десять.
+1. **`--test` changes the request chunk to 10 KB.** That small request always worked during the incident, even though full downloads were broken. Manual probes therefore looked green and led to a diagnosis that had to be withdrawn. Make a full download with `--http-chunk-size 10M`; do not use `--test`.
+2. **The `file_id` cache bypasses YouTube.** Reusing a URL the bot downloaded before tests SQLite and Telegram delivery, not the platform. The log line `Видео доставлено из кэша (key=...)` identifies such a hit. `/cleanup_cache` only removes entries older than 90 days; use an uncached URL.
+3. **A video shorter than a minute could still download.** Shorts and other short samples gave a false green result. Use a video about ten minutes long.
 
 ---
 
-## 3. Процедура разбора
+## 3. Diagnostic procedure
 
-### Шаг 1. Определить категорию по логу
+### Step 1: identify the error category
 
 ```bash
 docker compose exec bot grep USER_FLOW_FAIL /app/logs/bot.log | tail -n 20
 ```
 
-Строка выглядит как
-`USER_FLOW_FAIL code=YT-… platform=youtube stage=format_download … error=…`.
-Категория зашита в код ошибки первыми восьмью символами:
+A line resembles `USER_FLOW_FAIL code=YT-… platform=youtube stage=format_download … error=…`. The code contains an eight-character category abbreviation:
 
-| Код в логе | Категория | Что значит |
+| Log code | Category | Interpretation |
 |---|---|---|
-| `YT-MEDIA_FO-…` | `MEDIA_FORBIDDEN` | 403 на самом медиафайле: платформа сменила правила выдачи. Повторяется с backoff, открывает CLI-fallback, админов не будит — в логе будет `WARNING`, а не `ERROR` |
-| `YT-ACCESS_R-…` | `ACCESS_RESTRICTED` | видео закрыто: приватное, платное, с возрастным ограничением, «this video is unavailable» |
-| `YT-FORMAT_U-…` | `FORMAT_UNAVAILABLE` | «Requested format is not available» — сломан разбор ссылки, а не выдача медиа |
-| `YT-EXTRACTO-…` | `EXTRACTOR_RUNTIME` | не хватает JS-рантайма: `nsig extraction failed`, `remote components` |
-| `YT-NETWORK_-…` | `NETWORK_TIMEOUT` | таймауты, сброс соединения |
+| `YT-MEDIA_FO-…` | `MEDIA_FORBIDDEN` | 403 for the media file. Retried with backoff and eligible for CLI fallback; a final failure is logged as `ERROR` and reported to administrators |
+| `YT-ACCESS_R-…` | `ACCESS_RESTRICTED` | Private, paid, age-restricted, or unavailable video |
+| `YT-FORMAT_U-…` | `FORMAT_UNAVAILABLE` | Requested format unavailable; investigate extraction rather than media delivery |
+| `YT-EXTRACTO-…` | `EXTRACTOR_RUNTIME` | Missing JS runtime, `nsig extraction failed`, or `remote components` issue |
+| `YT-NETWORK_-…` | `NETWORK_TIMEOUT` | Timeout or connection reset |
 
-**Массовый `MEDIA_FORBIDDEN` — сигнал идти в §4, а не искать проблему у
-пользователя.** Отдельные вспышки нормальны: ссылка `googlevideo` живёт минуты,
-и повторный разбор её обновляет. Разделение категорий живёт в
-`is_media_forbidden_error()` (`utils/public_errors.py`). Краш-репорт по
-`MEDIA_FORBIDDEN` админам не уходит намеренно, поэтому тишина в личке ничего не
-опровергает — смотреть надо в лог.
+A surge in `MEDIA_FORBIDDEN` points to section 4. Isolated cases can occur when a short-lived `googlevideo` URL expires; extracting again refreshes it. `is_media_forbidden_error()` in `utils/public_errors.py` separates this category. The final failure is reported to administrators, and the log shows the individual attempts.
 
-### Шаг 2. Проверить версию yt-dlp в контейнере
+### Step 2: check yt-dlp in the container
 
 ```bash
 docker compose exec bot python -m yt_dlp --version
 docker compose exec bot grep "Текущая версия yt-dlp" /app/logs/bot.log | tail -n 1
 ```
 
-Версию бот пишет в лог на каждом старте. Если она отстаёт от свежей nightly
-больше чем на неделю — §4 первым делом: обновление чинит почти всё, что
-относится к смене клиентов YouTube.
+The bot logs its version on startup. If it is more than a week behind the latest nightly, investigate the update path in section 4 early; client changes are a common cause.
 
-### Шаг 3. Честная проба продакшн-опциями
+### Step 3: reproduce production options
 
 ```bash
 docker compose exec bot python -m yt_dlp \
@@ -110,132 +73,83 @@ docker compose exec bot python -m yt_dlp \
   --http-chunk-size 10M --concurrent-fragments 4 \
   --socket-timeout 40 --retries 5 --fragment-retries 5 \
   --skip-unavailable-fragments --no-continue --no-playlist \
-  -o '/app/media/probe.%(ext)s' 'ССЫЛКА'
+  -o '/app/media/probe.%(ext)s' '<VIDEO_URL>'
 ```
 
-Опции — те же, что бот ставит в `DEFAULT_YTDLP_NETWORK_OPTS`
-(`utils/ytdlp_common.py`), плюс `--http-chunk-size 10M`: CLI-fallback бота его не
-передаёт, а встроенный API передаёт, и ломался именно он. Ссылка — на видео минут
-на десять и не из кэша. Файл потом убрать: `docker compose exec bot rm -f
-/app/media/probe.mp4`.
+These are the bot's `DEFAULT_YTDLP_NETWORK_OPTS` from `utils/ytdlp_common.py`, plus `--http-chunk-size 10M`. The bot's CLI fallback omits that option, whereas its embedded API includes it and was the failing path. Use an uncached video around ten minutes long. Afterwards remove the probe with `docker compose exec bot rm -f /app/media/probe.mp4`.
 
-Разбор и скачивание разделяются двумя прогонами:
+Separate extraction from download:
 
 ```bash
-docker compose exec bot python -m yt_dlp --no-playlist -F 'ССЫЛКА'
+docker compose exec bot python -m yt_dlp --no-playlist -F '<VIDEO_URL>'
 ```
 
-Список форматов пришёл, а скачивание падает 403 — сломана выдача медиа, идти в
-§4. Список пуст или «Requested format is not available» — сломан разбор, тогда
-сначала шаг 4.
+If formats appear but the full download returns 403, media delivery is broken; proceed to section 4. If the list is empty or says `Requested format is not available`, first check cookies in step 4.
 
-### Шаг 4. Проверить, что cookies не мешают
+### Step 4: compare without and with cookies
 
-YouTube-загрузчики намеренно пробуют **без cookies первыми**: авторизованная
-сессия переводит yt-dlp на клиентов `tv_downgraded`/`web_safari`, которым нужен
-PO-токен, а работающего без токена `android_vr` yt-dlp при наличии auth-cookies
-вычёркивает. Замерено, что с cookie-файлом список форматов выходит пустым, и весь
-список бот получает анонимной попыткой. Поэтому пустой список надо сверить в двух
-режимах:
+The YouTube downloader intentionally tries **without cookies first**. An authenticated session can make yt-dlp select `tv_downgraded` or `web_safari`, which need a PO token, while the token-free `android_vr` client is removed when auth cookies are present. In one measurement the cookie attempt returned an empty format list and the anonymous attempt returned all formats.
 
 ```bash
-# без cookies — как бот пробует первым
-docker compose exec bot python -m yt_dlp --no-playlist -F 'ССЫЛКА'
-# с cookies — только копией, не оригиналом
+# Anonymous attempt, matching the bot's first attempt
+docker compose exec bot python -m yt_dlp --no-playlist -F '<VIDEO_URL>'
+
+# Authenticated attempt using a copy, never the original
 docker compose exec bot sh -c 'cp /app/.secrets/www.youtube.com_cookies.txt /tmp/probe-cookies.txt'
-docker compose exec bot python -m yt_dlp --no-playlist -F --cookies /tmp/probe-cookies.txt 'ССЫЛКА'
+docker compose exec bot python -m yt_dlp --no-playlist -F --cookies /tmp/probe-cookies.txt '<VIDEO_URL>'
 ```
 
-Копия обязательна: yt-dlp перезаписывает переданный `cookiefile` содержимым
-своего jar и может выкинуть из файла живые записи. Сам бот по этой причине
-работает с копией в `/app/data/cookie-work` (`utils/cookie_workfile.py`), и
-ручная проба не должна портить то, что загрузил админ.
+yt-dlp rewrites a supplied `cookiefile` from its cookie jar and can remove valid entries. Nuvio therefore uses a working copy in `/app/data/cookie-work` (`utils/cookie_workfile.py`); manual probes must also use a copy. A nonempty anonymous list and empty authenticated list can be expected. Cookies remain needed for age-restricted and private videos.
 
-Если без cookies список приходит, а с cookies пуст — это ожидаемое поведение, а
-не поломка. Cookies остаются нужны только на возрастные ограничения и приватные
-видео.
+### Step 5: inspect yt-dlp's own output
 
-### Шаг 5. Посмотреть, что говорит сам yt-dlp
-
-Собственный вывод yt-dlp и лог бота — разные потоки, и путать их дорого:
-
-| Где смотреть | Что там есть |
+| Source | Contents |
 |---|---|
-| `docker compose logs bot` | вывод самого yt-dlp при скачивании: `quiet` для этого пути выключен, поэтому видны строки `[download]` и `ERROR:` |
-| `/app/logs/bot.log` | строки логгера бота (`USER_FLOW_FAIL`, «Переключаемся на локальный CLI fallback yt-dlp», текст исключения) и предупреждения самого yt-dlp через адаптер `utils.ytdlp_common` |
-| краш-репорт в личку админу | исключение, traceback, стадия, состояние cookies. Для `MEDIA_FORBIDDEN` отправляется намеренно: серия таких отказов — единственный признак, что платформа сменила правила выдачи |
+| `docker compose logs bot` | yt-dlp output during download, including `[download]` and `ERROR:` because `quiet` is disabled on this path |
+| `/app/logs/bot.log` | Bot logger lines such as `USER_FLOW_FAIL`, CLI fallback, exceptions, and yt-dlp warnings through `utils.ytdlp_common` |
+| Administrator crash report | Exception, traceback, stage, and cookie state; final `MEDIA_FORBIDDEN` failures are included |
 
-Предупреждения yt-dlp (`WARNING: …`) теперь доходят и до лога, и до отчёта:
-`apply_network_opts` подставляет в опции логгер-адаптер, а тот пишет строку в
-`bot.log` под именем `utils.ytdlp_common` и складывает её в хвост сессии
-(`utils/download_report.py`). Именно в этих строках живёт ответ на вопрос «каким
-клиентом качали и что сказала платформа» — из info-dict он не достаётся. Строки
-прогресса `[download]` в хвост не попадают намеренно, иначе они вытеснили бы
-полезное из шестидесяти строк. Из CLI-fallback в лог и краш-репорт попадает
-первая тысяча символов stderr, подставленная в текст `RuntimeError`
-(`utils/youtube_utils.py`).
+`apply_network_opts` installs a logger adapter that writes yt-dlp warnings to `bot.log` under `utils.ytdlp_common` and to the session tail in `utils/download_report.py`. These warnings reveal the client used and platform response; the info dictionary does not. Progress lines are excluded from the 60-line diagnostic tail so they cannot displace warnings. The CLI fallback includes the first 1,000 stderr characters in the `RuntimeError` text (`utils/youtube_utils.py`).
 
-Для подробного лога поднять `LOG_LEVEL=DEBUG` в `.secrets/.env` и перезапустить
-бота: тогда в лог пойдут строки прогресса скачивания и причина пропуска формата.
+For more detail, set `LOG_LEVEL=DEBUG` in `.secrets/.env` and restart the bot. The log will then include download progress and reasons for skipped formats.
 
-### Шаг 6. Исключить исходящий адрес
+### Step 6: rule out the outgoing IP
 
 ```bash
 docker compose exec bot python -c "import httpx; print(httpx.get('https://api.ipify.org').text)"
 ```
 
-Смысл шага — быстро закрыть версию, а не подтвердить её. Адрес виноват, только
-если 403 приходит с одного выхода, а с другого то же видео тем же клиентом
-качается целиком; в инциденте 18 августа поломка воспроизвелась с двух разных
-адресов, так что ни маршрут, ни репутация IP роли не играли. Одинаковое поведение
-с двух выходов означает, что дело в клиенте yt-dlp, и дальше §4.
+An IP-specific cause is supported only if the same video and client fail from one exit but download fully from another. On 2026-08-18, the failure reproduced from two exits, so neither route nor IP reputation explained it. Equal behavior from both points back to the yt-dlp client and section 4.
 
 ---
 
-## 4. Как обновить yt-dlp
+## 4. Update yt-dlp
 
-Текущая закрепленная версия - `2026.9.16.232951.dev0`. Обновление работающего
-контейнера через pip удалено: оно меняло файлы на диске после импорта пакета,
-поэтому отчет о версии мог не совпадать с исполняемым кодом.
+The example pinned version in this document is `2026.9.16.232951.dev0`. The bot no longer upgrades a running container with pip: files changed after import, so the reported version could differ from the executing code.
 
-1. Указать точную версию, опубликованную на PyPI:
+1. Choose an exact version published on PyPI and run the updater, substituting that version:
    ```bash
    .venv/bin/python scripts/update_ytdlp.py 2026.9.16.232951.dev0
    ```
-   Команда меняет pin, оба lock-файла с хешами, запускает линтер и тесты,
-   показывает diff. При ошибке возвращает три файла в исходное состояние.
-2. Проверить PR и CI, включая smoke готового образа. Для PR, созданного
-   `GITHUB_TOKEN`, проверки ветки запускаются отдельно через `workflow_dispatch`;
-   проверки самого события `pull_request` могут ждать одобрения в GitHub.
-   Слить в `main`, создать тег `v*`, дождаться публикации canonical digest в GHCR.
-3. Записать текущий digest на сервере для возврата. Загрузить новый образ и
-   пересоздать сервис: `docker compose --env-file .secrets/.env pull bot` и
-   `docker compose --env-file .secrets/.env up -d bot`.
-4. Проверить версию yt-dlp в контейнере, Deno, polling бота и канарейку. При
-   регрессии загрузить прежний digest и пометить его локальным тегом `rollback`, затем
-   выполнить `TAG=rollback docker compose --env-file .secrets/.env up -d bot`
-   и повторить проверку. Изменение pin в репозитории само по себе не обновляет сервер.
+   It changes the pin and both hashed lock files, runs lint and tests, and shows the diff. On error, it restores all three files.
+2. Review the PR and CI, including the built-image smoke check. For a PR created with `GITHUB_TOKEN`, branch checks are triggered through `workflow_dispatch`; `pull_request` checks can await GitHub approval. Merge into `main`, create a `v*` tag, and wait for the canonical digest to be published in GHCR.
+3. Record the current server digest for rollback. Pull the new image and recreate the service: `docker compose --env-file .secrets/.env pull bot`, then `docker compose --env-file .secrets/.env up -d bot`.
+4. Verify yt-dlp and Deno versions, bot polling, and the canary. On regression, pull the previous digest, tag it locally as `rollback`, run `TAG=rollback docker compose --env-file .secrets/.env up -d bot`, and repeat the probe. Changing the repository pin alone does not update the server.
 
-Nightly выбирается, если стабильная версия не справляется с YouTube. После
-появления исправленной стабильной версии ее нужно проверить тем же путем и
-закрепить точным номером. Канал `master` без неизменяемого артефакта не
-поддерживается.
+Use a nightly build when stable yt-dlp cannot handle YouTube. When a fixed stable release appears, test it through the same path and pin its exact version. An unpinned `master` channel is unsupported.
 
 ---
 
-## 5. Куда смотреть в коде
+## 5. Code map
 
-| Файл | Что там |
+| File | Relevant logic |
 |---|---|
-| `utils/ytdlp_common.py` | `DEFAULT_YTDLP_NETWORK_OPTS` — сетевые опции всех загрузчиков, включая `http_chunk_size`; `classify_download_error_kind()`; `execute_with_backoff()` — повтор для `NETWORK_TIMEOUT` и `MEDIA_FORBIDDEN` |
-| `utils/youtube_utils.py` | каскад попыток «без cookies → с cookies → CLI», non-HLS фолбек после 403, `PO_TOKEN_ONLY_FORMAT_IDS`, хвост stderr CLI-запуска |
-| `utils/public_errors.py` | `youtube_error_code()` и `is_media_forbidden_error()` — граница между `MEDIA_FORBIDDEN` и `ACCESS_RESTRICTED` |
-| `utils/download_report.py` | хвост вывода yt-dlp и фактически скачанный формат на сессию — попадают в краш-репорт и в ключ кэша |
-| `utils/canary.py` | плановая проверка YouTube производственными опциями мимо кэша и уведомление при провале |
-| `utils/ytdlp_runtime.py` | установленная версия, `run_yt_dlp_cli()`, `extract_cli_output_path()` |
-| `utils/telegram_utils.py` | `_log_platform_failure()` — строка `USER_FLOW_FAIL`; `_should_notify_admins_platform_failure()` — кто попадает в краш-репорт; `_notify_admins_crash()` — его состав |
+| `utils/ytdlp_common.py` | `DEFAULT_YTDLP_NETWORK_OPTS`, including `http_chunk_size`; `classify_download_error_kind()`; `execute_with_backoff()` for `NETWORK_TIMEOUT` and `MEDIA_FORBIDDEN` |
+| `utils/youtube_utils.py` | Without-cookies, with-cookies, then CLI attempts; non-HLS fallback after 403; `PO_TOKEN_ONLY_FORMAT_IDS`; CLI stderr tail |
+| `utils/public_errors.py` | `youtube_error_code()` and `is_media_forbidden_error()`, separating `MEDIA_FORBIDDEN` from `ACCESS_RESTRICTED` |
+| `utils/download_report.py` | yt-dlp output tail and actual downloaded format for crash reports and cache keys |
+| `utils/canary.py` | Scheduled YouTube probe using production options without the cache, with failure notification |
+| `utils/ytdlp_runtime.py` | Installed version, `run_yt_dlp_cli()`, `extract_cli_output_path()` |
+| `utils/telegram_utils.py` | `_log_platform_failure()` for `USER_FLOW_FAIL`; `_should_notify_admins_platform_failure()` and `_notify_admins_crash()` for administrator reports |
 
-Пользовательская сторона проблемы и короткие ответы на «что сказать
-пользователю» — в
-[docs/troubleshooting/common-issues.md](../troubleshooting/common-issues.md),
-расшифровка кодов — в [docs/error-codes.md](../error-codes.md).
+For user-facing troubleshooting, see [common issues](../troubleshooting/common-issues.md). For code meanings, see [error codes](../error-codes.md).

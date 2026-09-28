@@ -5,6 +5,7 @@ from utils.telegram_utils import (
     _classify_youtube_error,
     _youtube_error_code,
 )
+from utils.public_errors import build_public_error_message
 
 
 def test_classify_requested_format_not_available():
@@ -48,6 +49,23 @@ def test_youtube_error_code_access_restricted():
     assert _youtube_error_code("HTTP Error 403: Forbidden") == "ACCESS_RESTRICTED"
 
 
+def test_youtube_bot_challenge_is_access_restriction():
+    error = "Sign in to confirm you’re not a bot"
+    assert _youtube_error_code(error) == "ACCESS_RESTRICTED"
+    assert "ограниченный доступ" in _classify_youtube_error(error).lower()
+
+
+def test_youtube_rate_limit_has_accurate_public_message():
+    error = "HTTP Error 429: Too Many Requests"
+    assert _youtube_error_code(error) == "RATE_LIMIT"
+    assert "ограничил запросы" in _classify_youtube_error(error)
+    public_message = build_public_error_message(
+        "youtube", "YT-RATE_LIMIT-ABC123", error
+    )
+    assert "ограничила запросы" in public_message
+    assert "YT-RATE_LIMIT-ABC123" in public_message
+
+
 def test_youtube_error_code_media_forbidden_is_not_access_restricted():
     """403 на самом медиафайле — временная ошибка, а не запрет доступа к видео."""
     assert (
@@ -77,8 +95,8 @@ def test_youtube_error_code_extractor_runtime():
     assert _youtube_error_code("nsig extraction failed") == "EXTRACTOR_RUNTIME"
 
 
-def test_youtube_error_code_unknown():
-    assert _youtube_error_code("totally unrelated message") == "UNKNOWN"
+def test_youtube_unexpected_error_keeps_explicit_category():
+    assert _youtube_error_code("totally unrelated message") == "UNEXPECT"
 
 
 def test_instagram_access_error_is_platform_specific_and_user_actionable():
@@ -95,10 +113,10 @@ def test_instagram_access_error_is_platform_specific_and_user_actionable():
     assert "подписан" not in message.lower()
 
 
-def test_tiktok_unknown_error_does_not_expose_internal_state():
+def test_tiktok_unexpected_error_does_not_expose_internal_state():
     message = _build_public_error_message(
         "tiktok",
-        "TT-UNKNOWN-ABC123",
+        "TT-UNEXPECT-ABC123",
         "cookie expired; bot is not subscribed",
     )
 

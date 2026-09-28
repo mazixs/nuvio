@@ -1,123 +1,120 @@
-# Аудит качества кода и очистки данных
+# Code Quality and Data Cleanup Audit
 
-Дата: 2026-09-24. Область: обработчики бота, аналитика, временные файлы, cookies, кэш и журналы. Это дополнение к [аудиту yt-dlp и обновлений](ytdlp-and-update-audit-2026-09-23.md), а не подтверждение исправления его пунктов.
+Date: 2026-09-24. Area: Bot handlers, analytics, temporary files, cookies, cache, and logs. This is a supplement to the [yt-dlp and updates audit](ytdlp-and-update-audit-2026-09-23.md), not a confirmation of fixes for those points.
 
-## Вывод
+## Conclusion
 
-Очистка медиа и кэша реализована, но сроки жизни разных данных не согласованы. Главная подтвержденная ошибка в проверенном коде - недельное удержание показывает нули из-за неверного формата недели. Главный риск роста и задержек - бессрочное хранение событий аналитики вместе с многократным пересчетом этой истории на каждом запросе дашборда. Существуют и кандидаты на упрощение кода, но поиск неиспользуемых имен сам по себе не доказывает, что функцию можно удалить: часть функций вызывается через регистрацию обработчиков и из тестов.
+Media and cache cleanup is implemented, but the lifespans of different data types are inconsistent. The main confirmed error in the reviewed code is zero values in weekly retention due to an incorrect week format. The primary risk for performance degradation and delays is the indefinite storage of analytics events combined with repeated recalculations of this event history on every dashboard request. There are candidates for code simplification, but identifying unused names does not prove a function can be removed - some functions are called via event handlers and in tests.
 
-Проверка основана на текущем исходном коде. `ruff check --output-format concise .` завершился без замечаний. Размеры рабочей базы и задержки production не измерялись; оценка производительности ниже относится к структуре запросов, а не к доказанному времени ответа на сервере.
+The review is based on the current source code. `ruff check --output-format concise .` completed without warnings. The size of the working database and production latency were not measured; performance assessment below refers to query structure, not proven response time on the server.
 
-## Находки
+## Findings
 
-### P1 - ошибочная метрика недельного удержания
+### P1 - Incorrect weekly retention metric
 
-В [cohort_retention](../../utils/analytics_db.py#L640) код когорты строится через `strftime('%Y-W%W', first_seen)`, а во внутреннем запросе используется `strftime('%Y-W%%W', u.first_seen)`. SQLite возвращает для даты `2026-09-24` соответственно `2026-W38` и `2026-W%W`. Значения не совпадут, поэтому `w1`-`w8` равны нулю при наличии когорты. Это проверено отдельным выполнением двух выражений в SQLite; проверок этой функции в `tests/` не найдено.
+In [cohort_retention](../../utils/analytics_db.py#L640), cohort construction uses `strftime('%Y-W%W', first_seen)`, while the internal query uses `strftime('%Y-W%%W', u.first_seen)`. SQLite returns for the date `2026-09-24` respectively `2026-W38` and `2026-W%W`. The values do not match, so `w1`–`w8` equal zero when a cohort exists. This was verified by running both expressions separately in SQLite; no tests in `tests/` check this function.
 
-Исправление: использовать один и тот же формат недели в обоих местах, затем сверить расчет на небольшой базе с известными датами регистрации и событий. Заодно уточнить продуктовый смысл удержания: текущая неделя события считается как число полных семидневных интервалов от `first_seen`, а не как номер календарной недели.
+**Fix**: Use the same week format in both places, then validate the calculation against a small database with known registration and event dates. Also clarify the product meaning of retention: currently, the event week is treated as the number of full seven-day intervals since `first_seen`, not as the calendar week number.
 
-### P1 - событие `download` означает запрос ссылки, а не доставку файла
+### P1 - The `download` event indicates a link request, not file delivery
 
-[process_url](../../utils/telegram_utils.py#L1665) пишет `track_event(..., "download")` до получения метаданных, выбора формата, скачивания и отправки. По этому событию считаются `total_downloads`, `downloads_by_platform`, популярные видео, повторные скачивания и конверсия в [analytics_db.py](../../utils/analytics_db.py#L470). Неудачная ссылка, отмена и ошибка Telegram учитываются как скачивание. Оптимизация SQL без исправления этого контракта ускорит неверные метрики.
+In [process_url](../../utils/telegram_utils.py#L1665), `track_event(..., "download")` is written before metadata is retrieved, format is selected, download begins, or the file is sent. This event is used to calculate `total_downloads`, `downloads_by_platform`, popular videos, repeat downloads, and conversion in [analytics_db.py](../../utils/analytics_db.py#L470). Failed links, cancellations, and Telegram errors are counted as downloads. Optimizing SQL without fixing this contract will accelerate inaccurate metrics.
 
-Исправление: разнести события `request_started` и `delivery_succeeded`, определить, что считать успешной выдачей из кэша и фото-поста, затем переключить показатели на нужное событие. Исторические `download` нельзя молча переименовать в успех: для старых записей результат доставки неизвестен.
+**Fix**: Split the `request_started` and `delivery_succeeded` events. Define what constitutes a successful delivery from cache or photo post. Then shift the metrics to the correct event. Historical `download` events cannot be silently renamed to success - delivery results for older records are unknown.
 
-### P1 - синхронная запись аналитики может задержать ответы бота
+### P1 - Synchronous analytics logging may delay bot responses
 
-[_track_tg_user](../../utils/telegram_utils.py#L344) и [process_url](../../utils/telegram_utils.py#L1665) вызывают синхронные операции SQLite непосредственно в async-обработчике. [Соединение](../../utils/analytics_db.py#L30) допускает ожидание блокировки до 30 секунд; запись начинается через `BEGIN IMMEDIATE`. При конкурирующей записи WebUI или обслуживании базы ожидание займет event loop бота. `_track_tg_user` ловит ошибку, а прямой `track_event` в `process_url` способен прервать обработку пользовательской ссылки. Это риск по коду; частота блокировок на рабочей базе не измерена.
+Both [_track_tg_user](../../utils/telegram_utils.py#L344) and [process_url](../../utils/telegram_utils.py#L1665) trigger synchronous SQLite operations directly within async handlers. The [connection](../../utils/analytics_db.py#L30) allows waiting for lock contention up to 30 seconds; writing begins with `BEGIN IMMEDIATE`. During concurrent writes from WebUI or database maintenance, the wait will block the bot's event loop. `_track_tg_user` catches the error, but direct `track_event` in `process_url` can interrupt processing of a user's link. This is a code-level risk; the frequency of lock waits on the production database has not been measured.
+Fix: Move database operations out of the event loop with explicit time limits, define behavior during analytical service unavailability, and separately monitor write duration and errors. Product file delivery must not depend on the success of optional event recording.
 
-Исправление: вынести операции базы из event loop с явным ограничением времени, определить поведение при временной недоступности аналитики и отдельно наблюдать длительность и ошибки записи. Продуктовая доставка файла не должна зависеть от успешной записи необязательного события.
+### P1 - Analytics events and URLs are stored indefinitely
 
-### P1 - события аналитики и URL хранятся бессрочно
+The [track_event](../../utils/analytics_db.py#L187) function writes URLs and metadata to `analytics.db`. The module includes index creation but lacks mechanisms for removing old events or managing the database size. Daily cleanup in [main.py](../../main.py#L137) applies only to `video_cache.db`. Long-term accumulation impacts disk space, user link history, and the cost of analytical queries.
 
-[track_event](../../utils/analytics_db.py#L187) записывает в `analytics.db` URL и метаданные. В модуле есть создание индексов, но нет удаления старых событий или обслуживания размера этой базы. Ежедневная очистка в [main.py](../../main.py#L137) относится только к `video_cache.db`. Длительное накопление затрагивает размер диска, историю пользовательских ссылок и стоимость аналитических запросов.
+**Fix**: Define a retention period for URLs and raw events. Identify metrics that require long-term history and preserve aggregates for them. Then, remove old records in bulk. Provide separate handling for individual user data deletion. Do not fully clear the table - this would alter existing dashboard values.
 
-Исправление: выбрать срок хранения URL и сырых событий, определить метрики, которым нужна долгая история, сохранить для них агрегаты, затем удалять старые записи пакетами. Отдельно предусмотреть удаление данных конкретного пользователя. Не очищать таблицу целиком: это изменит значения существующего дашборда.
+### P1 - Dashboard makes many synchronous queries in async handlers
 
-### P1 - дашборд делает много синхронных запросов в async-обработчике
+The [dashboard_summary](../../utils/analytics_db.py#L739) function sequentially calls over 20 calculations. Inside [cohort_retention](../../utils/analytics_db.py#L640), there is a nested loop: for each weekly cohort over the last 56 days, it executes eight separate queries to `events` and `users`, resulting in typically 64-72 additional queries beyond the base summary. The conditions use `strftime` and `julianday` on columns. Both the [HTML route](../../web/app.py#L296) and the [API route](../../web/app.py#L483) directly invoke this synchronous logic from within `async def`, blocking the WebUI event loop. The users page also aggregates events before applying `LIMIT` in [get_all_users](../../utils/analytics_db.py#L536).
 
-[dashboard_summary](../../utils/analytics_db.py#L739) последовательно вызывает более 20 расчетов. В [cohort_retention](../../utils/analytics_db.py#L640) есть вложенный цикл: для каждой недельной когорты за последние 56 дней выполняется еще восемь отдельных запросов к `events` и `users`, то есть обычно до 64-72 запросов сверх остальной сводки. В условии используются `strftime` и `julianday` по столбцам. [HTML-маршрут](../../web/app.py#L296) и [API-маршрут](../../web/app.py#L483) вызывают эту синхронную работу непосредственно из `async def`, занимая поток обработки WebUI. Страница пользователей также агрегирует события до применения `LIMIT` в [get_all_users](../../utils/analytics_db.py#L536).
+**Fix**: First, establish table sizes, measure execution time for each calculation, and run `EXPLAIN QUERY PLAN`. Then, consolidate cohort calculations into a single grouping query or a limited set of queries. Add appropriate indexes after measurement. Implement a short-lived cache for the summary. Run SQLite operations outside the event loop or use synchronous FastAPI routes. Criterion: response time and parallel web requests must not degrade as `events` grow.
 
-Исправление: сначала установить размер таблиц, снять время каждого расчета и `EXPLAIN QUERY PLAN`; затем объединить расчет когорт в группирующий запрос или ограниченный набор запросов, добавить подходящие индексы после замера, применить короткий кэш сводки. Работу SQLite запускать вне event loop либо использовать синхронные маршруты FastAPI. Критерий - время ответа и параллельный запрос к WebUI не ухудшаются при росте `events`.
+### P2 - Daily engagement and dashboard snapshot need clarification
 
-### P2 - дневная вовлеченность и снимок дашборда требуют уточнения
+The description of [engagement_per_day](../../utils/analytics_db.py#L680) promises a daily MAU (monthly active users) for the past 30 days, but the implementation divides each daily DAU (daily active users) by the same MAU over the entire requested period. As a result, the "stickiness" curve does not match the described rolling DAU/MAU. Additionally, [dashboard_summary](../../utils/analytics_db.py#L739) collects metrics through individual reads without a shared transaction or fixed time slice; under concurrent writes, values on the same page may reflect different database states.
 
-Описание [engagement_per_day](../../utils/analytics_db.py#L680) обещает для каждого дня MAU за предшествующие 30 дней, но реализация делит каждый дневной DAU на один и тот же MAU за весь запрошенный период. Кривая `stickiness` поэтому не соответствует описанному скользящему DAU/MAU. Кроме того, [dashboard_summary](../../utils/analytics_db.py#L739) собирает показатели отдельными чтениями без общей транзакции или зафиксированного времени среза; при параллельных записях числа на одной странице могут относиться к разным состояниям базы.
+**Fix**: Align the definition of daily MAU with the calculation window and validate values against known data. For the dashboard, establish a single, consistent time of calculation and a synchronized snapshot, or cache the entire snapshot as a whole. Do not cache individual metrics with different update times.
 
-Исправление: согласовать определение дневного MAU и расчетное окно, сверить значения на известных данных. Для сводки зафиксировать единое время расчета и согласованный снимок либо кэшировать готовый снимок целиком; не кэшировать каждую метрику с разным временем обновления.
+### P2 - Index and query plan should cover more of the dashboard
 
-### P2 - план индексов и запросов должен охватить больше дашборда
+Currently, the `events` table has separate indexes on `user_id`, `ts`, `event`, and `platform`, but the `users` table lacks indexes on `first_seen` and `last_seen` ([schema](../../utils/analytics_db.py#L100)). Queries such as `event = 'download' AND ts >= ?`, user history with `WHERE user_id = ? ORDER BY ts DESC`, user list sorted by `ORDER BY last_seen DESC`, and CSI filtering by `last_seen` do not benefit from composite indexes covering the full query pattern. Additionally, the video cache has a separate `idx_url` index that potentially duplicates the left prefix of the primary key `(url, format_id)` ([schema](../../utils/video_cache.py#L134)). These are candidates for query plan analysis, not immediate reasons to add or remove indexes: each new index increases write and cleanup costs.
 
-Сейчас у `events` есть отдельные индексы по `user_id`, `ts`, `event`, `platform`, а у `users` нет индексов по `first_seen` и `last_seen` ([схема](../../utils/analytics_db.py#L100)). Запросы `event = 'download' AND ts >= ?`, история пользователя `WHERE user_id = ? ORDER BY ts DESC`, список пользователей `ORDER BY last_seen DESC` и отбор CSI по `last_seen` не имеют составных индексов под весь шаблон. У видеокэша отдельный `idx_url` потенциально дублирует левый префикс первичного ключа `(url, format_id)` ([схема](../../utils/video_cache.py#L134)). Это кандидаты на проверку планом запроса, а не основание немедленно добавлять или удалять индексы: каждый новый индекс удорожает запись и очистку.
+Fix: Collect `EXPLAIN QUERY PLAN` output and measure execution time on a representative database for each common query path. Evaluate composite indexes based on actual selectivity, and remove indexes proven to be redundant via a separate migration. Rewrite the user pagination logic to first limit the set of users, then fetch events only for the selected user IDs. For queries involving `DATE()`, `strftime()`, and `julianday()`, assess performance based on ranges of original timestamps or pre-calculated aggregates.
 
-Исправление: снять `EXPLAIN QUERY PLAN` и время на репрезентативной базе для каждого частого пути, проверить составные индексы по фактической селективности, убрать доказанно лишние индексы отдельной миграцией. Переписать выбор страницы пользователей так, чтобы сначала ограничить набор `users`, а потом считать события только для выбранных ID. Для условий с `DATE()`, `strftime()` и `julianday()` оценить запросы по диапазонам исходного timestamp или заранее рассчитанные агрегаты.
+### P2 - Transaction start error is masked by rollback exception
 
-### P2 - ошибка начала транзакции маскируется ошибкой отката
+In [_cursor_write](../../utils/analytics_db.py#L74), `BEGIN IMMEDIATE` is inside a general `try` block, and the `except` unconditionally executes `ROLLBACK`. If transaction start fails due to a lock, there's nothing to rollback - SQLite may then raise a new error `cannot rollback - no transaction is active`, hiding the original cause. The same structure exists in [_write_transaction](../../utils/video_cache.py#L109). This is a concurrency scenario, not a measured failure rate.
 
-В [_cursor_write](../../utils/analytics_db.py#L74) `BEGIN IMMEDIATE` стоит внутри общего `try`, а `except` безусловно выполняет `ROLLBACK`. Если начало транзакции не удалось из-за блокировки, откатывать еще нечего: SQLite может выдать новую ошибку `cannot rollback - no transaction is active`, скрыв исходную причину. Та же структура есть у [_write_transaction](../../utils/video_cache.py#L109). Это сценарий конкуренции, а не измеренная частота отказов.
+Fix: Perform rollback only after successful transaction start, preserving the original exception, and distinguish between database lock, disk error, and integrity violation in the log.
 
-Исправление: выполнять откат только после успешного начала транзакции, сохраняя исходное исключение, и различать занятость базы, ошибку диска и нарушение целостности в журнале.
+### P2 - SQLite cache maintenance may halt bot processing
 
-### P2 - обслуживание SQLite-кэша может останавливать обработку бота
+[scheduled_cache_cleanup](../../main.py#L137) and [scheduled_cache_vacuum](../../main.py#L148) are declared `async`, but they invoke synchronous `DELETE`, `checkpoint`, and `VACUUM` directly within the event loop. This is a daily and weekly operation; lock duration depends on cache size and concurrent access. There is no current measurement of the pause duration.
 
-[scheduled_cache_cleanup](../../main.py#L137) и [scheduled_cache_vacuum](../../main.py#L148) объявлены `async`, но вызывают синхронный `DELETE`, checkpoint и `VACUUM` прямо в event loop. Это ежесуточная и еженедельная работа; блокировка зависит от объема кэша и конкурирующих обращений. Замера текущей паузы нет.
+Fix: Run maintenance in a separate worker thread, limit lock waiting time, and record duration, number of rows deleted, and database size before and after. Test the bot's response to cancellation and polling during maintenance on a copy of the real-sized database.
 
-Исправление: выполнять обслуживание в отдельном рабочем потоке, ограничить ожидание блокировок и записывать длительность, удаленное число строк и размер базы до/после. Проверить отклик кнопки отмены и polling во время обслуживания на копии базы реального размера.
+### P2 - A new cookie file may not be included in the working copy
 
-### P2 - новый cookie-файл может не попасть в рабочую копию
+[working_cookie_file](../../utils/cookie_workfile.py#L39) copies the original only if its `mtime` is strictly greater than that of the working copy. yt-dlp may update the copy just before an administrator uploads a new original; if the copy's timestamp is equal or newer, the fresh original will be ignored. The [cookie loading handler](../../utils/cookie_manager.py#L403) does not invalidate the copy. This is a direct consequence of the code logic; a specific production case has not been documented.
 
-[working_cookie_file](../../utils/cookie_workfile.py#L39) копирует оригинал только если его `mtime` строго больше `mtime` рабочей копии. yt-dlp может обновить копию непосредственно перед загрузкой администратором нового оригинала; при равном или более новом времени копии свежий оригинал будет проигнорирован. [Обработчик загрузки](../../utils/cookie_manager.py#L403) не инвалидирует копию. Это вывод из условий кода, конкретный production-случай не зафиксирован.
+Fix: After a successful upload, explicitly update or mark the working copy as outdated. When reading, synchronize this operation with yt-dlp to avoid overwriting the file during write. Preserve the ability to use platform-updated cookies across bot restarts.
 
-Исправление: после успешной загрузки явно обновлять или помечать рабочую копию как устаревшую; при чтении синхронизировать эту операцию с yt-dlp, чтобы не затереть файл во время записи. Сохранять возможность использовать обновленные платформой cookies между перезапусками.
+### P2 - Timeout and cancellation do not guarantee background work completion before cleanup
 
-### P2 - таймаут и отмена не гарантируют завершение фоновой работы до очистки
+[run_blocking](../../utils/telegram_utils.py#L361) correctly notes that `asyncio.wait_for` terminates the wait but not the thread. It marks the session as canceled, but [session cleanup](../../utils/telegram_utils.py#L1484) may remove its directory before the worker thread actually stops. The progress hook is not guaranteed to trigger during any blocking phase. Moreover, [application shutdown](../../main.py#L375) cleans the shared directory after the app stops, without explicitly waiting for all loading threads to finish. This may result in file reappearances, write errors in remote directories, and race conditions with a new startup. This is a risk scenario in the code, not a reported incident.
 
-[run_blocking](../../utils/telegram_utils.py#L361) верно отмечает, что `asyncio.wait_for` прекращает ожидание, но не поток. Он помечает сессию отмененной, а [очистка сессии](../../utils/telegram_utils.py#L1484) может удалить ее каталог до остановки рабочего потока. Progress hook не обязан сработать во время любого блокирующего этапа. Кроме того, [завершение процесса](../../main.py#L375) очищает общий каталог после остановки приложения, без явного ожидания всех потоков загрузки. Возможны повторное появление файлов, ошибка записи в удаленный каталог и конкуренция с новым запуском. Это сценарий риска по коду, а не зафиксированный инцидент.
+Fix: Mark a session as complete only after the worker actually finishes; for timeouts, mark it as canceled, wait a limited time, and delete files after the worker exits. For abrupt terminations, leave cleanup of old directories to the next startup, but consider process age and ownership if the old process is still running.
 
-Исправление: считать сессию завершенной только после фактического окончания worker; при таймауте помечать ее на отмену, ждать ограниченное время и удалять файлы после выхода worker. Для внезапного завершения оставить очистку старых каталогов при следующем старте, но учитывать возраст и принадлежность процесса, если старый процесс еще жив.
+### P2 - One deletion error interrupts overall cleanup
 
-### P2 - одна ошибка удаления прерывает общую очистку
+In [cleanup_temp_files](../../utils/temp_file_manager.py#L51), a single `try` block wraps the entire loop over `TEMP_DIR`. If deletion of one item raises a `PermissionError` or another `OSError`, control immediately jumps to the `except` block, and the remaining items are not processed. The log reports the error but does not indicate how many files remain. This is confirmed by the function's structure; no specific case involving an inaccessible file has been found.
 
-В [cleanup_temp_files](../../utils/temp_file_manager.py#L51) общий `try` оборачивает весь цикл по `TEMP_DIR`. Если удаление одного элемента даст `PermissionError` или другую `OSError`, управление сразу перейдет в `except`, а оставшиеся элементы не будут обработаны. Лог сообщает об ошибке, но не показывает число оставшихся файлов. Это подтверждено структурой функции; конкретного случая с недоступным файлом не обнаружено.
+Fix: Catch each error individually, continue the iteration, and return a summary of how many files were successfully and unsuccessfully removed. Do not hide failed cleanup behind a success message in `main.py`.
 
-Исправление: ловить ошибку для каждого элемента отдельно, продолжать обход и возвращать сводку о количестве удаленных и неудачных элементов. Не скрывать неудачную очистку за сообщением об успешном завершении в `main.py`.
+### P3 - Remaining session path and complexity of handlers
 
-### P3 - оставшийся путь старой сессии и сложность обработчиков
+All worker calls to [_cleanup_user_session](../../utils/telegram_utils.py#L1484) pass a `session_token`. The branch without a token uses the old `context.user_data["session_id"]` and is called only in [regression testing](../../tests/test_audit_regressions.py#L174). This is a candidate for removal after verifying preserved states and migration contracts, and is not safe for automatic deletion. `_handle_main_callback` spans 854 lines ([start](../../utils/telegram_utils.py#L1908)), and `process_url` spans 303 lines ([start](../../utils/telegram_utils.py#L1603)); repeated platform-specific branches complicate changes and error handling. Function size alone does not prove excessive CPU usage.
 
-Все найденные рабочие вызовы [_cleanup_user_session](../../utils/telegram_utils.py#L1484) передают `session_token`. Ветка без токена использует старый `context.user_data["session_id"]` и вызывается только [регрессионным тестом](../../tests/test_audit_regressions.py#L174). Это кандидат на удаление после проверки сохраненных состояний и миграционного контракта, а не безопасное автоматическое удаление. `_handle_main_callback` занимает 854 строки ([начало](../../utils/telegram_utils.py#L1908)), `process_url` - 303 строки ([начало](../../utils/telegram_utils.py#L1603)); повторяющиеся ветки платформ усложняют изменения и очистку при ошибках. Размер функций сам по себе не доказывает лишнюю работу CPU.
+Fix: Document supported session states; then remove only the unsupported branch and its corresponding test. Split the large callback into smaller, action-based functions with a shared session termination procedure. Preserve behavior for buttons, diagnostics, cache, and temporary file cleanup.
 
-Исправление: зафиксировать поддерживаемые состояния сессий; после этого убрать только неподдерживаемую ветку и ее тест. Разбить большой callback по действиям с общей процедурой завершения сессии. Сохранить поведение кнопок, диагностики, кэша и удаления временных файлов.
+## How current garbage is removed
 
-## Как сейчас удаляется мусор
-
-| Данные | Текущий механизм | Пробел |
+| Data | Current Mechanism | Gap |
 |---|---|---|
-| Временные медиа в `TEMP_DIR` | Удаление каталога сессии при завершении большинства сценариев; очистка всего каталога при старте и остановке в [main.py](../../main.py#L320) через [temp_file_manager](../../utils/temp_file_manager.py#L51) | Нет периодического сборщика брошенных каталогов во время непрерывной работы; возможна гонка с незавершенным worker |
-| `video_cache.db` | Проверка срока 90 дней при чтении, ежедневный `DELETE` устаревших строк и еженедельный checkpoint + `VACUUM`; `/cleanup_cache` удаляет только просроченное | Обслуживание выполняется в event loop; команда не сбрасывает весь кэш |
-| `analytics.db` | Сохраняется в томе Docker; регулярной очистки сырых `events` нет | Нет срока хранения URL, событий и явной политики удаления |
-| Рабочие cookies в `DATA_DIR/cookie-work` | Сохраняются между рестартами специально для обновления сессии платформой | Нет явного обновления по событию загрузки нового оригинала; автоматическое удаление не предусмотрено |
-| `logs/bot.log` | [Ротация](../../utils/logger.py#L17): 10 МиБ и пять резервных файлов; Docker JSON logs ограничены 10 МиБ и тремя файлами на сервис в [compose.yaml](../../compose.yaml#L34) | Срок хранения записей определяется объемом, а не датой |
-| Данные локального Telegram Bot API | Отдельный постоянный том `telegram-bot-api-data` в [compose.yaml](../../compose.yaml#L104) | Управление его внутренней очисткой не проверялось; нельзя считать его частью очистки `TEMP_DIR` |
-| Внутренние реестры отмен и диагностики | Отметки отмены удаляются лениво через 600 секунд; хвост диагностики ограничен 64 сессиями и 60 строками на сессию | Ограничения есть; дополнительная чистка без показаний не нужна |
+| Temporary media in `TEMP_DIR` | Session directory is deleted upon completion of most scenarios; entire directory is cleared at startup and shutdown in [main.py](../../main.py#L320) via [temp_file_manager](../../utils/temp_file_manager.py#L51) | No periodic cleanup of orphaned directories during continuous operation; race condition with incomplete worker |
+| `video_cache.db` | Check validity period of 90 days on read, daily `DELETE` of expired entries, weekly checkpoint + `VACUUM`; `/cleanup_cache` removes only expired entries | Maintenance runs in event loop; the command does not clear the entire cache |
+| `analytics.db` | Stored in Docker volume; no regular cleanup of raw `events` | No retention period for URLs, events, or explicit deletion policy |
+| Working cookies in `DATA_DIR/cookie-work` | Saved between restarts specifically to update platform session | No explicit update on load of new original; automatic deletion is not provided |
+| `logs/bot.log` | [Rotation](../../utils/logger.py#L17): 10 MiB with five backup files; Docker JSON logs are limited to 10 MiB and three files per service in [compose.yaml](../../compose.yaml#L34) | Retention period is based on size, not on date |
+| Local Telegram Bot API data | Separate persistent volume `telegram-bot-api-data` in [compose.yaml](../../compose.yaml#L104) | Internal cleanup is not verified; cannot be considered part of `TEMP_DIR` cleanup |
+| Internal cancellation and diagnostics registries | Cancellation marks are lazily deleted after 600 seconds; diagnostics tail is limited to 64 sessions and 60 lines per session | Limits exist; additional cleanup without indications is not needed |
+`.gitignore` hides local databases, media, logs, and secrets from Git, but does not remove them from the disk.
 
-`.gitignore` скрывает локальные базы, медиа, журналы и секреты от Git, но не удаляет их с диска.
+## Work Order
 
-## Порядок работ
+1. Agree on metrics contract: request link, successful delivery, cache, cancellation, daily MAU, and weekly retention. Fix the weekly format; do not treat old attempts as confirmed downloads.
+2. Establish baseline metrics: number of rows and table sizes including WAL, read/write duration, bot/WebUI response time, frequency of `database is locked`. On a database copy, run `EXPLAIN QUERY PLAN` for summary, users, and CSI queries.
+3. Extract SQLite reads and writes from the event loop, limit waiting time, and ensure handling of unavailable analytics without breaking the load. Fix rollback on failed `BEGIN IMMEDIATE`. For the dashboard, define a unified snapshot of metrics.
+4. Define analytics and URL retention policy, preserve necessary historical aggregates, introduce batch cleanup and base size monitoring. Before migration, create a consistent SQLite backup together with recovery policy.
+5. Based on measurements, reduce number of SQL queries, restructure user pagination, add only confirmed composite indexes, and check for possible removal of duplicates. Compare query plans, delays, and write costs before and after on identical data.
+6. Make worker termination a condition for deleting the temporary directory; add safe cleanup of old orphaned directories during long-running operations and continue cleanup after individual file errors.
+7. Synchronize updating of working cookies with loading of a new original.
+8. After finalizing session contracts, remove the old branch, simplify large handlers, and recheck errors, cancellations, and cleanup.
 
-1. Согласовать контракт метрик: запрос ссылки, успешная доставка, кэш, отмена, дневной MAU и недельное удержание. Исправить формат недели; не трактовать старые попытки как подтвержденные скачивания.
-2. Снять базовые показатели: число строк и объем таблиц и WAL, длительность чтения и записи, время ответа бота/WebUI, частоту `database is locked`. На копии базы проверить `EXPLAIN QUERY PLAN` для запросов сводки, пользователей и CSI.
-3. Вывести чтения и записи SQLite из event loop, ограничить ожидание и обеспечить обработку недоступной аналитики без срыва загрузки. Исправить откат при неудачном `BEGIN IMMEDIATE`. Для дашборда определить единый снимок показателей.
-4. Определить политику хранения аналитики и URL, сохранить необходимые исторические агрегаты, ввести пакетную очистку и наблюдение за размером базы. Перед миграцией сделать согласованную резервную копию SQLite вместе с политикой восстановления.
-5. По результатам измерений сократить число SQL-запросов, перестроить пагинацию пользователей, добавить только подтвержденные составные индексы и проверить возможное удаление дублирующих. Сравнить планы, задержки и стоимость записи до и после на одинаковых данных.
-6. Сделать завершение worker условием удаления временного каталога; добавить безопасную уборку старых брошенных каталогов при долгой работе и продолжать очистку после ошибки отдельного файла.
-7. Синхронизировать обновление рабочей копии cookies с загрузкой нового оригинала.
-8. После закрепления контрактов сессий убрать старую ветку, упростить крупные обработчики и повторно проверить ошибки, отмену и очистку.
+## SQL Stage Readiness Criteria
 
-## Критерии готовности SQL-этапа
-
-- На заранее описанных случаях дашборд правильно различает запрос и успешную доставку, считает дневной MAU и недельное удержание; для старых событий явно показано, какие значения нельзя восстановить.
-- Для каждого измененного частого запроса сохранены исходный и новый `EXPLAIN QUERY PLAN`, время на одинаковом наборе данных и влияние новых индексов на запись. Допустимую задержку WebUI и бота установить по исходным замерам до реализации.
-- Параллельные обращения бота и WebUI, обслуживание кэша и временная блокировка SQLite не приводят к потере пользовательского запроса или зависанию обработки апдейтов; исходная ошибка транзакции остается видимой в журнале.
-- Пакетная очистка оставляет согласованные исторические показатели, не удаляет свежие записи и может быть восстановлена из проверенной резервной копии. Размер базы и WAL после обслуживания виден оператору.
-
-У каждого шага нужен замер или функциональная проверка до и после; эта запись сама по себе ничего в работающем сервисе не исправляет.
+- On pre-defined cases, the dashboard correctly distinguishes between requests and successful deliveries, calculates daily MAU and weekly retention; for older events, it clearly indicates which values cannot be restored.
+- For each modified frequent query, the original and new `EXPLAIN QUERY PLAN`, execution time on the same dataset, and the impact of new indexes on record insertion are preserved. The acceptable delay for the WebUI and bot should be set based on original measurements prior to implementation.
+- Concurrent access by the bot and WebUI, cache servicing, and temporary SQLite locking do not result in loss of user requests or processing update stalls; the original transaction error remains visible in the logs.
+- Batch cleanup preserves consistent historical metrics, does not delete recent records, and can be restored from a verified backup. The database size and WAL size after servicing are visible to the operator.
+A measurement or functional verification is required before and after each step; this record itself does not fix anything in the running service.

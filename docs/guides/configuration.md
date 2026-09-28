@@ -1,73 +1,76 @@
-# Справочник по конфигурации
+# Configuration reference
 
-Единственный шаблон настроек — `.env.example`. Рабочую копию храните в
-`.secrets/.env`; она исключена из системы контроля версий.
+The only settings template is `.env.example`. Keep the working copy in `.secrets/.env`, which is excluded from version control.
 
-## Обязательные переменные
+## Required variables
 
-| Переменная | Где используется | Описание |
+| Variable | Used by | Description |
 |---|---|---|
-| `TELEGRAM_TOKEN` | бот | Токен от @BotFather |
-| `ADMIN_IDS` | бот | ID администраторов через запятую |
-| `TELEGRAM_API_ID` | Docker | ID приложения с my.telegram.org |
-| `TELEGRAM_API_HASH` | Docker | Hash приложения с my.telegram.org |
+| `TELEGRAM_TOKEN` | Bot | Token from @BotFather |
+| `ADMIN_IDS` | Bot | Comma-separated administrator IDs |
+| `TELEGRAM_API_ID` | Docker | Telegram application ID from my.telegram.org |
+| `TELEGRAM_API_HASH` | Docker | Telegram application hash from my.telegram.org |
 
-`TELEGRAM_API_ID` и `TELEGRAM_API_HASH` создаются в разделе **API development
-tools** на [my.telegram.org](https://my.telegram.org). Это учётные данные
-приложения Telegram, а не токен бота и не пароль пользователя.
+Create `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in **API development tools** at [my.telegram.org](https://my.telegram.org). These are Telegram application credentials, not a bot token or a user's password.
 
-## Локальный Telegram Bot API
+## Local Telegram Bot API
 
-В `compose.yaml` эти параметры уже заданы и обычно не требуют изменения:
+`compose.yaml` already sets these values. They usually need no manual changes.
 
-| Переменная | Значение в Compose | Описание |
+| Variable | Compose value | Description |
 |---|---|---|
-| `TELEGRAM_LOCAL_MODE` | `true` | Разрешает отправку по локальному пути |
-| `TELEGRAM_BOT_API_BASE_URL` | `http://telegram-bot-api:8081/bot` | Внутренний адрес API |
-| `TELEGRAM_BOT_API_FILE_URL` | `http://telegram-bot-api:8081/file/bot` | Внутренний адрес файлов |
-| `TELEGRAM_MAX_FILE_SIZE_MB` | `2000` | Максимальный размер отправляемого файла |
-| `TEMP_DIR` | `/app/media` | Общий временный том бота и Bot API |
+| `TELEGRAM_LOCAL_MODE` | `true` | Enables local-path delivery |
+| `TELEGRAM_BOT_API_BASE_URL` | `http://telegram-bot-api:8081/bot` | Internal API address |
+| `TELEGRAM_BOT_API_FILE_URL` | `http://telegram-bot-api:8081/file/bot` | Internal file endpoint |
+| `TELEGRAM_MAX_FILE_SIZE_MB` | `2000` | Maximum file size for delivery |
+| `TEMP_DIR` | `/app/media` | Shared temporary media volume for the bot and Bot API |
 
-При прямом запуске Python локальный режим выключен, используются адреса
-`api.telegram.org`, а лимит принудительно ограничен 50 МБ.
+A direct Python run uses `api.telegram.org` with local mode disabled. Its delivery limit is capped at 50 MB.
 
 ## WebUI
 
-| Переменная | По умолчанию | Описание |
+| Variable | Default | Description |
 |---|---|---|
-| `WEB_USERNAME` | `admin` | Логин |
-| `WEB_PASSWORD` | `changeme` | Пароль, обязательно сменить |
-| `WEB_SECRET_KEY` | случайный | Ключ подписи сессий |
-| `WEB_PORT` | `8080` | Опубликованный порт |
-| `FAIL2BAN_RETRIES` | `5` | Попыток до блокировки |
-| `FAIL2BAN_TIME` | `10m` | Время блокировки |
+| `WEB_USERNAME` | `admin` | Sign-in username |
+| `WEB_PASSWORD` | `changeme` | Sign-in password; change it before deployment |
+| `WEB_SECRET_KEY` | random at startup | Session signing key; set it to preserve sessions across restarts |
+| `WEB_PORT` | `8080` | Published port |
+| `FAIL2BAN_RETRIES` | `5` | Failed sign-in attempts before an IP is blocked |
+| `FAIL2BAN_TIME` | `10m` | IP lockout duration |
 
-## Загрузка и обработка
+The WebUI opens in English by default. Use its EN/RU switch to select Russian; the choice is kept in the browser session.
 
-| Переменная | По умолчанию | Описание |
+Set a stable `WEB_SECRET_KEY` to keep signed sessions valid across restarts. Generate a 64-character hex value with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+## Downloads and processing
+
+| Variable | Default | Description |
 |---|---|---|
-| `LOG_LEVEL` | `INFO` | Уровень логирования |
-| `DOWNLOAD_WORKERS` | `8` | Потоки блокирующих задач |
-| `BLOCKING_TASK_TIMEOUT` | `600` | Тайм-аут задачи, секунд |
-| `YTDLP_CLI_FALLBACK` | `true` | Использовать CLI как запасной путь |
-| `YTDLP_CLI_TIMEOUT` | `900` | Тайм-аут CLI |
+| `LOG_LEVEL` | `INFO` | Log level |
+| `DOWNLOAD_WORKERS` | `8` | Worker threads for blocking operations |
+| `BLOCKING_TASK_TIMEOUT` | `600` | Blocking task timeout in seconds |
+| `YTDLP_CLI_FALLBACK` | `true` | Use yt-dlp CLI as a fallback |
+| `YTDLP_CLI_TIMEOUT` | `900` | CLI timeout in seconds |
+
+See `.env.example` for platform fast-path switches and canary settings.
 
 ## Cookies
 
-| Переменная | Путь по умолчанию |
+| Variable | Default path |
 |---|---|
 | `YOUTUBE_COOKIES_FILE` | `.secrets/www.youtube.com_cookies.txt` |
 | `INSTAGRAM_COOKIES_FILE` | `.secrets/www.instagram.com_cookies.txt` |
 | `TIKTOK_COOKIES_FILE` | `.secrets/www.tiktok.com_cookies.txt` |
 
-Cookies необязательны для открытых материалов. Их также можно обновлять через
-административную команду `/admin`.
+Cookies are optional for public media. Administrators can also update them with the bot's `/admin` command.
 
-## Хранение
+## Storage
 
-- `bot-data` хранит SQLite-базы и переживает перезапуск контейнеров.
-- `telegram-bot-api-data` хранит служебное состояние локального Bot API.
-- `shared-media` используется только для обработки и отправки. Файлы удаляются
-  после успешной или неуспешной отправки; дополнительная очистка выполняется при
-  запуске и остановке бота.
-- `logs/` и `.secrets/` подключаются с хоста.
+- `bot-data` stores SQLite databases across container restarts.
+- `telegram-bot-api-data` stores the local Bot API's state.
+- `shared-media` is temporary storage used for processing and delivery. Files are removed after success or failure; the bot also cleans it at startup and shutdown.
+- `logs/` and `.secrets/` are mounted from the host.

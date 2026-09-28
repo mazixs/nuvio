@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Пользователи{% endblock %}
+{% block title %}{{ t('Users') }}{% endblock %}
 {% block nav_users %}active{% endblock %}
 {% block content %}
 
 <div class="page-header">
     <div>
-        <h1>Пользователи</h1>
-        <p class="subtitle">Все зарегистрированные пользователи бота</p>
+        <h1>{{ t('Users') }}</h1>
+        <p class="subtitle">{{ t('All registered bot users') }}</p>
     </div>
 </div>
 
@@ -15,22 +15,22 @@
         <thead>
             <tr>
                 <th>ID</th>
-                <th>Юзернейм</th>
-                <th>Имя</th>
-                <th>Язык</th>
-                <th>Первый визит</th>
-                <th>Последний визит</th>
-                <th>Запросы</th>
-                <th>События</th>
+                <th>{{ t('Handle') }}</th>
+                <th>{{ t('Name') }}</th>
+                <th>{{ t('Language') }}</th>
+                <th>{{ t('First visit') }}</th>
+                <th>{{ t('Last visit') }}</th>
+                <th>{{ t('Requests') }}</th>
+                <th>{{ t('Events') }}</th>
             </tr>
         </thead>
         <tbody>
             {% for u in users %}
             <tr class="clickable-row" onclick="location.href='/users/{{ u.user_id }}'">
                 <td class="rank-cell">{{ u.user_id }}</td>
-                <td>{{ u.username or '—' }}</td>
+                <td>{{ u.username or '-' }}</td>
                 <td>{{ u.first_name or '' }} {{ u.last_name or '' }}</td>
-                <td>{{ u.language_code or '—' }}</td>
+                <td>{{ u.language_code or '-' }}</td>
                 <td>{{ u.first_seen[:10] }}</td>
                 <td>{{ u.last_seen[:10] }}</td>
                 <td><strong>{{ u.total_downloads }}</strong></td>
@@ -38,7 +38,7 @@
             </tr>
             {% endfor %}
             {% if not users %}
-            <tr><td colspan="8" class="empty">Нет пользователей</td></tr>
+            <tr><td colspan="8" class="empty">{{ t('No users') }}</td></tr>
             {% endif %}
         </tbody>
     </table>
@@ -46,11 +46,11 @@
 
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/users?page={{ page - 1 }}" class="btn">Назад</a>
+    <a href="/users?page={{ page - 1 }}" class="btn">{{ t('Previous') }}</a>
     {% endif %}
-    <span class="page-info">Страница {{ page }}</span>
+    <span class="page-info">{{ t('Page') }} {{ page }}</span>
     {% if has_next %}
-    <a href="/users?page={{ page + 1 }}" class="btn">Вперёд</a>
+    <a href="/users?page={{ page + 1 }}" class="btn">{{ t('Next') }}</a>
     {% endif %}
 </div>
 

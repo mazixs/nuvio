@@ -1,242 +1,148 @@
-# ADR-002: Совместимость видео с плеером Telegram на iOS
+# ADR-002: Video compatibility with Telegram on iOS
 
-## Статус
+## Status
 
-Принято и реализовано.
+Accepted and implemented.
 
-## Контекст
+## Context
 
-Пользователи сообщали о трёх дефектах, видимых **только на iPhone**; на Android
-и в десктопном клиенте те же самые сообщения выглядели правильно:
+Users reported three problems seen **only on iPhone**. The same messages looked correct on Android and Desktop:
 
-1. пропорции сломаны — 16:9 сжат по горизонтали, 9:16 растянут по ширине;
-2. чёрный экран при играющем звуке;
-3. рывки, похожие на низкий FPS.
+1. Distorted aspect ratio: 16:9 video compressed horizontally and 9:16 video stretched horizontally.
+2. A black screen while audio played.
+3. Apparent stutter or low frame rate.
 
-Расследование велось на боевом сервере: разбор продового `bot.log`, скачивание
-проблемных роликов настоящими функциями бота и контрольные отправки через
-локальный Bot API. Дефектов оказалось три, и они **не связаны между собой**.
+The investigation used production `bot.log`, files downloaded through the bot's real functions, and controlled sends through the local Bot API. The symptoms had distinct causes or evidence paths.
 
-### Причина 1: размеры видео не передаются
+### Cause 1: video dimensions were omitted
 
-`reply_video` вызывается без `width`, `height` и `duration` — во всех семи
-местах `utils/telegram_utils.py`.
-
-Bot API эти поля не вычисляет, а подставляет ноль. В зафиксированной проектом
-ревизии (`Dockerfile.telegram-bot-api`, коммит `adfd7f6`), функция
-`Client::process_send_video_query`:
+All seven `reply_video` call sites in `utils/telegram_utils.py` omitted `width`, `height`, and `duration`. The Bot API does not compute these fields itself; it defaults them to zero. In the project-pinned Bot API revision (`Dockerfile.telegram-bot-api`, commit `adfd7f6`), `Client::process_send_video_query` uses:
 
 ```cpp
 int32 width  = get_integer_arg(query.get(), "width",  0, 0, MAX_LENGTH);
 int32 height = get_integer_arg(query.get(), "height", 0, 0, MAX_LENGTH);
 ```
 
-Дальше размеры пытается определить сервер Telegram. На лёгких файлах он
-справляется, на тяжёлых — **сдаётся и записывает `320x320`**. Признак срыва
-виден прямо в ответе API: вместе с размерами теряется и миниатюра
-(`thumbnail: null`).
+Telegram's server then tries to infer dimensions. It succeeded for smaller files but stored **`320x320` for larger ones**, also losing the thumbnail (`thumbnail: null`). A controlled send of the same file showed:
 
-Замерено на одном и том же файле, менялся только факт передачи размеров:
-
-| Отправка | Что записал Telegram |
+| Send | Dimensions stored by Telegram |
 |---|---|
-| без `width`/`height` (текущее поведение бота) | `320x320` |
-| с `width=1920 height=1080` | `1920x1080` |
+| Without `width` and `height` | `320x320` |
+| With `width=1920 height=1080` | `1920x1080` |
 
-Зависимость от файла (все — через локальный Bot API прода):
+Measurements through the production local Bot API:
 
-| Файл | Результат автоопределения |
+| File | Automatic dimensions |
 |---|---|
-| 124 КБ, 6 с, синтетический | верно |
-| 4.9 МБ, 18 с, TikTok 1080x1920 | верно |
-| 35.8 МБ, ~2 мин, YouTube 1920x1080 | **`320x320`** |
+| 124 KB, 6 s, synthetic | Correct |
+| 4.9 MB, 18 s, TikTok 1080x1920 | Correct |
+| 35.8 MB, about 2 min, YouTube 1920x1080 | **`320x320`** |
 
-Почему видно только на iOS: клиент iOS считает геометрию из атрибутов документа
-(`ChatMessageInteractiveMediaNode.swift`, ветка `TelegramMediaFile`), а
-миниатюру использует лишь для решения, менять ли ширину с высотой местами —
-подставить размеры из неё он не может. Android и Desktop измеряют поток сами,
-поэтому дефект у них не проявляется.
+The iOS client derives geometry from document attributes (`ChatMessageInteractiveMediaNode.swift`, `TelegramMediaFile` branch). It uses the thumbnail only to decide whether to swap width and height, not to recover missing dimensions. Android and Desktop measure the stream themselves, explaining the platform difference.
 
-**Важно для методики:** первая проверка этой гипотезы дала ложноотрицательный
-результат, потому что велась на синтетическом ролике в 124 КБ — для него
-автоопределение срабатывало. Гипотеза была ошибочно отброшена и вернулась
-только после опыта на настоящем файле.
+**Methodological note:** The first test used the 124 KB synthetic video, for which automatic detection worked. That false negative initially caused the dimensions hypothesis to be rejected. Testing a real file exposed the defect.
 
-### Причина 2: в MP4 приезжают VP9 и AV1
+### Cause 2: MP4 could contain VP9 or AV1
 
-Плеер Telegram на iOS работает через VideoToolbox: VP9 он не декодирует вовсе,
-AV1 — только на A17 Pro и новее. Отсюда чёрный экран при работающем звуке (звук
-в AAC декодируется нормально).
+Telegram's iOS player uses VideoToolbox. It does not decode VP9, and AV1 support starts with A17 Pro devices. Audio in AAC can therefore play over a black screen.
 
-Цепочка, по которой такой файл получается:
+The affected path was:
 
-1. `utils/youtube_utils.py` задаёт `merge_output_format: "mp4"`. В
-   `get_compatible_ext` yt-dlp явный `preferences=['mp4']` выставляет
-   `allow_mkv=False`, и функция возвращает `mp4` **даже для пары VP9 + M4A**,
-   которой этот контейнер не подходит.
-2. FFmpeg такую склейку выполняет молча.
-3. Единственная защита `_convert_webm_if_needed` проверяет **расширение файла**.
-   Оно `.mp4`, поэтому проверка не срабатывает никогда.
-4. Проверки кодека, аналогичной `_ensure_ios_compatible_video` у TikTok и
-   Instagram, на пути YouTube нет вовсе. Нет её и в `rutube_vk_utils.py`.
+1. `utils/youtube_utils.py` set `merge_output_format: "mp4"`. In yt-dlp's `get_compatible_ext`, the explicit `preferences=['mp4']` set `allow_mkv=False`, so it selected MP4 **even for VP9 + M4A**, an unsuitable pair for that container.
+2. FFmpeg merged the streams without warning.
+3. `_convert_webm_if_needed` checked the **filename extension**. Because the result was `.mp4`, it did nothing.
+4. The YouTube path lacked a finished-file codec check like `_ensure_ios_compatible_video` on TikTok and Instagram. `rutube_vk_utils.py` lacked one too.
 
-Подтверждение из продового лога: реальная загрузка формата `400+140`, где
-`400` — это `av01.0.12M.08`.
+The production log showed a real download of format `400+140`; format `400` had codec `av01.0.12M.08`.
 
-Дополнительно `utils/tg_video_choice.py` ставит разрешение выше пригодности
-кодека — это осознанное решение, записанное в его docstring. Для роликов, у
-которых H.264 заканчивается раньше максимального разрешения, верхние пункты
-меню оказываются нерабочими на iOS. Пример из прода (`Black Myth: Zhong Kui`,
-3840x1600, H.264 есть только до 1920x800):
+`utils/tg_video_choice.py` deliberately prioritized resolution over codec suitability. For a video whose highest H.264 resolution was below the maximum, the top menu choices could therefore fail on iOS. One production example was a high-resolution game trailer at 3840x1600, with H.264 only up to 1920x800:
 
-```
-кнопка 1600p -> 401 av01   ← нерабочий на iOS
-кнопка 1066p -> 400 av01   ← нерабочий на iOS
-кнопка  800p -> 299 avc1
-кнопка «отправить в Telegram» -> 400 av01   ← нерабочий по умолчанию
+```text
+1600p button                -> 401 av01  (unplayable on iOS)
+1066p button                -> 400 av01  (unplayable on iOS)
+ 800p button                -> 299 avc1
+Send to Telegram button     -> 400 av01  (default was unplayable on iOS)
 ```
 
-### Причина 3: перекодирование теряет 8-битность
+### Cause 3: transcoding did not force 8-bit output
 
-`_build_mp4_command` (`utils/media_processor.py`) в ветке перекодирования не
-задаёт `-pix_fmt yuv420p`. libx264 наследует формат пикселей источника, и из
-10-битного входа получается H.264 профиля **High 10**:
+The transcoding branch of `_build_mp4_command` in `utils/media_processor.py` did not pass `-pix_fmt yuv420p`. libx264 inherited the source pixel format, producing H.264 **High 10** from a 10-bit input:
 
-```
-вход:  vp9,  Profile 2,  yuv420p10le
-выход: h264, High 10,    yuv420p10le
+```text
+Input:  vp9,  Profile 2, yuv420p10le
+Output: h264, High 10,   yuv420p10le
 ```
 
-**Дефектом воспроизведения это не является — проверено и опровергнуто.**
-Файл `h264/High 10/1920x800/60fps` был отправлен на iPhone через боевой стенд и
-проигрался плавно. Первоначальное предположение, что iOS не декодирует High 10,
-оказалось неверным; здесь оно записано именно затем, чтобы его не вывели заново.
+**This was not a reproduced playback defect.** A `h264/High 10/1920x800/60fps` file sent to an iPhone through the production setup played smoothly. The initial assumption that iOS could not decode High 10 was disproved and is recorded here to prevent repeating it.
 
-`-pix_fmt yuv420p` всё равно закреплён — как консервативная мера: 8 бит
-поддерживаются повсеместно и на любом клиенте, поддержка 10 бит зависит от
-устройства и версии системы, а стоимость фиксации нулевая. Но выдавать это за
-починку наблюдаемого дефекта нельзя.
+The decision still requires `-pix_fmt yuv420p` as a conservative compatibility measure. Eight-bit video is broadly supported; 10-bit support depends on device and OS version. This change should not be described as the fix for the observed defect.
 
-### Рывки: отдельного дефекта не обнаружено
+### Stutter: no separate cause confirmed
 
-Симптом «видео идёт, но будто с низким FPS» отдельной причины **не получил**.
-Проверены и отвергнуты две версии:
+The report that video looked as though it had a low frame rate did **not** yield an independent reproduced defect:
 
-| Версия | Проверка | Результат |
+| Hypothesis | Test | Result |
 |---|---|---|
-| Программное декодирование VP9 роняет кадры | VP9 1920x800 60fps на iPhone | опровергнута: VP9 не дёргается, а даёт **чёрный экран** |
-| H.264 High 10 тянется процессором | H.264 High 10 1920x800 60fps | опровергнута: играет плавно |
+| Software VP9 decoding drops frames | VP9 1920x800 60 fps on iPhone | Rejected: it showed a black screen, not stutter |
+| H.264 High 10 overloads the processor | H.264 High 10 1920x800 60 fps | Rejected: it played smoothly |
 
-Промежуточного состояния между «играет» и «чёрный экран» у плеера не
-обнаружено: картинка либо есть, либо её нет совсем.
+The tested player showed either a picture or a black screen, with no intermediate state.
 
-Затем был разобран **конкретный ролик TikTok, названный как пример
-дёргающегося**. Файл оказался безупречным: `h264/High level 3.1, 576x1024,
-yuv420p`, постоянная частота кадров (2678 кадров с одинаковым интервалом
-0.03333 с), битрейт около 1 Мбит/с. Ничего, что могло бы дёргаться при
-декодировании.
+A specific TikTok video reported as stuttering was then examined. The file was sound: `h264/High level 3.1, 576x1024, yuv420p`, constant frame rate (2,678 frames at 0.03333 s intervals), and about 1 Mbps. Telegram had nevertheless stored **`320x320`** dimensions for this 10.67 MB file. Sending the same file with explicit `576x1024` dimensions made it look correct. The reported example thus traced to the dimensions defect.
 
-Зато он весит 10.67 МБ — и Telegram записал ему `320x320`. Отправленный тем же
-файлом с явными размерами (`576x1024`) он выглядел правильно. То есть **пример
-дёргающегося видео свёлся к дефекту размеров**, а не к отдельной причине.
+This does not prove that every stutter complaint is solved. Actual stutter was not observed in the controlled test. After deploying the dimensions fix, any remaining complaint should be investigated from a new concrete example.
 
-Вывод: считать рывки самостоятельным дефектом оснований нет. Скорее всего это
-то же искажение, описанное другими словами: плееру сообщены размеры `320x320`,
-а кадры приходят `576x1024`, и он тянет их в несовпадающую рамку. Но и
-объявлять рывки решёнными нельзя — в контролируемом опыте рывки как таковые ни
-разу не наблюдались. Правильный шаг: выкатить починку размеров и посмотреть,
-останутся ли жалобы. Если останутся — начинать с нового конкретного примера.
+The 10.67 MB case also lowered the known size threshold for the dimensions defect:
 
-**Заодно уточнён порог дефекта размеров.** Ранее считалось, что срывается на
-файлах в десятки мегабайт; 10.67 МБ уже даёт `320x320`. Значит под ударом
-изрядная доля TikTok, а не только длинные ролики YouTube:
-
-| Файл | Что записал Telegram |
+| File | Dimensions stored by Telegram |
 |---|---|
-| 124 КБ, 6 с | верно |
-| 4.9 МБ, 18 с | верно |
-| **10.67 МБ, 89 с** | **`320x320`** |
-| 35.8 МБ, ~2 мин | `320x320` |
+| 124 KB, 6 s | Correct |
+| 4.9 MB, 18 s | Correct |
+| **10.67 MB, 89 s** | **`320x320`** |
+| 35.8 MB, about 2 min | `320x320` |
 
-## Решение
+## Decision
 
-Три правила, обязательных для всех путей доставки.
+Three rules apply to every delivery path:
 
-**1. Размеры передавать всегда.** Любая отправка видео обязана нести `width`,
-`height` и `duration`. Автоопределению Telegram доверять нельзя: оно не
-документировано, зависит от размера файла и молча выдаёт квадрат.
+1. **Always send dimensions.** Every video send must include `width`, `height`, and `duration`. Telegram's automatic detection is undocumented, size-dependent, and can silently produce a square.
+2. **Send only 8-bit H.264 video to Telegram.** Inspect the **finished file** with `ffprobe`, not its extension or source metadata. Re-encode anything other than H.264/`yuv420p`.
+3. **Force the pixel format when transcoding.** Every libx264 command must include `-pix_fmt yuv420p`. Codec selection alone does not ensure bit depth.
 
-**2. В Telegram уезжает только H.264 8 бит.** Кодек проверяется у **готового
-файла** через `ffprobe`, а не по расширению и не по тому, что обещал источник.
-Всё, что не H.264/`yuv420p`, перекодируется.
+## Alternatives considered
 
-**3. Перекодирование обязано фиксировать формат пикселей.** Любая команда
-libx264 несёт `-pix_fmt yuv420p`. Кодек без битности — это половина требования.
+- **Rely on Telegram's inferred dimensions:** Rejected because the undocumented behavior failed reproducibly on larger files.
+- **Transcode every file to H.264:** Rejected because it adds seconds per video (ADR-001 measured 9.5 s for a 60-second clip), whereas most files already use H.264. `ffprobe` takes tens of milliseconds.
+- **Remove AV1 and VP9 from the menu:** Rejected as the sole measure because it would deny Android and Desktop users available quality. Re-encoding retains those choices, with codec suitability considered during selection.
 
-## Альтернативы
+## Consequences
 
-**Полагаться на автоопределение Telegram и не передавать размеры.** Отвергнуто:
-поведение недокументировано и воспроизводимо ломается на файлах от нескольких
-десятков мегабайт.
+**Benefits:** Videos play consistently across clients, without depending on file size or the source's format list.
 
-**Перекодировать всё подряд в H.264.** Отвергнуто: перекодирование стоит
-секунды на ролик (замеры ADR-001 — 9.5 с на 60-секундном видео), а большинство
-файлов уже приходят в H.264. Проверка `ffprobe` стоит десятки миллисекунд.
+**Costs and follow-up:**
 
-**Убрать AV1 и VP9 из меню совсем.** Отвергнуто как единственная мера: это
-лишило бы пользователей Android и десктопа качества там, где оно доступно.
-Правильнее перекодировать, а в выборе формата учитывать пригодность кодека
-наравне с разрешением.
+- **Reset the `file_id` cache.** It has a 90-day TTL and already contains documents stored with `320x320`. Resending a `file_id` retains the saved attributes, so those files would remain distorted without a reset.
+- **URL delivery needs separate work.** `UrlHandoff` (`utils/url_delivery.py`) contains only `url`, `kind`, and `size`; the bot does not download that file and cannot measure its geometry. Dimensions must come from source metadata: Instagram `video_versions`, YouTube yt-dlp format data, and potentially the TikTok resolver response.
+- **Some videos now require transcoding**, adding seconds and FFmpeg load.
 
-## Последствия
+## Implementation
 
-**Плюсы:** видео одинаково воспроизводится на всех клиентах; дефект перестаёт
-зависеть от размера файла и от того, какие форматы отдал источник.
-
-**Минусы и цена:**
-
-- **Кэш `file_id` придётся сбросить.** Записи живут 90 дней, и в них уже лежат
-  документы с записанными `320x320`. Пересылка по `file_id` берёт атрибуты
-  сохранённого документа, поэтому без сброса старые видео продолжат приезжать
-  сломанными.
-- **Доставка по ссылке требует отдельной работы.** `UrlHandoff`
-  (`utils/url_delivery.py`) несёт только `url`, `kind` и `size`; сам файл бот в
-  этом случае не скачивает и померить не может. Размеры придётся протаскивать
-  из метаданных источника: у Instagram они есть в `video_versions`, у YouTube —
-  в словаре формата yt-dlp, по TikTok нужно смотреть ответ резолвера.
-- **Часть роликов станет перекодироваться**, чего раньше не происходило, — это
-  дополнительные секунды и нагрузка на FFmpeg.
-
-## Что сделано
-
-| Правка | Где |
+| Change | Location |
 |---|---|
-| `get_video_geometry` — размеры для показа с учётом поворота и неквадратного пикселя | `utils/media_processor.py` |
-| `needs_ios_reencode` — решение по паре «кодек + битность» готового файла | `utils/media_processor.py` |
-| `ensure_ios_compatible_video` — одна защита на все платформы | `utils/media_processor.py` |
-| `-pix_fmt yuv420p` в ветке перекодирования | `utils/media_processor.py` |
-| `width`/`height`/`duration` при отправке файла | `utils/telegram_utils.py` |
-| Размеры в доставке по ссылке | `utils/url_delivery.py`, `utils/instagram_fast_path.py` |
-| Проверка кодека на путях YouTube, Rutube и VK | `utils/youtube_utils.py`, `utils/rutube_vk_utils.py` |
-| Разовая чистка видеозаписей кэша по `PRAGMA user_version` | `utils/video_cache.py` |
-| Недоступный пост Instagram классифицируется как ACCESS | `utils/public_errors.py` |
+| `get_video_geometry`: display dimensions accounting for rotation and non-square pixels | `utils/media_processor.py` |
+| `needs_ios_reencode`: decision based on finished-file codec and bit depth | `utils/media_processor.py` |
+| `ensure_ios_compatible_video`: shared protection across platforms | `utils/media_processor.py` |
+| `-pix_fmt yuv420p` on the transcoding path | `utils/media_processor.py` |
+| Send `width`, `height`, and `duration` for files | `utils/telegram_utils.py` |
+| Pass dimensions for URL delivery | `utils/url_delivery.py`, `utils/instagram_fast_path.py` |
+| Check codecs on YouTube, Rutube, and VK paths | `utils/youtube_utils.py`, `utils/rutube_vk_utils.py` |
+| One-time cache video cleanup using `PRAGMA user_version` | `utils/video_cache.py` |
+| Classify unavailable Instagram posts as ACCESS | `utils/public_errors.py` |
 
-Требования закреплены в `tests/test_ios_video_compatibility.py`.
+`tests/test_ios_video_compatibility.py` covers these requirements.
 
-### Что осталось как было — и почему
+### Intentional unchanged behavior
 
-**`utils/tg_video_choice.py` не тронут.** Приоритет разрешения над кодеком —
-осознанное продуктовое решение, закреплённое тестами
-`test_resolution_outranks_codec_when_h264_forces_a_downgrade` и
-`test_h264_wins_within_the_same_resolution`. Пригодность теперь гарантирует
-перекодирование после скачивания, а не сужение выбора. Цена: если пользователь
-осознанно берёт 4K в AV1, он платит за это временем перекодирования.
-
-**Резолвер TikTok размеров не сообщает**, поэтому доставка ссылкой у TikTok
-идёт без них — то есть ровно как раньше. Лимит этого пути 20 МБ, а
-автоопределение Telegram на файлах такого размера в замерах срабатывало.
-Instagram и YouTube размеры отдают, и они передаются.
-
-**Отправка по `file_id` размеров не принимает:** Telegram берёт атрибуты
-сохранённого документа. Именно поэтому нужна чистка кэша, а не передача
-размеров в пяти местах выдачи из кэша.
+- **`utils/tg_video_choice.py` was left unchanged.** Resolution outranking codec is a deliberate product choice covered by `test_resolution_outranks_codec_when_h264_forces_a_downgrade` and `test_h264_wins_within_the_same_resolution`. Post-download transcoding ensures compatibility. Choosing 4K AV1 may therefore cost extra transcoding time.
+- **The TikTok resolver does not report dimensions.** TikTok URL delivery still omits them, as before. That path is limited to 20 MB; Telegram inferred dimensions correctly for the URL-delivery samples tested at the time, although the 10.67 MB file sent by the separate file path demonstrated that size alone is no guarantee. Instagram and YouTube report dimensions, which are passed through.
+- **A `file_id` send does not accept dimensions.** Telegram reuses the saved document attributes. Clearing the cache is therefore required; adding dimensions to cache-hit send sites would not fix old files.

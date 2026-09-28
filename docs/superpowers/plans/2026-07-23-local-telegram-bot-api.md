@@ -1,40 +1,32 @@
 # Local Telegram Bot API Implementation Plan
 
-> Архивный план реализации. Работа завершена 2026-07-23; команды, версии и
-> незакрытые чекбоксы ниже сохранены как история разработки. Для установки и
-> эксплуатации используйте `README.md` и `docs/guides/deployment.md`.
-
+> Archive plan. Work completed on 2026-07-23; teams, versions, and unchecked checkboxes below are preserved as development history. For installation and operation, use `README.md` and `docs/guides/deployment.md`.
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
-**Goal:** Подключить Nuvio к локальному Telegram Bot API внутри одного Compose-проекта, отправлять файлы до 2000 МБ по общему локальному пути и полностью удалить зависимость от Gokapi.
-
-**Architecture:** `bot`, `web` и `telegram-bot-api` работают отдельными контейнерами в одной внутренней сети Compose. Контейнеры `bot` и `telegram-bot-api` монтируют общий том в `/app/media`, поэтому `python-telegram-bot` в `local_mode` передаёт серверу абсолютный путь вместо повторной загрузки файла через внешний HTTP API. `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` использует только локальный сервер; токен бота остаётся в `TELEGRAM_TOKEN`.
-
+**Goal:** Connect Nuvio to the local Telegram Bot API within a single Compose project, send files up to 2000 MB via a local path, and fully eliminate dependency on Gokapi.
+**Architecture:** The `bot`, `web`, and `telegram-bot-api` components run as separate containers within one internal Compose network. The `bot` and `telegram-bot-api` containers mount a shared volume at `/app/media`, so `python-telegram-bot` in `local_mode` passes the server the absolute path instead of re-uploading the file via an external HTTP API. `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are used only by the local server; the bot token remains in `TELEGRAM_TOKEN`.
 **Tech Stack:** Python 3.14+, python-telegram-bot 22.8, Telegram Bot API 10.2, Docker Compose, pytest, ruff.
 
 ## Global Constraints
 
-- Локальный Telegram Bot API собирается только из официального `tdlib/telegram-bot-api`, ревизия `adfd7f6a8e990272851777eeb3ae0def4216f161`.
-- Порт `8081` не публикуется на хост и доступен только внутри Compose-проекта.
-- Максимальный размер отправки в локальном режиме — `2000` МБ; в облачном режиме — `50` МБ.
-- Рабочий файл настроек — `.secrets/.env`, шаблон — `.env.example`; корневой `.env` не используется Compose.
-- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_TOKEN`, cookies и пароли не записываются в образ и не выводятся в логи.
-- Один токен нельзя одновременно использовать через облачный и локальный Bot API; миграция требует ручного `logOut`.
-- Пользовательские сообщения не упоминают cookies, `api_hash`, внутренние контейнеры или Gokapi.
-- Реализация не добавляет автоматический переход обратно на облачный Bot API.
+- The local Telegram Bot API is built exclusively from the official `tdlib/telegram-bot-api`, revision `adfd7f6a8e990272851777eeb3ae0def4216f161`.
+- Port `8081` is not exposed to the host and is accessible only within the Compose project.
+- Maximum file size in local mode: `2000` MB; in cloud mode: `50` MB.
+- Working configuration file: `.secrets/.env`, template: `.env.example`; the root `.env` is not used by Compose.
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_TOKEN`, cookies, and passwords are not stored in images and are not logged.
+- A single token cannot be used simultaneously through both cloud and local Bot API; migration requires manual `logOut`.
+- User messages do not reference cookies, `api_hash`, internal containers, or Gokapi.
+- The implementation does not add automatic fallback back to the cloud Bot API.
 
 ---
 
-### Task 1: Конфигурация локального Bot API
+### Task 1: Local Bot API Configuration
 
 **Files:**
 - Modify: `config.py`
 - Create: `tests/test_local_bot_api_config.py`
-
 **Interfaces:**
-- Consumes: переменные `TELEGRAM_LOCAL_MODE`, `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL`, `TELEGRAM_MAX_FILE_SIZE_MB`, `TEMP_DIR`.
+- Consumes: environment variables `TELEGRAM_LOCAL_MODE`, `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL`, `TELEGRAM_MAX_FILE_SIZE_MB`, `TEMP_DIR`.
 - Produces: `TELEGRAM_LOCAL_MODE: bool`, `TELEGRAM_BOT_API_BASE_URL: str`, `TELEGRAM_BOT_API_FILE_URL: str`, `MAX_FILE_SIZE: int`, `TEMP_DIR: Path`.
-
 - [ ] **Step 1: Write the failing configuration tests**
 
 ```python
@@ -98,7 +90,6 @@ def test_local_limit_cannot_exceed_telegram_limit(monkeypatch, tmp_path):
 ```
 
 - [ ] **Step 2: Run the tests and verify the missing behavior**
-
 Run:
 
 ```bash
@@ -106,9 +97,7 @@ Run:
 ```
 
 Expected: FAIL because `TELEGRAM_LOCAL_MODE` and configurable `TEMP_DIR` are not defined.
-
 - [ ] **Step 3: Implement the configuration**
-
 Replace the fixed temporary directory and file limit in `config.py` with:
 
 ```python
@@ -156,7 +145,6 @@ if TELEGRAM_LOCAL_MODE:
 ```
 
 - [ ] **Step 4: Run the focused tests**
-
 Run:
 
 ```bash
@@ -164,7 +152,6 @@ Run:
 ```
 
 Expected: 3 passed.
-
 - [ ] **Step 5: Commit the configuration**
 
 ```bash
@@ -174,16 +161,14 @@ git commit -m "feat: добавить конфигурацию локально�
 
 ---
 
-### Task 2: Настройка python-telegram-bot
+### Task 2: Configure python-telegram-bot
 
 **Files:**
 - Modify: `main.py`
 - Create: `tests/test_local_bot_api_application.py`
-
 **Interfaces:**
-- Consumes: константы из Task 1.
+- Consumes: constants from Task 1.
 - Produces: `_configure_application_builder(builder: ApplicationBuilder) -> ApplicationBuilder`.
-
 - [ ] **Step 1: Write failing builder tests**
 
 ```python
@@ -248,7 +233,6 @@ def test_local_builder_uses_internal_api(monkeypatch):
 ```
 
 - [ ] **Step 2: Verify the helper is absent**
-
 Run:
 
 ```bash
@@ -256,9 +240,7 @@ Run:
 ```
 
 Expected: FAIL with `AttributeError: module 'main' has no attribute '_configure_application_builder'`.
-
 - [ ] **Step 3: Extract and implement builder configuration**
-
 Import the new constants in `main.py` and add:
 
 ```python
@@ -292,7 +274,6 @@ application = _configure_application_builder(Application.builder()).build()
 ```
 
 - [ ] **Step 4: Run application and polling tests**
-
 Run:
 
 ```bash
@@ -300,7 +281,6 @@ Run:
 ```
 
 Expected: all tests pass.
-
 - [ ] **Step 5: Commit client integration**
 
 ```bash
@@ -310,7 +290,7 @@ git commit -m "feat: направить бота в локальный Telegram 
 
 ---
 
-### Task 3: Локальная отправка файлов и удаление Gokapi
+### Task 3: Local file delivery and removal of Gokapi
 
 **Files:**
 - Modify: `utils/ytdlp_common.py`
@@ -322,11 +302,9 @@ git commit -m "feat: направить бота в локальный Telegram 
 - Modify: `messages.py`
 - Create: `tests/test_local_file_delivery.py`
 - Modify: `tests/test_audit_regressions.py`
-
 **Interfaces:**
 - Consumes: `MAX_FILE_SIZE`, `Path`.
-- Produces: `FileSizeLimitError`, `finalize_downloaded_file(...) -> Path`, отправка `Path` напрямую в методы Telegram.
-
+- Produces: `FileSizeLimitError`, `finalize_downloaded_file(...) -> Path`, directly sends the `Path` to Telegram methods.
 - [ ] **Step 1: Write failing delivery tests**
 
 ```python
@@ -383,7 +361,6 @@ def test_send_single_file_passes_path_to_local_api(monkeypatch, tmp_path):
 ```
 
 - [ ] **Step 2: Verify the old Gokapi path fails the tests**
-
 Run:
 
 ```bash
@@ -391,9 +368,7 @@ Run:
 ```
 
 Expected: the oversized-file test attempts Gokapi and the send test receives an opened file object instead of `Path`.
-
 - [ ] **Step 3: Replace Gokapi finalization**
-
 In `utils/ytdlp_common.py`, remove the Gokapi import and add:
 
 ```python
@@ -415,7 +390,6 @@ def finalize_downloaded_file(downloaded_file: Path, force_local: bool) -> Path:
 ```
 
 - [ ] **Step 4: Send local paths and remove URL delivery**
-
 Import `TELEGRAM_LOCAL_MODE` in `utils/telegram_utils.py`. In `send_single_file`, use:
 
 ```python
@@ -449,9 +423,7 @@ finally:
 ```
 
 Change `send_file` to accept only `Path` and delete its HTTP-link branch.
-
 - [ ] **Step 5: Remove all Gokapi-dependent branches**
-
 Import `FileSizeLimitError` from `utils.ytdlp_common` in
 `utils/tiktok_instagram_utils.py` and replace the preliminary check:
 
@@ -476,9 +448,7 @@ messages. Update return annotations and docstrings in
 `utils/youtube_utils.py`, `utils/tiktok_instagram_utils.py` and
 `utils/rutube_vk_utils.py` so download functions return a local `Path`, not
 an external URL.
-
 - [ ] **Step 6: Run delivery and regression tests**
-
 Run:
 
 ```bash
@@ -486,7 +456,6 @@ Run:
 ```
 
 Expected: all tests pass and `rg -n "gokapi|Gokapi|GOKAPI" --glob '*.py'` returns no matches.
-
 - [ ] **Step 7: Commit local file delivery**
 
 ```bash
@@ -497,7 +466,7 @@ git commit -m "feat: отправлять большие файлы через �
 
 ---
 
-### Task 4: Образ Telegram Bot API и единый Compose-проект
+### Task 4: Create Telegram Bot API and unified Compose project
 
 **Files:**
 - Create: `Dockerfile.telegram-bot-api`
@@ -508,11 +477,9 @@ git commit -m "feat: отправлять большие файлы через �
 - Modify: `.dockerignore`
 - Modify: `.gitignore`
 - Create: `tests/test_compose_configuration.py`
-
 **Interfaces:**
-- Consumes: `.secrets/.env`, официальный исходный код Telegram Bot API.
-- Produces: сервис `telegram-bot-api`, тома `bot-data`, `telegram-bot-api-data`, `shared-media`.
-
+- Consumes: `.secrets/.env`, official Telegram Bot API source code.
+- Produces: service `telegram-bot-api`, volumes `bot-data`, `telegram-bot-api-data`, `shared-media`.
 - [ ] **Step 1: Write failing structural tests**
 
 ```python
@@ -540,7 +507,6 @@ def test_local_api_source_revision_is_pinned():
 ```
 
 - [ ] **Step 2: Verify infrastructure files are absent**
-
 Run:
 
 ```bash
@@ -548,9 +514,7 @@ Run:
 ```
 
 Expected: FAIL because `compose.yaml` and `Dockerfile.telegram-bot-api` do not exist.
-
 - [ ] **Step 3: Add the pinned multi-stage image**
-
 Create `Dockerfile.telegram-bot-api`:
 
 ```dockerfile
@@ -586,7 +550,6 @@ ENTRYPOINT ["telegram-bot-api"]
 ```
 
 - [ ] **Step 4: Add common and development Compose files**
-
 Create `compose.yaml` with:
 
 ```yaml
@@ -673,9 +636,7 @@ services:
 ```
 
 Retain the existing log rotation and WebUI healthcheck blocks when moving the services. Delete the two obsolete `docker-compose*.yml` files.
-
 - [ ] **Step 5: Validate structure and Compose rendering**
-
 Run:
 
 ```bash
@@ -695,9 +656,7 @@ rm "$NUVIO_COMPOSE_TEST_ENV"
 
 Expected: tests pass and Compose exits with code 0. The uniquely named
 temporary environment file is removed after the check.
-
 - [ ] **Step 6: Build both images**
-
 Run:
 
 ```bash
@@ -705,7 +664,6 @@ docker compose -f compose.yaml -f compose.dev.yaml build bot telegram-bot-api
 ```
 
 Expected: both images build successfully; `telegram-bot-api --help` is available in its image.
-
 - [ ] **Step 7: Commit infrastructure**
 
 ```bash
@@ -716,7 +674,7 @@ git commit -m "feat: добавить локальный Telegram Bot API в Com
 
 ---
 
-### Task 5: Шаблон окружения и инструкция миграции
+### Task 5: Environment Template and Migration Instructions
 
 **Files:**
 - Modify: `.env.example`
@@ -733,11 +691,9 @@ git commit -m "feat: добавить локальный Telegram Bot API в Com
 - Modify: `.github/workflows/release.yml`
 - Modify: `.github/workflows/ci.yml`
 - Create: `tests/test_environment_template.py`
-
 **Interfaces:**
-- Consumes: Compose и переменные из предыдущих задач.
-- Produces: единственный воспроизводимый путь настройки и ручную процедуру миграции.
-
+- Consumes: Compose and variables from previous tasks.
+- Produces: a single reproducible setup path and a manual migration procedure.
 - [ ] **Step 1: Write failing environment-template test**
 
 ```python
@@ -758,7 +714,6 @@ def test_environment_template_contains_local_api_secrets_without_gokapi():
 ```
 
 - [ ] **Step 2: Verify the old template fails**
-
 Run:
 
 ```bash
@@ -766,9 +721,7 @@ Run:
 ```
 
 Expected: FAIL because the local API credentials are absent and Gokapi remains.
-
 - [ ] **Step 3: Replace the template**
-
 The required beginning of `.env.example` becomes:
 
 ```dotenv
@@ -788,9 +741,7 @@ TAG=latest
 ```
 
 Keep the WebUI, cookies, worker and yt-dlp settings. Remove all Gokapi and obsolete `python-dotenv` instructions.
-
 - [ ] **Step 4: Document first launch and migration**
-
 Use these exact operational commands in `docs/guides/deployment.md`:
 
 ```bash
@@ -814,9 +765,7 @@ Add an explicit warning that `logOut` causes planned downtime and must not run
 automatically. Update all old Compose filenames, `.env` copy commands, Gokapi
 descriptions and architecture diagrams in README, project instruction files,
 PRD, troubleshooting, CI and release workflow.
-
 - [ ] **Step 5: Run documentation and configuration checks**
-
 Run:
 
 ```bash
@@ -827,7 +776,6 @@ rg -n "GOKAPI|Gokapi|docker-compose\\.prod\\.yml|cp \\.env\\.example \\.env" \
 ```
 
 Expected: tests pass; the search returns no obsolete operational instructions.
-
 - [ ] **Step 6: Commit configuration documentation**
 
 ```bash
@@ -837,17 +785,14 @@ git commit -m "docs: описать миграцию на локальный Bot
 
 ---
 
-### Task 6: Полная проверка и подготовка выпуска
+### Task 6: Full verification and release preparation
 
 **Files:**
-- Modify only files required by concrete failures found in this task.
-
+- Modify only files that are specifically required by concrete failures identified in this task.
 **Interfaces:**
 - Consumes: complete implementation.
 - Produces: verified release candidate.
-
 - [ ] **Step 1: Run formatting and static checks**
-
 Run:
 
 ```bash
@@ -856,9 +801,7 @@ git diff --check
 ```
 
 Expected: both commands exit with code 0.
-
 - [ ] **Step 2: Run the full test suite**
-
 Run:
 
 ```bash
@@ -866,9 +809,7 @@ Run:
 ```
 
 Expected: all tests pass; network and slow tests remain skipped unless explicitly enabled.
-
 - [ ] **Step 3: Validate Compose using a temporary non-secret environment**
-
 Create a uniquely named temporary file under `.secrets/` from `.env.example`,
 set syntactically valid test values for `TELEGRAM_TOKEN`, `ADMIN_IDS`,
 `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` and run:
@@ -892,9 +833,7 @@ rm "$NUVIO_COMPOSE_TEST_ENV"
 
 Expected: Compose validation and both image builds succeed. Delete only the
 uniquely named temporary file after the check.
-
 - [ ] **Step 4: Inspect the final change set**
-
 Run:
 
 ```bash
@@ -904,9 +843,7 @@ rg -n "GOKAPI|Gokapi|GOKAPI" --glob '!docs/superpowers/**' .
 ```
 
 Expected: no uncommitted implementation files and no live Gokapi references.
-
 - [ ] **Step 5: Perform deployment acceptance outside CI**
-
 After the operator provides real credentials and manually completes `logOut`:
 
 ```bash
@@ -916,14 +853,12 @@ docker compose logs --tail=100 telegram-bot-api bot
 ```
 
 Acceptance:
-
 - `telegram-bot-api` and `bot` are healthy/running;
 - the bot receives a command;
-- a file smaller than 50 МБ is delivered;
-- a file between 60 and 100 МБ is delivered without Gokapi;
+- a file smaller than 50 MB is delivered;
+- a file between 60 and 100 MB is delivered without Gokapi;
 - restart preserves service state and cached Telegram `file_id`;
-- port 8081 is absent from `docker compose port telegram-bot-api 8081`.
-
+- port 8081 is not listed in `docker compose port telegram-bot-api 8081`;
 - [ ] **Step 6: Create the patch release only after acceptance**
 
 ```bash

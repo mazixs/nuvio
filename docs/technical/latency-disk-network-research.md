@@ -1,461 +1,113 @@
-# Исследование: латентность доставки, износ диска и сетевой маршрут
+# Research: delivery latency, disk writes, and network paths
 
-> Дата: 2026-07-25
-> Область: TikTok и Instagram, путь аудио, FFmpeg-слой, временные файлы
-> Метод: чтение кода + замеры FFmpeg на 16 ядрах (ffmpeg 8.0.1), синтетический
-> источник `testsrc2` 1080x1920. Абсолютные числа зависят от контента —
-> надёжны соотношения, не секунды.
+> Research date: 2026-07-25. This is a dated measurement record, not a claim about current CDN behavior or deployment state. The synthetic FFmpeg measurements used FFmpeg 8.0.1 on 16 cores with a 1080 x 1920 `testsrc2` source. Relative differences are more useful than absolute times on other machines and content.
 
----
+## 1. FFmpeg measurements
 
-## 1. Замеры FFmpeg-слоя
+The source was a 1080 x 1920 HEVC video representative of TikTok's `hdplay` format.
 
-Источник: HEVC 1080x1920, как отдаёт TikTok в `hdplay`.
+| Processing path | Time | Output size |
+|---|---:|---:|
+| Existing `convert_to_format`: `ffmpeg -i in -y out.mp4` | 2.56 s | 10.6 MB |
+| H.264: `-c:v libx264 -preset veryfast -crf 23 -c:a copy -movflags +faststart` | 1.72 s | 9.4 MB |
+| Remux: `-c copy -movflags +faststart` | 0.042 s | 12.3 MB |
+| MP3 audio: `-b:a 192k out.mp3` | 0.096 s | 0.36 MB |
+| Copy audio: `-vn -c:a copy out.m4a` | 0.036 s | 0.24 MB |
 
-| Путь | Время | Размер результата |
+The measured H.264 transcode took 2.46 s for a 15 s clip and 9.55 s for a 60 s clip, or about 0.16 times the clip duration. Remuxing was about 61 times faster than the original conversion, but it retains HEVC. The iOS compatibility issue in [ADR-001](adr-001-tiktok-audio-hevc-compatibility.md) rules out remuxing HEVC as the general delivery path.
+
+## 2. Earlier TikTok path and its costs
+
+The earlier request path expanded short links with a full `httpx.get`, called yt-dlp for metadata, then called `extract_info` again on download. Video and audio could be downloaded separately and merged; `ffprobe`, possible HEVC conversion, and the Telegram upload followed. For a 10 MB result, intermediate files could write about 35 MB, a 3.5 times write amplification.
+
+For audio, TikTok usually exposed no audio-only yt-dlp format. The bot therefore downloaded a 12-40 MB muxed video to produce about 0.24 MB of sound. A direct audio URL or stream copy avoids most of that traffic. Converting to MP3 still takes about 0.096 s in this synthetic measurement; copying the M4A track takes 0.036 s.
+
+## 3. Direct TikTok media measurements
+
+Three real `play` URLs from the resolver were checked without authentication. Their media identifiers are withheld because they point to unrelated creators' posts. All returned HTTP 200, H.264 High video at 576 x 1024, AAC audio, and a fast-start MP4. The free resolver response had no `hdplay` URL.
+
+| Sample | Duration | `play` size | Bitrate | `hdplay` |
+|---|---:|---:|---:|---|
+| A | 35 s | 2.05 MB | 470 kbps | `None` |
+| B | 60 s | 5.58 MB | 744 kbps | `None` |
+| C | 166 s | 19.53 MB | 941 kbps | `None` |
+
+For the 60 s sample, the resolver took 0.83 s and downloading 5.58 MB took 1.13 s: 1.95 s total without running FFmpeg. A 19.53 MB file took 14.29 s on a cold CDN connection and 2.12 s on a repeat request, about a sevenfold difference. Range requests reached 4.4-5.3 MB/s. At 941 kbps, a roughly 170 s clip approaches a 20 MB URL delivery limit; the 166 s sample was already 97.6% of it.
+
+The resolver's `music` link returned a 0.96 MB, 128 kbps MP3 in about 1.6 s. The tested signed URL remained valid for about six hours. The URL pointed to TikTok's CDN, not a copy hosted by the resolver, and our anonymous client did not need a User-Agent or Referer. An `original sound` title matched the audio in the tested video; a library track may differ when the author speaks over it. For that case, copy audio from `play` instead. The resolver introduces its own availability and rate-limit dependency, so yt-dlp remains the fallback.
+
+The free resolver only provided 576 x 1024 video in these samples. Higher quality requires the yt-dlp path when available. The historical proposal was to present a fast option and a separate maximum-quality option rather than imply that the fast path preserves 1080p.
+
+## 4. Changes recorded in this research
+
+The dated implementation notes report the following changes under `TIKTOK_FAST_PATH`, enabled by default:
+
+- Direct `play` download with an `ffprobe` codec check, and direct `music` download when it matches the video sound. Otherwise, audio is copied from the video stream.
+- Fallback to yt-dlp if the fast path fails; `FileSizeLimitError` remains a terminal size error.
+- Codec-aware conversion: H.264/AAC can be remuxed, other audio can be transcoded while copying H.264 video, and incompatible video is encoded with `libx264 -preset veryfast -crf 23`. MP4 files use `+faststart`. A measured compatible sample improved from 1.015 s to 0.103 s. HEVC is still encoded as H.264 for iOS compatibility.
+- `_resolve_tiktok_url` attempts `HEAD` before `GET`. On three tested links this avoided downloading 287-354 KB of unnecessary response data per expansion.
+- The FFmpeg availability check is cached. `_audio_format_sort_key` prefers audio-only when bitrate and size are equal.
+
+In a live test of a video containing a library track, extracted audio lasted 35.385 s, matching the video rather than the 168 s library track.
+
+The original follow-up list included checking the cache before metadata, direct URL handoff, a maximum-quality button, shared temporary memory storage, and removal of repeated `extract_info` calls in the fallback audio path. These were proposals in this snapshot; later code or audits must be checked before treating them as open work.
+
+## 5. Request latency in the deployed bot
+
+A logged TikTok request on 2026-07-25 took about 8.5 s from link to video. The phases were:
+
+| Phase | Time |
+|---|---:|
+| Initial "processing" response | 0.16 s |
+| Expand short URL | 1.24 s |
+| yt-dlp metadata extraction | 1.08 s |
+| Render menu and wait for selection | 1.31 s |
+| CDN download | 2.65 s |
+| Local Bot API delivery | 1.89 s |
+
+The visible processing phase was about 2.48 s; the user also waited through the subsequent phases. On a full URL, the resolver produced media metadata in 0.70 s, compared with about 2.0 s for yt-dlp with cookies. Without cookies, yt-dlp failed after about 4.9 s in the tested environment. Checking FFmpeg cost 0.06 s on the first call and effectively zero after caching, so it was not a meaningful source of the delay.
+
+For two Instagram reels, using the direct GraphQL `video_url` reduced download time from 7.54 s to 1.85-1.98 s. Metadata extraction remained 2.98 s, and a repeat served from cached `file_id` took 0.14 s. The tested direct videos were H.264/AAC at 720 x 1024.
+
+## 6. URL handoff to Telegram
+
+Direct URL delivery was tested with the first administrator ID. Telegram infrastructure fetched public URLs; the local `telegram-bot-api` service did not fetch the test URL, and internal Compose addresses were unreachable from Telegram. Local Bot API mode raises the upload limit for local files to 2 GB, but does not raise Telegram's URL fetch limit.
+
+| Public MP4 size | Observed URL delivery |
+|---:|---|
+| 9.7 MB | Accepted |
+| 19.5 MB | Accepted |
+| 30.6 MB | Rejected with `failed to get HTTP URL content` |
+| 37.2 MB | Rejected with the same error |
+
+The observed boundary was between 19.5 and 30.6 MB, consistent with the documented 20 MB URL limit. The documented 5 MB photo limit was not stress-tested; the test images were about 0.13 MB.
+
+| Source | Method | Observed result |
 |---|---|---|
-| `convert_to_format` как сейчас: `ffmpeg -i in -y out.mp4` | **2.56 с** | 10.6 МБ |
-| Транскод `-c:v libx264 -preset veryfast -crf 23 -c:a copy -movflags +faststart` | 1.72 с | 9.4 МБ |
-| Только remux `-c copy -movflags +faststart` (HEVC остаётся) | **0.042 с** | 12.3 МБ |
-| Аудио как сейчас: `-b:a 192k out.mp3` | 0.096 с | 0.36 МБ |
-| Аудио `-vn -c:a copy out.m4a` | 0.036 с | 0.24 МБ |
+| TikTok video, `tiktokcdn-us.com` | `sendVideo` | 1.7-2.1 s; preview present |
+| TikTok audio | `sendAudio` | 0.6-1.1 s in three tests |
+| Instagram reel | `sendVideo` | 1.4 s for 5.94 MB |
+| Instagram photo | `sendPhoto` | 0.4 s |
+| YouTube progressive MP4 | `sendVideo` | 1.0-1.3 s for 2.8 and 8.1 MB |
+| YouTube audio-only itag 140/251 | `sendAudio` | 15 s timeout |
+| YouTube audio-only itag 139 | `sendAudio` | Accepted after 12.45 s |
+| VK Video, `okcdn.ru` | `sendVideo` | HTTP 400 to the tested non-original client |
+| Rutube | URL handoff | Only `m3u8_native` was available |
 
-Масштабирование транскода по длине (≈0.16× realtime):
+Telegram returned a `file_id` for accepted media, so the normal cache could still be populated. Progressive YouTube video worked in these tests; audio-only URL handoff was too slow or failed.
 
-| Длина клипа | Текущий re-encode |
-|---|---|
-| 15 с | 2.46 с |
-| 60 с | **9.55 с** |
+The TikTok resolver allowed one request per second in the test. Consecutive resolution and download decisions therefore had to reuse the same response; the recorded memo TTL was `TIKTOK_RESOLVER_MEMO_TTL_SECONDS=30`.
 
-Вывод: для TikTok в HEVC перекодирование — доминирующая задержка. Remux против
-перекодирования отличается в **61 раз**, но remux сохраняет HEVC и потому
-запрещён ADR-001 (беззвучное видео + сломанные пропорции на iOS).
+## 7. Photo albums and CDN refusals
 
----
+For a 12-frame TikTok carousel with audio, the measured paths were:
 
-## 2. Что происходит с TikTok-запросом сейчас
+| Path | Size probing | Delivery | Total | Local writes |
+|---|---:|---:|---:|---:|
+| Download through disk | - | 6.97 s download + 9.37 s send | 16.34 s | 2.24 MB |
+| URL handoff, sequential probes | 9.95 s | 7.56 s | 17.51 s | 0 |
+| URL handoff, parallel probes | 1.10 s | 8.26 s | 9.36 s | 0 |
 
-1. `_resolve_tiktok_url` — **полный `httpx.get`** страницы, чтобы пройти редиректы
-   (тело HTML скачивается впустую)
-2. `get_tiktok_info` — yt-dlp `extract_info`, до 3 конфигураций × 2 retry × (cookies / без)
-3. пользователь нажимает кнопку
-4. `download_tiktok_video` — ещё один `extract_info`, затем скачивание видео и
-   аудио **отдельными потоками** (механика ADR-001) и мультиплексирование FFmpeg
-5. `ffprobe` определяет кодек
-6. если HEVC → полное перекодирование: **9.5 с на 60-секундном клипе**
-7. запись в общий том
-8. `telegram-bot-api` читает файл и грузит в DC Telegram
+Sequential one-byte Range requests spent most of their time setting up connections. Parallel probes removed 8.85 s. The handoff decision is made for the entire post so that frame ordering and delivery quality remain consistent.
 
-Запись на диск в худшем случае: видеопоток + аудиопоток + сведённый файл +
-перекодированный ≈ **35 МБ на 10 МБ результата**, то есть амплификация ≈3.5×.
-
----
-
-## 3. Путь аудио — самая дешёвая победа
-
-`download_tiktok_audio` (строки 1727+):
-
-- вызывает `extract_info(download=False)` **повторно**, хотя `cached_info` уже
-  передан параметром (строки 1771–1772) — лишний round-trip к TikTok;
-- у TikTok, как правило, нет audio-only форматов, поэтому выбирается **muxed**
-  формат: скачивается всё видео (12–40 МБ), после чего `FFmpegExtractAudio`
-  выбрасывает видеодорожку ради **0.24 МБ** звука;
-- третий ключ сортировки `1 if f.get("vcodec") != "none" else 0` при `reverse=True`
-  ставит форматы **с видео** выше audio-only — обратный приоритет для извлечения
-  звука (влияет только при равных `tbr`/`filesize`, но направление неверное).
-
-При этом в коде **уже есть** прямой URL звука: `_build_tiktok_photo_info`
-кладёт `data.get("music") or music_info.get("play")` в `_nuvio_tiktok_audio_url`
-(строка 397) и качает его одним `_download_remote_file`. Это путь на ~1 секунду,
-применённый только к фото-постам.
-
-Сама конвертация в MP3 не является узким местом (0.096 с). Для TikTok звук уже
-AAC — достаточно remux в M4A через `-c:a copy` (0.036 с) вместо перекодирования.
-
----
-
-## 4. Как получается «1 секунда» — проверено на реальных ссылках
-
-Проверено на трёх реальных видео (второе — из тех, что исторически качались
-без звука).
-
-| видео | сек | `play` | битрейт | разрешение | кодек | звук | faststart | анонимно | `hdplay` |
-|---|---|---|---|---|---|---|---|---|---|
-| ZSXDXS6XR | 35 | 2.05 МБ | 470 кбит/с | 576×1024 | H.264 High | AAC, есть | да | 200 | `None` |
-| ZSxeYGgGC | 60 | 5.58 МБ | 744 кбит/с | 576×1024 | H.264 High | AAC, есть | да | 200 | `None` |
-| ZSxGKk3yb | 166 | 19.53 МБ | 941 кбит/с | 576×1024 | H.264 High | AAC, есть | да | 200 | `None` |
-
-Все три скачиваются **без UA и без Referer**, отдают `video/mp4`, содержат
-H.264 + AAC и уже имеют `moov` перед `mdat`. Разрешение **576×1024 во всех
-трёх, независимо от длины** — это устойчивый потолок `play`, а не случайность
-выборки.
-
-Сквозной замер быстрого пути на 60-секундном видео:
-
-```text
-вызов резолвера       0.83 с
-скачивание 5.58 МБ    1.13 с
-------------------------------
-итого                 1.95 с   — FFmpeg не запускался вообще
-```
-
-### Холодный и прогретый edge CDN — главный разброс
-
-На 19.53 МБ первое скачивание заняло **14.29 с** (1.37 МБ/с), повторное —
-**2.12 с** (9.24 МБ/с). Контрольные range-запросы дают стабильные 4.4–5.3 МБ/с,
-то есть первый заход упирался в холодный edge, а не в троттлинг.
-
-Практический вывод: латентность определяется не кодеками и не FFmpeg, а тем,
-прогрет ли ролик в CDN. Первый запросивший платит до 7× больше остальных.
-Это же объясняет наблюдаемую «1 секунду» у сторонних ботов — популярный ролик
-уже лежит в edge. И именно в холодном случае передача URL выгоднее всего:
-качать будет Telegram со своей связностью, а не твой сервер.
-
-### Потолок передачи по URL ≈ 170 секунд видео
-
-При наблюдаемых ~941 кбит/с лимит Bot API в 20 МБ исчерпывается примерно на
-**170 секундах** ролика. Проверенное видео на 166 с занимает 19.53 МБ — это
-**97.6 % лимита**. То есть передавать по URL можно почти все TikTok, но ролики
-длиннее ~2:50 требуют обычного пути через скачивание.
-
-Путь аудио через `music`: **0.96 МБ, уже готовый MP3 128 kbps**, `audio/mpeg`,
-скачивается анонимно за 1.6 с. Перекодировать нечего.
-
-**Предыдущие утверждения в этом файле были неверны дважды.** Сначала — что CDN
-TikTok требует `Referer`/UA. Затем — что резолвер перевыкладывает файл у себя.
-Проверка показала: ссылки ведут на собственный CDN TikTok
-(`v16m.tiktokcdn-us.com`), и подписанная ссылка скачивается **полностью
-анонимно**. Ничего перевыкладывать не нужно, и передача URL в `sendVideo`
-работоспособна — файлы 2–5.6 МБ укладываются в лимит 20 МБ с большим запасом.
-
-Дополнительный результат, которого не ожидали: **yt-dlp на `ZSxeYGgGC` падает
-без cookies**:
-
-```text
-ERROR: [TikTok] 7639073022762175764: This post may not be comfortable for some
-audiences. Log in for access.
-```
-
-Резолвер это же видео отдал анонимно, в H.264 и со звуком. То есть быстрый путь
-не только быстрее, но и проходит возрастной/чувствительный гейт, который текущий
-путь без cookies пройти не может.
-
-Срок жизни подписанной ссылки — **6 часов** (проверено: выдана 07:54 UTC,
-истекает 13:55 UTC). Для немедленной отправки с запасом; хранить такие URL
-в кэше нельзя, но кэш проекта и так хранит `file_id`, а не ссылки.
-
-### Цена быстрого пути
-
-- **Качество: 576×1024 вместо 1080p.** `hdplay` и `hd_size` на бесплатном тарифе
-  приходят пустыми, то есть 1080p через этот резолвер недоступен вовсе. Для
-  «максимального качества» путь через yt-dlp обязан остаться.
-- **`music` — это саундтрек, и совпадает он не всегда.** На ZSxGKk3yb, где
-  `music_info.title = "original sound - aitymzhakupov"`, проверка подтвердила
-  совпадение: длительность 166.32 против 166.27 с, средняя громкость −18.4 дБ
-  против −17.6 дБ у дорожки из видео (расхождение объясняется MP3-перекодировкой).
-  Отсюда надёжное правило: **если `music_info.title` начинается с
-  `original sound`, `music` — это звук самого видео**; иначе это библиотечный
-  трек, и если автор говорит поверх него, звук будет не тот. В сомнительном
-  случае брать `play` и извлекать `-vn -c:a copy` (0.036 с).
-- **Зависимость от третьей стороны**: rate-limit бесплатного тарифа, доступность,
-  и весь трафик виден резолверу. Проект уже зависит от него для фото-постов, но
-  как основной путь это повышает риск. yt-dlp остаётся fallback'ом.
-- В Docker-стеке с `--local` при передаче URL фетч выполнит **твой** контейнер
-  `telegram-bot-api` — выигрыш «ноль байт на сервере» есть только в облачном
-  режиме. Но выигрыш «ноль FFmpeg и ноль транскода» сохраняется в обоих.
-
----
-
-## 4a. Что из этого реализовано
-
-Реализовано (`utils/tiktok_fast_path.py`, `utils/tiktok_instagram_utils.py`,
-`utils/media_processor.py`), под флагом `TIKTOK_FAST_PATH` (по умолчанию включён):
-
-- `download_tiktok_video_fast` — скачивание прямой ссылки `play` без yt-dlp
-  и без перекодирования. FFmpeg всё равно вызывается: `_ensure_ios_compatible_video`
-  делает один `ffprobe`, чтобы не отдать HEVC при смене поведения резолвера
-  (требование ADR-001). FFmpeg остаётся обязательной зависимостью в любом режиме;
-- `download_tiktok_audio_fast` — прямой `music`, если это звук самого видео,
-  иначе извлечение из видео копированием потока;
-- `extract_audio_copy` — `-vn -c:a copy` вместо перекодирования;
-- откат на существующий путь через yt-dlp при любой ошибке быстрого пути;
-  `FileSizeLimitError` пробрасывается без откатa.
-
-Проверено живым прогоном на трёх реальных ссылках: у видео с треком SAVAGE
-извлечённый звук получился **35.385 с**, то есть совпал с видео, а не
-168-секундной песней из `music`.
-
-Также реализовано и проверено живьём:
-
-- **`convert_to_format` решает по кодекам.** H.264 + AAC → `-c copy`;
-  H.264 + иное аудио → `-c:v copy -c:a aac`; остальное → `libx264
-  -preset veryfast -crf 23`. Везде `-movflags +faststart`. Неизвестный кодек
-  трактуется как требующий перекодирования, поэтому поведение не ухудшается.
-  Замер на готовом H.264: **1.015 с → 0.103 с (≈10×)**, и файл получается
-  крупнее, потому что remux сохраняет исходное качество. Путь ADR-001 не
-  затронут: HEVC по-прежнему перекодируется в H.264, VP9+Opus из webm — тоже.
-- **`_resolve_tiktok_url` использует HEAD** с откатом на GET. TikTok отвечает
-  `200` с пустым телом, экономия **287–354 КБ на каждый запрос** (проверено на
-  трёх ссылках).
-- **`check_ffmpeg_installed` кэширует результат** — раньше порождал процесс
-  `ffmpeg -version` на каждую операцию в пяти местах.
-- **`_audio_format_sort_key`** вынесен и исправлен: при равных битрейте и
-  размере предпочитается формат без видео (был обратный порядок).
-
-Не реализовано и остаётся отдельными задачами: кэш-first в `process_url`,
-передача URL в `sendVideo`, кнопка «Максимум 1080p», tmpfs под `TEMP_DIR`,
-устранение повторного `extract_info` в запасном пути `download_tiktok_audio`.
-
-## 5. Конкретные изменения, по убыванию отдачи
-
-### 5.1. Cache-first в `process_url`
-Уже описано в `fsm-architecture.md` §5.4 с оценкой ICE 9.67 и не сделано.
-Кэш проверяется только в callback, поэтому повторный URL всё равно платит
-полный `get_video_info`.
-
-### 5.2. Аудио TikTok через `music` резолвера
-Заменить скачивание видео на один `_download_remote_file` по прямому URL звука —
-как уже сделано для фото-постов. Плюс убрать повторный `extract_info`.
-Ожидаемо: секунды → ~1 с, трафик 12–40 МБ → ~0.3 МБ.
-
-### 5.3. Быстрый путь видео TikTok без транскода
-`play` резолвера — H.264 без водяного знака, `ffprobe` подтвердит `h264`,
-перекодирование не запускается. Экономия: 2.5 с на 15-секундном клипе,
-9.5 с на 60-секундном.
-
-Это **компромисс качества**: `play` обычно 540–720p, `hdplay` — 1080p, но часто
-HEVC. Правильная форма — две кнопки: «Быстро (720p)» по умолчанию и
-«Максимум (1080p, дольше)» на текущем пути через yt-dlp. yt-dlp обязан
-остаться fallback'ом на случай недоступности резолвера.
-
-### 5.4. Гигиена FFmpeg-слоя (полезна независимо от остального)
-`convert_to_format` — это `ffmpeg -i in -y out.mp4`: полное перекодирование
-дефолтными кодеками, без пресета, без `-c:a copy`, без `+faststart`.
-
-- решать remux или re-encode по результату `get_video_codec`: если видео уже
-  H.264, `-c copy` вместо перекодирования (0.042 с против 2.56 с);
-- при необходимости транскода — `-preset veryfast -crf 23 -c:a copy` (1.5×);
-- `-movflags +faststart` — важно для превью и стриминга в Telegram;
-- `check_ffmpeg_installed()` порождает `ffmpeg -version` при **каждом** вызове
-  (5 мест). Кэшировать в модульном флаге.
-
-### 5.5. Диск: tmpfs под `TEMP_DIR`
-Временные медиа эфемерны по замыслу — удаляются после отправки. Держать их в RAM.
-
-Важно: обычный `tmpfs:`-mount в Compose создаётся **на контейнер** и не виден
-второму сервису. Нужен именованный том с tmpfs-драйвером, чтобы и `bot`, и
-`telegram-bot-api` видели один путь:
-
-```yaml
-volumes:
-  shared-media:
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=4g"
-```
-
-Размер считать как `DOWNLOAD_WORKERS` × типичный файл. Для YouTube-файлов до
-2 ГБ tmpfs не подходит — разумен гибрид: RAM для TikTok/Instagram, диск для
-крупного YouTube. Плюс пункты 5.2–5.4 сами убирают промежуточные файлы, что
-снижает амплификацию записи с ≈3.5× до ≈1×.
-
-### 5.6. Сетевой маршрут
-- `_resolve_tiktok_url` — заменить полный `GET` на `httpx.head(follow_redirects=True)`;
-  при отказе сервера на HEAD — стримить `GET` и обрывать после заголовков;
-- убрать дублирующий `extract_info` в `download_tiktok_audio`;
-- один вызов резолвера заменяет цепочку запросов yt-dlp в фазе получения инфо;
-- хоп `bot` → `telegram-bot-api` — это чтение с диска, не сеть; здесь уже оптимально.
-
-### 5.7. Instagram
-`_fetch_public_instagram_graphql_media` уже достаёт `video_url` (строка 841).
-Instagram обычно отдаёт H.264, поэтому транскод не нужен и `ffprobe` проходит
-насквозь. Прямое скачивание `video_url` через `_download_remote_file` минует
-накладные расходы yt-dlp. Подписанные ссылки живут минуты — при немедленном
-использовании это не проблема.
-
----
-
-## 7. Замеры фазы «Обрабатываю ссылку» (2026-07-25)
-
-Раздел добавлен после жалобы на ~7 секунд ожидания. Числа сняты в продакшене
-(контейнер `nuvio-bot-1`, cookies на месте) и по таймингам `logs/bot.log`.
-
-### 7.1. Разбор одного реального запроса TikTok
-
-Короткая ссылка `vt.tiktok.com/ZSXcgdDgC/`, лог 14:15:22–14:15:30:
-
-| участок | стоимость |
-|---|---|
-| отправка «⏳ Обрабатываю ссылку...» | 0.16 с |
-| `_resolve_tiktok_url` — развернуть короткую ссылку | **1.24 с** |
-| `get_tiktok_info` — `extract_info` yt-dlp | **1.08 с** |
-| отрисовка меню + клик пользователя | 1.31 с |
-| скачивание с CDN (269 КБ) | 2.65 с |
-| отправка в Telegram через локальный API | 1.89 с |
-
-Итого от ссылки до видео — 8.5 с, из которых на фазу «Обрабатываю» приходится
-**2.48 с**. Остальное пользователь тоже воспринимает как ожидание.
-
-### 7.2. Чем заменяется фаза info
-
-Замер в контейнере на полном адресе публикации:
-
-| вызов | время | результат |
-|---|---|---|
-| `_resolve_tiktok_url` на полном адресе | 0.84 с | **чистая потеря** — редиректа за ним нет |
-| `get_tiktok_info` (yt-dlp, с cookies) | 2.00 с | ok |
-| `fetch_tiktok_fast_media` (резолвер) | 0.70 с | ok, даёт размер и длительность |
-| `check_ffmpeg_installed` | 0.06 с / 0.00 с из кэша | ok |
-
-Локально без cookies yt-dlp на тех же ссылках падает целиком за 4.9 с (лестница
-3 конфигурации × 2 попытки), а резолвер отвечает за 0.7–0.8 с. То есть путь
-через резолвер не только быстрее, но и доступнее.
-
-### 7.3. Гипотеза «лишние обработчики кодеков» — опровергнута
-
-Проверка FFmpeg стоит **0.06 с при первом вызове и 0.00 с из кэша**, `ffprobe`
-одного файла — десятки миллисекунд. Это менее 1 % бюджета фазы. Перекодирование
-на быстром пути не запускается вовсе: файл уже H.264.
-
-### 7.4. Instagram
-
-| участок | было (yt-dlp) | стало (прямая ссылка) |
-|---|---|---|
-| фаза info | 2.98 с | без изменений |
-| скачивание | **7.54 с** | **1.85–1.98 с** |
-| повтор из кэша `file_id` | 0.14 с | 0.14 с |
-
-Прямая ссылка из `video_versions` проверена на двух реальных рилсах: анонимно,
-720×1024, **H.264 + AAC**, 4.61 МБ за 0.90 с. Три записи `video_versions`
-(type 101/102/103) — один и тот же файл, поэтому берётся первая.
-
----
-
-## 6. Статус проверки
-
-Проверено на реальных ссылках (см. §4): для обычных видео резолвер возвращает
-`play`, `music`, `wmplay`, `size`, `duration`, `cover`. Поле `hdplay` на
-бесплатном тарифе пустое — 1080p оттуда получить нельзя.
-
-Закрыто на выборке из трёх видео (35 / 60 / 166 с):
-
-- `play` отдаётся в **576×1024 во всех трёх**, независимо от длины — потолок
-  устойчив, 1080p через этот резолвер недостижим;
-- `music` при `music_info.title = "original sound - …"` совпадает со звуком
-  видео по длительности и громкости;
-- определяющий фактор латентности — прогрет ли edge CDN (14.29 с против 2.12 с
-  на одном и том же файле).
-
-Остаётся открытым:
-
-- поведение rate-limit резолвера под реальной нагрузкой бота (бесплатный тариф);
-- доля видео, где `music_info.title` — библиотечный трек, а не `original sound`;
-- совпадает ли `music` со звуком видео на роликах с лицензированным треком
-  (ожидаемо нет — это и есть причина правила выше).
-
----
-
-## 8. Доставка прямой ссылкой вместо файла (2026-07-25)
-
-Проверено на продакшен-хосте через локальный Bot API. Отправка шла первому
-`ADMIN_IDS`, ссылки добывались тем же кодом, что работает в боте.
-
-### Кто скачивает ссылку
-
-**Не наш Bot API.** Внутренний файл-сервер поднимался в сети Compose и на него
-не пришло ни одного запроса от `telegram-bot-api`, хотя отправка вернула ошибку.
-Публичные же ссылки принимаются за 0.1–1.7 с. Значит содержимое забирает
-инфраструктура Telegram, и отсюда два следствия:
-
-* режим `--local` лимит на ссылку **не снимает** — он поднимает до 2000 МБ
-  загрузку *файлом*;
-* внутренние адреса (`http://bot:8099/...`, `http://192.168.64.4:8099/...`)
-  недостижимы принципиально, а не из-за настроек.
-
-### Лимит размера
-
-| файл | результат |
-|---|---|
-| 9.7 МБ, `video/mp4` | принят за 0.1 с |
-| 19.5 МБ, `video/mp4` | принят за 0.1 с |
-| 30.6 МБ, `video/mp4` | отказ: `failed to get HTTP URL content` |
-| 37.2 МБ, YouTube CDN | отказ: `failed to get HTTP URL content` |
-
-Граница между 19.5 и 30.6 МБ; принято документированное значение 20 МБ. Для
-фотографий документированный лимит 5 МБ эмпирически не нащупан: наши картинки
-(0.13 МБ) до него не достают.
-
-### Что проходит по-настоящему
-
-| источник | метод | результат |
-|---|---|---|
-| TikTok видео, `tiktokcdn-us.com` | `sendVideo` | **1.7–2.1 с**, 576×1024, превью есть |
-| TikTok звук, `v16-ies-music.tiktokcdn-us.com` | `sendAudio` | **0.6–1.1 с**, 3 ролика из 3 |
-| Instagram рилс, `cdninstagram.com` | `sendVideo` | **1.4 с**, 5.94 МБ |
-| Instagram картинка, `cdninstagram.com` | `sendPhoto` | **0.4 с** |
-| YouTube progressive mp4, `googlevideo.com` | `sendVideo` | **1.0–1.3 с**, 2.8 и 8.1 МБ |
-| YouTube audio-only (itag 140, 251) | `sendAudio` | **отказ по таймауту 15 с** |
-| VK Video, `okcdn.ru` | `sendVideo` | отказ: CDN отдаёт `400` любому клиенту, кроме исходного |
-| Rutube | — | прямых ссылок нет вовсе, только `m3u8_native` |
-
-Метаданные передавать не нужно: Telegram сам определяет длительность,
-разрешение и делает превью. `file_id` в ответе приходит, поэтому кэш
-продолжает работать.
-
-Отдельно про YouTube: **progressive-форматы работают, audio-only нет.** Ссылки
-itag 140 (0.62 МБ) и 251 (0.72 МБ) отвергнуты по таймауту, itag 139 (0.24 МБ)
-прошёл за 12.45 с — googlevideo придерживает выдачу отдельных дорожек. Поэтому
-звук YouTube остаётся на скачивании, а видео до 20 МБ уходит ссылкой.
-
-### Rate-limit резолвера TikTok — закрытый вопрос из §6
-
-Резолвер разрешает **один запрос в секунду**: на четырёх вызовах подряд по
-одной ссылке отказы пришли на втором и четвёртом
-(`Free Api Limit: 1 request/second.`). Это не абстрактный риск: решение
-«отдать ссылкой» и последующее скачивание идут подряд, и без переиспользования
-ответа откат сам ломал бы быстрый путь. Поэтому ответ резолвера держится
-`TIKTOK_RESOLVER_MEMO_TTL_SECONDS` = 30 с.
-
-### Фото-посты: замеры на карусели из 12 кадров
-
-TikTok фото-пост `@github_radar/photo/7636723387976535304`, 12 кадров и звук:
-
-| путь | замер размеров | отправка | итого | диск |
-|---|---|---|---|---|
-| через диск (как было) | — | 6.97 с скачивание 9.37 с | **16.34 с** | 2.24 МБ |
-| ссылками, замеры последовательно | 9.95 с | 7.56 с | 17.51 с | 0 |
-| ссылками, замеры параллельно | **1.10 с** | 8.26 с | **9.36 с** | 0 |
-
-Первая версия оказалась медленнее того, что заменяла: тринадцать
-Range-запросов подряд стоили больше, чем всё скачивание. Каждый запрос — один
-байт, то есть время уходило на установление соединений, а не на данные;
-параллельные замеры убрали 8.85 с. Вывод общий: для поштучной работы с CDN
-последовательность дороже самих данных.
-
-Решение по фото-посту принимается целиком: доставить половину кадров ссылками,
-а половину файлами нельзя — это разный порядок и разное качество в одном посте.
-
-### CDN может отказать именно Telegram (2026-07-25, вечер)
-
-Через полчаса после успешных замеров ссылки TikTok на видео перестали
-приниматься: 6 попыток из 6, отказ за 0.2–0.34 с. Диагностика на одной и той же
-ссылке:
-
-| кто забирает | результат |
-|---|---|
-| наш клиент с Referer и User-Agent | HTTP 200, `video/mp4` |
-| наш клиент только с User-Agent | HTTP 200, `video/mp4` |
-| наш клиент вообще без заголовков | HTTP 200, `video/mp4` |
-| инфраструктура Telegram | `failed to get HTTP URL content` |
-
-То есть ссылка исправна, а отказывает CDN именно Telegram — вероятно, из-за
-объёма наших же тестовых обращений. При этом **картинки того же TikTok**
-(`p16-sign.tiktokcdn-us.com`) и **видео Instagram** в это же время уходили
-нормально: 12 кадров за 4.63 с, рилс за 2.13 с.
-
-Вывод для реализации: пригодность доставки ссылкой — свойство не платформы, а
-пары «CDN + вид медиа», и оно меняется во времени. Поэтому отказ запоминается на
-`HANDOFF_REFUSAL_COOLDOWN_SECONDS` = 900 с с гранулярностью «домен + вид
-медиа», а не «платформа»: иначе либо теряется 0.3 с на каждом запросе к
-недоступному CDN, либо навсегда выключается то, что завтра снова заработает.
+Later that evening, Telegram rejected a TikTok video CDN URL in six of six attempts within 0.20-0.34 s, although our client still received HTTP 200 with and without headers. TikTok photos and Instagram reels continued to work. This supports treating URL handoff suitability as a changing property of the CDN domain and media type. The recorded refusal cooldown was `HANDOFF_REFUSAL_COOLDOWN_SECONDS=900`, keyed by domain and media type, with local download as fallback.

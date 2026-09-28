@@ -1,17 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Настройки{% endblock %}
+{% block title %}{{ t('Settings') }}{% endblock %}
 {% block nav_settings %}active{% endblock %}
 {% block content %}
 
 <div class="page-header">
     <div>
-        <h1>Настройки</h1>
-        <p class="subtitle">Меняются на ходу — бот перезапускать не нужно</p>
+        <h1>{{ t('Settings') }}</h1>
+        <p class="subtitle">{{ t('Changes take effect without restarting the bot') }}</p>
     </div>
 </div>
 
 {% if saved %}
-<div class="alert alert-success">Интервал сохранён. Применится при следующей рассылке.</div>
+<div class="alert alert-success">{{ t('Interval saved. It will apply to the next survey run.') }}</div>
 {% endif %}
 {% if error %}
 <div class="alert alert-error">{{ error }}</div>
@@ -22,14 +22,14 @@
       data-horizon="{{ csi_track_horizon }}">
 
     <header class="tuner-head">
-        <span class="eyebrow">Опросы удовлетворённости</span>
+        <span class="eyebrow">{{ t('Satisfaction surveys') }}</span>
         <span class="zone-tag" data-role="zone-tag">{{ csi_zone_label }}</span>
     </header>
 
     <div class="tuner-body">
 
         <section class="tuner-control">
-            <h2 class="control-title">Как часто одному человеку приходит опрос</h2>
+            <h2 class="control-title">{{ t('How often each person receives a survey') }}</h2>
 
             <div class="readout">
                 <input class="readout-value" type="number" name="csi_interval_days"
@@ -37,11 +37,11 @@
                        min="{{ csi_interval_min }}" max="{{ csi_interval_max }}" step="1"
                        value="{{ csi_interval_days }}" required
                        aria-describedby="cadence-phrase">
-                <span class="readout-unit">дней</span>
+                <span class="readout-unit" data-role="unit">{{ csi_interval_unit }}</span>
                 <span class="readout-phrase" id="cadence-phrase" data-role="cadence">{{ csi_cadence }}</span>
             </div>
 
-            <label class="slider-label" for="csi_interval_slider">Интервал в днях</label>
+            <label class="slider-label" for="csi_interval_slider">{{ t('Interval in days') }}</label>
             <!-- Шкала логарифмическая: на линейной 1–365 весь рабочий диапазон
                  7–90 дней ужимается в первую четверть хода и не настраивается. -->
             <input class="slider" type="range" id="csi_interval_slider"
@@ -56,8 +56,8 @@
 
             <figure class="track" aria-hidden="true">
                 <figcaption class="track-caption">
-                    <span>{{ csi_track_horizon }} дней вперёд · один человек</span>
-                    <span class="track-count" data-role="track-count">{{ csi_dispatch_offsets | length }}</span>
+                    <span>{{ csi_track_horizon }} {{ t('days ahead · one person') }}</span>
+                    <span class="track-count"><span data-role="track-count">{{ csi_dispatch_offsets | length }}</span> {{ t('scheduled') }}</span>
                 </figcaption>
                 <div class="track-rail" data-role="rail">
                     {% for offset in csi_dispatch_offsets %}
@@ -66,48 +66,47 @@
                     {% endfor %}
                 </div>
                 <div class="track-scale">
-                    <span>сегодня</span>
-                    <span>+{{ csi_track_horizon }} дн.</span>
+                    <span>{{ t('today') }}</span>
+                    <span>+{{ csi_track_horizon }} {{ t('day') }}</span>
                 </div>
             </figure>
 
             <p class="pressure-note" data-role="pressure">
-                Опрос раз в неделю и чаще — частая причина того, что бота удаляют
-                вместе с диалогом.
+                {{ t('Weekly surveys or more often can prompt users to remove the bot.') }}
             </p>
         </section>
 
         <section class="tuner-effect" aria-live="polite">
             <div class="metric">
-                <span class="metric-label">В очереди на следующую рассылку</span>
+                <span class="metric-label">{{ t('Queued for the next survey run') }}</span>
                 {% if csi_queue_size is none %}
-                <span class="metric-value metric-empty" data-role="queue">—</span>
-                <span class="metric-hint">не удалось прочитать базу</span>
+                <span class="metric-value metric-empty" data-role="queue">-</span>
+                <span class="metric-hint" data-role="queue-hint">{{ csi_queue_hint }}</span>
                 {% else %}
                 <span class="metric-value" data-role="queue">{{ csi_queue_size }}</span>
-                <span class="metric-hint">человек получит опрос при ближайшей проверке</span>
+                <span class="metric-hint" data-role="queue-hint">{{ csi_queue_hint }}</span>
                 {% endif %}
             </div>
             <div class="metric">
-                <span class="metric-label">Опросов в год на человека</span>
+                <span class="metric-label">{{ t('Surveys per person per year') }}</span>
                 <span class="metric-value"><span class="metric-approx">≈</span><span data-role="per-year">{{ csi_per_year }}</span></span>
             </div>
             <div class="metric">
-                <span class="metric-label">Ответов собрано</span>
+                <span class="metric-label">{{ t('Responses collected') }}</span>
                 {% if csi_total_responses %}
                 <span class="metric-value">{{ csi_total_responses }}</span>
-                <span class="metric-hint">средний балл {{ csi_avg_rating }}</span>
+                <span class="metric-hint">{{ t('average rating') }} {{ csi_avg_rating }}</span>
                 {% else %}
                 <span class="metric-value metric-empty">0</span>
-                <span class="metric-hint">никто ещё не ответил</span>
+                <span class="metric-hint">{{ t('No responses yet') }}</span>
                 {% endif %}
             </div>
         </section>
     </div>
 
     <footer class="tuner-foot">
-        <p class="foot-note">Рассылка проверяет очередь раз в сутки, поэтому новый интервал вступит в силу в течение дня.</p>
-        <button type="submit" class="btn btn-primary">Сохранить интервал</button>
+        <p class="foot-note">{{ t('The queue is checked daily, so the new interval takes effect within a day.') }}</p>
+        <button type="submit" class="btn btn-primary">{{ t('Save interval') }}</button>
     </footer>
 </form>
 
@@ -173,7 +172,7 @@
     function refresh(days, immediate) {
         slider.value = daysToPosition(days);
         markPresets(days);
-        // Тики рисуем сразу — они считаются из одного числа и не ждут сети.
+        // Тики рисуем сразу - они считаются из одного числа и не ждут сети.
         drawTicks(localOffsets(days));
         requestPreview(days, immediate);
     }
@@ -188,9 +187,11 @@
                     form.dataset.zone = data.zone;
                     form.querySelector('[data-role="zone-tag"]').textContent = data.zone_label;
                     form.querySelector('[data-role="cadence"]').textContent = data.cadence;
+                    form.querySelector('[data-role="unit"]').textContent = data.unit;
                     form.querySelector('[data-role="per-year"]').textContent = data.per_year;
                     var queue = form.querySelector('[data-role="queue"]');
-                    queue.textContent = data.queue_size === null ? '—' : data.queue_size;
+                    queue.textContent = data.queue_size === null ? '-' : data.queue_size;
+                    form.querySelector('[data-role="queue-hint"]').textContent = data.queue_hint;
                 })
                 .catch(function () { /* прочерк лучше выдуманного числа */ });
         }, immediate ? 0 : 180);

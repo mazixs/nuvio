@@ -1,30 +1,30 @@
-# Статус исправлений после аудита
+# Implementation status after the audits
 
-Дата: 2026-09-24. Этот документ фиксирует результат реализации пунктов четырех аудитов в этом каталоге. Их исходные находки сохранены как история проверки и не описывают текущее состояние кода.
+Date: 2026-09-24. This document records implementation of findings from the four audits in this directory. The original findings remain as audit history and do not describe the current code state.
 
-## Сделано
+## Completed
 
-- Исправлены распознавание и нормализация `vk.ru/live-...`, выбор прямого MP4 по проверенному размеру и продолжение загрузки после сетевого обрыва. Метаданные исходной ссылки дали архив длительностью 28 522 с и пригодный `url480` размером 1 413 429 913 байт.
-- Выбор звука YouTube опирается на язык дорожки: русский имеет приоритет при достаточном лимите файла. Для публичного ролика `3KTFen3clkM` выбран `160+140-1` с русским звуком. Старые YouTube-записи кэша, способные содержать английский звук, удаляются при обновлении схемы.
-- Сохранена проверка кодеков для iOS. Opus в MP4 теперь распознается, совместимый H.264/AAC проходит без перекодирования, а конвертация не пишет в исходный файл. Две проверки готового видео объединены в один вызов ffprobe.
-- Меню YouTube получает безопасное экранирование и запасной вывод без Markdown при ошибке Telegram. Журнал загрузки разделен по сессиям.
-- yt-dlp закреплен на `2026.9.16.232951.dev0` вместе с EJS и Deno в образе. Обновление работающего Python-процесса удалено. Скрипт готовит точный pin и lock-файлы; еженедельный workflow предлагает PR, отдельный workflow полностью скачивает контрольное видео. Канарейка сохраняет результат и уведомляет администратора.
-- Исправлены недельные когорты, скользящая вовлеченность, индексы и постраничная выборка пользователей. Дашборд читает согласованный снимок; операции SQLite выведены из async-обработчиков. Исторические запросы отделены от подтвержденных отправок.
-- Очистка сессии ждет фактического окончания рабочего потока. Удаление брошенных медиа, старых копий cookies и URL событий выполняется по сроку хранения; перед изменением аналитики создается проверенная резервная копия.
+- Fixed recognition and normalization of `vk.ru/live-...` URLs, selection of a direct MP4 by verified size, and download continuation after a network interruption. The source URL described an archive of 28,522 seconds and a usable `url480` stream of 1,413,429,913 bytes.
+- YouTube audio selection now uses the track language. Russian takes priority when the file size limit permits it. For a public test video (identifier withheld), the bot selected `160+140-1` with Russian audio. A schema update removes older YouTube cache entries that may contain English audio.
+- Preserved iOS codec checks. Opus in MP4 is detected, compatible H.264/AAC files pass without transcoding, and conversion does not overwrite the source file. Two final-video probes were combined into one ffprobe call.
+- Added safe escaping to the YouTube menu and a plain-text fallback when Telegram rejects Markdown. Download logs are separated by session.
+- Pinned yt-dlp to `2026.9.16.232951.dev0` with EJS and Deno in the image. Removed updates from the running Python process. The update script prepares an exact pin and lock files; a weekly workflow proposes a PR, and another workflow fully downloads a control video. The canary records its result and alerts an administrator.
+- Fixed weekly cohorts, rolling engagement, indexes, and paginated user queries. The dashboard reads a consistent snapshot; SQLite operations run outside async handlers. Historical requests are distinguished from confirmed deliveries.
+- Session cleanup now waits for the actual end of the worker. Abandoned media, old cookie copies, and event URLs are removed according to their retention periods. A verified backup is created before analytics data changes.
 
-## Проверено
+## Verified
 
-- `pytest tests/ -q`: 717 проверок прошли; `ruff check .`, `actionlint` и `git diff --check` прошли.
-- Образ собран локально. В нем загружены yt-dlp `2026.09.16.232951`, EJS `0.8.0`, Deno `2.9.7`; бот создает обработчики с тестовым токеном.
-- Из свежего образа контрольное YouTube-видео скачано полностью: 37,0 МБ, временный файл удален. Публичный ролик с выбранной русской дорожкой `140-1` также скачан полностью: 38 299 221 байт. yt-dlp помечает `140-1` как `ru`, "Russian original (default)". В исходном M4A стоит тег `eng`, который сохраняется в MP4; этот тег не подтверждает язык речи.
-- Исходная ссылка VK скачана целиком в режиме локального Bot API: 1 413 429 913 байт, H.264 852x480 и AAC. В облачном режиме выбор этого файла ожидаемо отклоняется лимитом 50 МБ. После проверки временный файл удален.
-- Повторный запуск `scripts/update_ytdlp.py` с уже закрепленной версией завершился без изменений файлов. Текущая версия из PyPI совпала с pin. После расширения проверок покрытие строк и ветвей в общем отчете - около 70,4% при пороге CI 70%.
-- На искусственной базе со 100 тысячами событий медиана запроса недавних событий снизилась с 5,621 до 0,234 мс; запись при новом наборе индексов заняла 217 вместо 180 мс. Это локальный синтетический замер, не показатель рабочего сервера.
+- `pytest tests/ -q`: 717 checks passed. `ruff check .`, `actionlint`, and `git diff --check` also passed.
+- A local image build loaded yt-dlp `2026.09.16.232951`, EJS `0.8.0`, and Deno `2.9.7`. The bot created handlers with a test token.
+- The control YouTube video was downloaded in full from a fresh image: 37.0 MB; its temporary file was deleted. A public video with selected Russian audio track `140-1` was also downloaded in full: 38,299,221 bytes. yt-dlp labels `140-1` as `ru`, "Russian original (default)". The original M4A has an `eng` metadata tag that persists in MP4; the tag does not establish the spoken language.
+- The original VK URL was fully downloaded in local Bot API mode: 1,413,429,913 bytes, H.264 at 852x480 with AAC. Cloud mode correctly rejects selection of that file under its 50 MB limit. The temporary file was deleted after the check.
+- Re-running `scripts/update_ytdlp.py` with the already pinned version changed no files. The then-current PyPI version matched the pin. After extending tests, combined line and branch coverage was about 70.4%, above the 70% CI threshold.
+- On a synthetic database with 100,000 events, median recent-event query time fell from 5.621 to 0.234 ms. Writes with the new indexes took 217 ms instead of 180 ms. These are local synthetic measurements, not production-server results.
 
-## Требует проверки на рабочем окружении
+## Still requires production verification
 
-- Отправка исходной записи VK размером 1,4 ГБ через локальный Telegram Bot API и повторная выдача из кэша. Полный файл локально скачан, но в Telegram не отправлен.
-- Повторение ошибки на конкретной ссылке YouTube пользователя: в переписке ее нет. Проверен другой публичный ролик с русской дорожкой.
-- Воспроизведение доставленного видео на iPhone, включая частоту кадров, размеры и звук.
-- Размер рабочей базы, задержки запросов и отклик бота во время очистки; локальный SQL-замер не заменяет эти показатели.
-- Выпуск нового образа, обновление рабочего контейнера и наблюдение канарейки после выпуска. Сервер `192.168.1.50` был недоступен по сети. GitHub workflow и права на создание PR проверены синтаксически, но не запуском в GitHub.
+- Send the original 1.4 GB VK archive through the local Telegram Bot API and deliver it again from cache. It was downloaded locally but not sent to Telegram.
+- Reproduce the failure for the user's specific YouTube URL, which was absent from the conversation. A different public video with a Russian track was tested.
+- Play a delivered video on an iPhone and verify frame rate, dimensions, and audio.
+- Measure production database size, query latency, and bot responsiveness during cleanup. Local SQL timings do not replace these observations.
+- Release a new image, update the production container, and observe the canary afterward. The production server was unreachable over the network during this check. GitHub workflows and PR permissions were checked syntactically but were not run on GitHub.

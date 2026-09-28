@@ -1,362 +1,186 @@
-# AGENTS.md — Nuvio
+# AGENTS.md - Nuvio
 
-Файл для AI-агентов, работающих с кодовой базой Nuvio. Проект написан преимущественно на русском языке: комментарии, docstrings, пользовательские сообщения и документация — всё на русском.
+Guidance for AI agents working in the Nuvio repository. Documentation is written in English. Bot messages, code comments, and docstrings remain in Russian; code identifiers remain in English. The WebUI opens in English by default and offers Russian as an option. The root README has English and Russian versions.
 
----
+## Project overview
 
-## Обзор проекта
+Nuvio is an asynchronous Telegram bot that downloads video, photo posts, and audio from YouTube, TikTok, Instagram, Rutube, and VK Video. It caches Telegram `file_id` values for fast repeat delivery, records user analytics in a WebUI, and updates yt-dlp through pinned dependencies and new images.
 
-**Nuvio** — асинхронный Telegram-бот для скачивания видео, фото-постов и аудио с YouTube, TikTok, Instagram, Rutube и VK Video. Поддерживает кэширование file_id для мгновенной повторной отправки, аналитику пользователей через WebUI-дашборд и автоматическое обновление yt-dlp.
+Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, photos, and carousels; Rutube and VK Video; MP3 192k extraction with FFmpeg; a 90-day SQLite `file_id` cache; files up to 2 GB through the local Telegram Bot API; temporary-media cleanup; spam protection; administrator cache commands; CSI survey scheduling in the WebUI; and pinned yt-dlp releases.
 
-Основные возможности:
-- YouTube (видео + Shorts), TikTok, Instagram (посты, reels, фото-посты, карусели), Rutube, VK Video
-- Извлечение аудио (MP3 192k через FFmpeg)
-- Кэширование file_id в SQLite (TTL 90 дней)
-- Файлы до 2 ГБ отправляются через локальный Telegram Bot API
-- Временные медиа удаляются после отправки или ошибки
-- Защита от спама (4 запроса за 5 секунд → cooldown 10 секунд)
-- Админские команды: `/cache_stats`, `/search_cache`, `/cleanup_cache`, `/admin`
-- WebUI-дашборд аналитики (FastAPI + Jinja2) и страница `/settings` с частотой CSI-опросов
-- Обновление yt-dlp точной версией через lock-файлы, CI и новый образ
+## Technology
 
----
+- Python 3.14+ and asynchronous `python-telegram-bot` 22.8.
+- yt-dlp `2026.9.16.232951.dev0` nightly, pinned in `requirements.in`.
+- FastAPI 0.141.1, Uvicorn, and Jinja2 for the WebUI.
+- SQLite in WAL mode: `telegram_cache.db` for file IDs and `analytics.db` for analytics.
+- System FFmpeg; Docker Compose with a local Telegram Bot API.
+- Ruff and pytest 9.1.1.
 
-## Технологический стек
+## Repository map
 
-- **Язык**: Python 3.14+
-- **Бот**: [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) 22.8 (async)
-- **Скачивание**: [yt-dlp](https://github.com/yt-dlp/yt-dlp) 2026.9.16.232951.dev0 (nightly, версия закреплена в `requirements.in`)
-- **WebUI**: FastAPI 0.139.2 + Uvicorn + Jinja2
-- **Базы данных**: SQLite (WAL mode) — две отдельные БД:
-  - `video_cache.db` — кэш file_id
-  - `analytics.db` — аналитика пользователей и событий
-- **Обработка медиа**: FFmpeg (системная зависимость)
-- **Контейнеризация**: Docker Compose + локальный Telegram Bot API
-- **Линтер**: ruff
-- **Тестирование**: pytest 9.1.1
+| Path | Purpose |
+|---|---|
+| `main.py` | Bot entry point, handlers, event loop, and graceful shutdown |
+| `config.py` | Environment parsing, secret paths, and validation |
+| `messages.py` | Centralized bot-facing text |
+| `requirements.in`, `requirements.txt` | Direct runtime dependencies and hashed lock file |
+| `requirements-dev.in`, `requirements-dev.txt` | Direct development dependencies and hashed lock file |
+| `Dockerfile`, `Dockerfile.telegram-bot-api` | Nuvio and local Bot API images |
+| `compose.yaml`, `compose.dev.yaml` | Published-image and source-build stacks |
+| `init_env.sh` | Headless systemd bootstrap and secret migration |
+| `utils/telegram_utils.py`, `utils/callback_fsm.py` | Bot flow, callbacks, delivery, and cancellation |
+| `utils/youtube_utils.py`, `utils/tiktok_instagram_utils.py`, `utils/rutube_vk_utils.py` | Platform downloaders |
+| `utils/media_processor.py` | FFmpeg conversion, extraction, and compression |
+| `utils/video_cache.py`, `utils/analytics_db.py` | SQLite cache and analytics |
+| `utils/ytdlp_runtime.py`, `utils/cookie_manager.py`, `utils/cookie_health.py` | yt-dlp runtime and cookie management |
+| `utils/logger.py`, `utils/cache_commands.py`, `utils/temp_file_manager.py` | Logging, cache commands, and temporary files |
+| `web/` | FastAPI application, templates, static assets, and localization |
+| `tests/` | Unit, integration, smoke, and regression tests |
+| `docs/` | English guides, technical notes, audits, and archived plans |
+| `scripts/release_notes.py` | GitHub Release changelog generation |
+| `.github/workflows/ci.yml`, `.github/workflows/release.yml` | CI and release pipelines |
 
----
+The documentation index is `docs/index.md`. The archived plans in `docs/superpowers/` describe past work and may contain historical commands or versions.
 
-## Структура проекта
+## Setup and operation
 
-```
-nuvio/
-├── main.py                      # Точка входа: event loop, хэндлеры, graceful shutdown
-├── config.py                    # Парсинг env-переменных, пути к секретам, валидация
-├── messages.py                  # Все пользовательские тексты (централизовано)
-├── requirements.in              # Прямые runtime-зависимости
-├── requirements.txt             # Runtime lock-файл с хешами
-├── requirements-dev.in          # Прямые dev/CI-зависимости
-├── requirements-dev.txt         # Dev/CI lock-файл с хешами
-├── pytest.ini                  # Конфигурация pytest
-├── Dockerfile                  # Сборка образа (python:3.14-slim + ffmpeg)
-├── Dockerfile.telegram-bot-api # Сборка локального Telegram Bot API
-├── compose.yaml                # Основной стек (GHCR + локальный Bot API)
-├── compose.dev.yaml            # Сборка Nuvio из исходников
-├── init_env.sh                 # Headless bootstrap для systemd (git pull, pip install, миграция секретов)
-│
-├── utils/                       # Основная бизнес-логика
-│   ├── __init__.py              # Пустые импорты (избегаем побочных эффектов при тестах)
-│   ├── telegram_utils.py        # Хэндлеры бота, callback-кнопки, отправка файлов, спам-защита
-│   ├── youtube_utils.py         # Загрузка YouTube/Shorts через yt-dlp
-│   ├── tiktok_instagram_utils.py # TikTok и Instagram: видео, фото-посты, карусели
-│   ├── rutube_vk_utils.py        # Rutube и VK Video: видео и аудио через yt-dlp
-│   ├── media_processor.py       # FFmpeg: конвертация webm→mp4, извлечение аудио, сжатие
-│   ├── video_cache.py           # SQLite-кэш file_id (WAL mode, TTL 90 дней)
-│   ├── analytics_db.py          # SQLite-аналитика: таблицы users, events (WAL mode)
-│   ├── ytdlp_runtime.py         # Версия yt-dlp и CLI fallback
-│   ├── cookie_manager.py        # Админский интерфейс загрузки cookies через Telegram
-│   ├── cookie_health.py         # Валидация и проверка здоровья cookies
-│   ├── logger.py                # Настройка логирования (rotating file handler, 10MB, 5 backups)
-│   ├── cache_commands.py        # Обработчики админских команд управления кэшем
-│   └── temp_file_manager.py     # Управление временными файлами при скачивании
-│
-├── web/                         # WebUI дашборд
-│   ├── app.py                   # FastAPI-приложение: логин, дашборд, настройки, API
-│   ├── __main__.py              # Точка входа: `python -m web`
-│   ├── templates/               # Jinja2-шаблоны
-│   └── static/                  # CSS, JS, изображения
-│
-├── tests/                       # Тесты pytest
-│   ├── conftest.py              # Фикстуры, хуки, маркеры, заглушка yt_dlp
-│   ├── test_syntax.py           # Синтаксический анализ всех .py файлов
-│   ├── test_utils.py            # Структурные тесты (пути, модули)
-│   ├── test_youtube_smoke.py    # Smoke tests youtube_utils с моком YoutubeDL
-│   ├── test_cache_integration.py # Интеграционные тесты TelegramVideoCache
-│   ├── test_main_polling.py     # Тесты классификации ошибок polling
-│   ├── test_telegram_utils_error_classification.py # Тесты классификации YouTube-ошибок
-│   └── test_audit_regressions.py # Регрессионные тесты бизнес-логики
-│
-├── docs/                        # Документация
-│   ├── technical/architecture.md # Архитектурное описание
-│   ├── development/contributing.md # Руководство для разработчиков
-│   ├── guides/deployment.md     # Руководство по развёртыванию
-│   ├── guides/configuration.md  # Справочник по конфигурации
-│   ├── troubleshooting/common-issues.md # Устранение неполадок
-│   ├── PRD.md                   # Product Requirements Document
-│   └── screenshots/             # Скриншоты
-│
-├── scripts/                     # Служебные скрипты вне рантайма бота
-│   └── release_notes.py         # Сборка changelog для GitHub Release
-│
-└── .github/workflows/           # CI/CD
-    ├── ci.yml                   # Линтинг (ruff), тесты, проверка Docker-сборки
-    └── release.yml              # Релиз: тесты → GHCR → changelog → GitHub Release
-```
-
----
-
-## Сборка и запуск
-
-### Локальная разработка
+Create a virtual environment, install development dependencies, and copy the environment template:
 
 ```bash
-# Клонирование и установка зависимостей
 git clone https://github.com/mazixs/nuvio.git
 cd nuvio
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 python -m pip install --requirement requirements-dev.txt
-
-# Настройка окружения
 mkdir -p .secrets
 cp .env.example .secrets/.env
-# Для прямого запуска заполните TELEGRAM_TOKEN и ADMIN_IDS
-
-# Запуск бота
-python main.py
-
-# Запуск WebUI дашборда (в отдельном терминале)
-python -m web
 ```
 
-Прямой запуск использует облачный Telegram Bot API и ограничивает отправку
-размером 50 МБ. Для файлов до 2 ГБ запускайте полный Docker-стек.
+Set `TELEGRAM_TOKEN` and `ADMIN_IDS` for a direct run. Start the bot with `python main.py` and the WebUI in a separate process with `python -m web`. Direct runs use the cloud Bot API and a 50 MB file limit.
 
-### Docker
+For the Docker stack, also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`:
 
 ```bash
-mkdir -p .secrets
-cp .env.example .secrets/.env
-# Заполните TELEGRAM_TOKEN, ADMIN_IDS, TELEGRAM_API_ID, TELEGRAM_API_HASH
+# Build Nuvio from the current checkout
+docker compose --env-file .secrets/.env -f compose.yaml -f compose.dev.yaml up -d --build
 
-# Локальная разработка
-docker compose --env-file .secrets/.env \
-  -f compose.yaml -f compose.dev.yaml up -d --build
-
-# Продакшен (образ Nuvio из GHCR)
+# Use the published Nuvio image from GHCR
 docker compose --env-file .secrets/.env up -d
 ```
 
-### Системные зависимости
+Docker delivery supports files up to 2 GB. FFmpeg is required. Deno 2.3+ provides the full YouTube format set and is included in the Docker image. `init_env.sh` and release operations also need Git.
 
-- Python 3.14+
-- FFmpeg (обязательно для конвертации и извлечения аудио)
-- Deno 2.3+ (для полного набора форматов YouTube; включен в Docker-образ)
-- git (для `init_env.sh` и выпуска нового образа)
-
----
-
-## Тестирование
-
-### Команды
+## Tests and style
 
 ```bash
-pytest                              # Все тесты
-pytest -v                          # Подробный вывод
-pytest -k "test_name"              # Запуск конкретного теста
-pytest tests/test_youtube_smoke.py -v  # Один файл
+pytest
+pytest -v
+pytest -k "test_name"
+pytest tests/test_youtube_smoke.py -v
 coverage run --branch -m pytest tests/
-coverage report --fail-under=70    # Та же граница, что в CI
-```
-
-### Маркеры pytest
-
-| Маркер | Описание | Требует флага |
-|---|---|---|
-| `syntax` | Синтаксическая корректность и импорты всех .py файлов | Нет |
-| `unit` | Модульные тесты с моками | Нет |
-| `integration` | Интеграционные тесты (SQLite) | Нет |
-
-### Принципы тестирования
-
-- YouTube тесты используют мокированный `YoutubeDL` (без сетевых запросов).
-- Реальные cookie-файлы автоматически отключаются в тестах через monkeypatch.
-- Фикстуры и hooks находятся в `tests/conftest.py`.
-- Тестовая заглушка `yt_dlp` создаётся в `conftest.py` для сред без установленной библиотеки.
-
----
-
-## Стиль кода и соглашения
-
-### Линтинг
-
-В CI используется **ruff**:
-
-```bash
-python -m pip install --requirement requirements-dev.txt
+coverage report --fail-under=70
 ruff check --output-format=github .
 ```
 
-### Язык и тексты
+Pytest markers `syntax`, `unit`, and `integration` require no extra flag. YouTube smoke tests mock `YoutubeDL` and do not make network requests. Tests disable real cookies with monkeypatch. Fixtures and hooks are in `tests/conftest.py`, which also provides a yt-dlp stub where the package is unavailable.
 
-- **Все user-facing сообщения** вынесены в `messages.py`. Не хардкодить тексты в хэндлерах.
-- Комментарии и docstrings — на русском языке.
-- Код (переменные, функции, классы) — на английском.
+Keep all bot-facing messages in `messages.py`; do not hardcode them in handlers. Write bot messages, comments, and docstrings in Russian. Write documentation in English and keep the English WebUI translation complete. Identifiers for variables, functions, and classes remain English. Production code must not call `print()`; `test_no_print_statements` enforces this.
+Write commit messages in English.
 
-### Обработка ошибок
+Public documentation may identify the repository owner as `mazixs` and use `mazix@bk.ru` as the owner's contact address. Replace other personal contact details, real user-submitted media links and identifiers from investigations, and private deployment addresses, hostnames, and filesystem paths with neutral placeholders. Keep official service URLs, documented local or Compose endpoints, and the openly licensed reference media configured by the application when they are needed to follow an instruction.
 
-- **Коды ошибок**: формат `PREFIX-CATEGORY-RANDOM` (например, `YT-ACCESS-A1B2C3`).
-  - Префиксы: `YT` (YouTube), `TT` (TikTok), `IG` (Instagram), `RU` (Rutube), `VK` (VK), `TG` (Telegram), `FILE`, `BOT`.
-  - Категории: `ACCESS`, `NETWORK`, `TIMEOUT`, `FORMAT_UNAVAILABLE`, `FFMPEG_MISSING`, `EXTRACTOR_RUNTIME`, `UNKNOWN`.
-- Пользователь видит безопасное описание для своей платформы и код ошибки.
-  Cookies, внутренние адреса, состояние контейнеров и traceback доступны только
-  в административных журналах.
-- Используется `Exception.add_note()` для обогащения исключений контекстом.
+### Error handling
 
-### Асинхронность
+- Error IDs follow `PREFIX-CATEGORY-RANDOM`, for example `YT-ACCESS-A1B2C3`.
+- Prefixes are `YT`, `TT`, `IG`, `RU`, `VK`, `TG`, `FILE`, and `BOT`.
+- Categories and their eight-character abbreviations are listed in `docs/error-codes.md`. If the cause is unconfirmed, use `UNEXPECT` and include the exception type in the log. Do not create new `UNKNOWN` codes.
+- Users see a safe, platform-specific explanation and the error ID. Cookie state, internal addresses, container details, and tracebacks belong only in administrator logs and reports.
+- Use `Exception.add_note()` to attach diagnostic context.
 
-- Бот полностью async на базе `python-telegram-bot`.
-- Блокирующие операции (yt-dlp, FFmpeg) выполняются в `ThreadPoolExecutor`.
-- `DOWNLOAD_WORKERS=8` по умолчанию (настраивается через env).
-- `BLOCKING_TASK_TIMEOUT=600` секунд по умолчанию.
-- Апдейты обрабатываются параллельно: `UPDATE_CONCURRENCY = 32` в `main.py`,
-  заведомо больше `DOWNLOAD_WORKERS`. Последовательная обработка по умолчанию
-  лишала смысла кнопку отмены (нажатие ждало конца скачивания) и не давала
-  принять вторую ссылку во время работы. Хэндлер не должен держать фетчер
-  апдейтов: долгая работа — через `run_blocking` с `session_id=`, фоновая —
-  через `context.application.create_task`.
+### Asynchronous work
 
-### Логирование
+The bot uses `python-telegram-bot` asynchronously. yt-dlp and FFmpeg run in a `ThreadPoolExecutor`. `DOWNLOAD_WORKERS` defaults to 8 and `BLOCKING_TASK_TIMEOUT` to 600 seconds.
 
-- Используется `utils/logger.py` (`setup_logger`).
-- Все логгеры пишут в единый файл `logs/bot.log` с ротацией (10MB, 5 backups).
-- Уровень логирования задаётся через `LOG_LEVEL` env var.
-- **Запрещено** использовать `print()` в production-коде (есть тест `test_no_print_statements`).
+`UPDATE_CONCURRENCY = 32` in `main.py` exceeds the worker count so cancellation callbacks and a second URL can be handled during a download. Do not keep the update fetcher occupied with long blocking work. Use `run_blocking(..., session_id=...)` for long tasks and `context.application.create_task` for background tasks.
 
-### Базы данных
+### Logging, databases, and configuration
 
-- SQLite с WAL mode (`PRAGMA journal_mode=WAL`) для конкурентного доступа.
-- `video_cache.db` — кэш file_id для мгновенной повторной отправки.
-- `analytics.db` — аналитика: пользователи, события, метрики retention/churn.
-- Все SQL-запросы используют параметризацию (`?`), никакой конкатенации строк в SQL.
+`utils/logger.py` configures one rotating `logs/bot.log` file (10 MB, five backups). `LOG_LEVEL` controls verbosity. SQLite uses `PRAGMA journal_mode=WAL` for concurrent access. Parameterize every SQL query with `?`; do not concatenate SQL input.
 
-### Конфигурация
+Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_path()` keeps the legacy repository-root fallback. `telegram_cache.db` stores file IDs, and `analytics.db` stores users, events, and metrics.
 
-- Все настройки — через переменные окружения, парсятся в `config.py`.
-- Секреты хранятся в `.secrets/` (preferred) или legacy в корне проекта.
-- Функция `resolve_secret_path()` обеспечивает обратную совместимость.
+## Security
 
----
+- Parameterize SQL queries.
+- Compare WebUI credentials in constant time, including `hmac.compare_digest`.
+- Block repeated WebUI sign-in attempts by IP using `FAIL2BAN_RETRIES` and `FAIL2BAN_TIME`.
+- Limit entered usernames and passwords to 128 characters.
+- Sign sessions through `SessionMiddleware` with `WEB_SECRET_KEY`.
+- Keep Swagger and ReDoc disabled; let Jinja2 escape HTML.
+- Do not expose database structure or tracebacks to users.
+- Save cookie files with owner-only `0o600` permissions.
 
-## Безопасность
+## CI and releases
 
-- **SQL-инъекции**: все запросы к БД параметризованы.
-- **Аутентификация WebUI**: сравнение с env-переменными, timing-safe (`hmac.compare_digest`).
-- **Brute-force**: fail2ban на WebUI — `FAIL2BAN_RETRIES` попыток → блокировка IP на `FAIL2BAN_TIME`.
-- **Длина ввода**: логин и пароль ограничены 128 символами, обрезаются на входе.
-- **Сессии**: подписаны HMAC через `SessionMiddleware`, подделка без `WEB_SECRET_KEY` невозможна.
-- **Swagger/ReDoc**: отключены (`docs_url=None, redoc_url=None`).
-- **Jinja2**: автоэкранирование HTML по умолчанию.
-- **Ошибки**: не раскрывают внутреннюю структуру БД или стектрейсы пользователю.
-- **Cookies**: файлы cookies сохраняются с правами `0o600` (только владелец).
+`.github/workflows/ci.yml` runs on pushes and PRs to `main` and `develop`, plus `workflow_dispatch` for yt-dlp update PRs created with `GITHUB_TOKEN`. It runs actionlint and Ruff, the full test suite on Python 3.14 with at least 70% coverage, then a Buildx Docker build with GHA cache, a Trivy check for fixable HIGH/CRITICAL vulnerabilities, and smoke checks of Nuvio and the local Bot API.
 
----
+`.github/workflows/release.yml` runs on `v*` tags. It verifies the semver tag belongs to `main`, repeats lint/tests/coverage, publishes a canonical GHCR digest with SBOM and provenance, validates that digest with Trivy and smoke checks, and only then assigns `latest`, `major.minor`, and `major` tags. Pre-releases do not receive `latest` because `compose.yaml` defaults to `${TAG:-latest}`. `scripts/release_notes.py` assigns each commit to one changelog section. GitHub Release is created only after image publication succeeds.
 
-## CI/CD
+## Architectural rules
 
-### CI (`.github/workflows/ci.yml`)
+1. Blocking yt-dlp and FFmpeg work stays outside the event loop.
+2. Callback buttons use session tokens of the form `s|{token}|{scope}|{action}`, with at most five active sessions per user.
+3. Save the Telegram `file_id` after first delivery; subsequent equivalent requests can use the cached ID.
+4. Retry network timeouts with exponential backoff. Use the `python -m yt_dlp` CLI fallback when the embedded API fails.
+5. YouTube attempts start **without cookies**, then try cookies. Authentication can remove the token-free `android_vr` client. Instagram follows the same order; TikTok tries cookies first.
+6. TikTok `/photo/` links and Instagram carousels produce image sets, with separate audio when available.
+7. Pin yt-dlp in `requirements.in` and the image. `scripts/update_ytdlp.py` and a new image release perform updates.
+8. With `CANARY_ENABLED=true`, `utils/canary.py` periodically downloads a reference YouTube video through the real path and bypasses the `file_id` cache. It alerts administrators on failure.
 
-Запускается на push/PR в `main` и `develop`, а также через `workflow_dispatch`
-для PR обновления yt-dlp, созданных `GITHUB_TOKEN`:
-1. **Линтинг** — actionlint и `ruff check --output-format=github .`
-2. **Тесты** - полный `pytest tests/` на Python 3.14 с покрытием не ниже 70%.
-3. **Docker build** — Buildx-сборка с GHA-кэшем, Trivy-проверка исправимых
-   HIGH/CRITICAL уязвимостей и smoke-проверка Nuvio и локального Bot API.
+## Environment variables
 
-### Release (`.github/workflows/release.yml`)
-
-Запускается на push тега `v*`:
-1. **Тесты** — проверка semver-тега и его принадлежности `main`, полный набор, ruff и порог покрытия.
-2. **Docker → GHCR** — публикация canonical digest с SBOM/provenance,
-   Trivy- и smoke-проверка этого digest и только затем создание тегов
-   (`latest`, `major.minor`, `major`). Тег `latest` не выдаётся предрелизам:
-   `compose.yaml` по умолчанию тянет `${TAG:-latest}`, и RC попал бы всем.
-3. **GitHub Release** — changelog собирает `scripts/release_notes.py`
-   (классификация по теме коммита, каждый коммит ровно в одном разделе),
-   релиз создаётся только после успешной публикации образа.
-
----
-
-## Ключевые архитектурные паттерны
-
-1. **Async + ThreadPoolExecutor**: блокирующие операции yt-dlp/FFmpeg не блокируют event loop.
-2. **Callback-сессии**: пользовательские inline-кнопки привязаны к сессиям через токены (`s|{token}|{scope}|{action}`). Максимум 5 активных сессий на пользователя.
-3. **Кэш file_id**: при первой отправке файла в Telegram сохраняется `file_id`; повторные запросы того же URL отправляются мгновенно через CDN.
-4. **Smart retry**: экспоненциальный backoff при сетевых таймаутах yt-dlp; fallback на CLI (`python -m yt_dlp`) при сбоях встроенного API.
-5. **Порядок попыток**: для YouTube сначала без cookies, затем с ними — авторизованная сессия отбирает у yt-dlp клиента `android_vr`, единственного, кто работает без PO-токена. Instagram устроен так же, а у TikTok наоборот: cookies первыми.
-6. **Фото-посты**: TikTok-ссылки вида `/photo/` и Instagram карусели скачиваются как набор изображений; аудио отправляется отдельным сообщением, если есть.
-7. **Версия yt-dlp**: закреплена в `requirements.in` и образе; обновление выполняется `scripts/update_ytdlp.py` и выпуском нового образа.
-8. **Канарейка YouTube** (`utils/canary.py`, `CANARY_ENABLED=true`): по расписанию скачивает эталонный ролик тем же путем и без кэша `file_id`; при отказе уведомляет администраторов.
-
----
-
-## Переменные окружения
-
-| Переменная | Обязательная | По умолчанию | Описание |
+| Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `TELEGRAM_TOKEN` | да | — | Токен бота от @BotFather |
-| `ADMIN_IDS` | да | — | Список ID администраторов через запятую |
-| `TELEGRAM_API_ID` | да для Docker | — | ID приложения с my.telegram.org |
-| `TELEGRAM_API_HASH` | да для Docker | — | Hash приложения с my.telegram.org |
-| `WEB_USERNAME` | нет | `admin` | Логин для WebUI |
-| `WEB_PASSWORD` | нет | `changeme` | Пароль для WebUI (**сменить!**) |
-| `WEB_SECRET_KEY` | нет | авто | Ключ подписи сессий (64 hex-символа) |
-| `WEB_PORT` | нет | `8080` | Порт WebUI |
-| `FAIL2BAN_RETRIES` | нет | `5` | Попыток логина до блокировки IP |
-| `FAIL2BAN_TIME` | нет | `10m` | Время блокировки (`10m`, `1h`, `300`) |
-| `LOG_LEVEL` | нет | `INFO` | Уровень логирования |
-| `DOWNLOAD_WORKERS` | нет | `8` | Потоков в ThreadPoolExecutor |
-| `BLOCKING_TASK_TIMEOUT` | нет | `600` | Таймаут блокирующих задач (сек) |
-| `TIKTOK_FAST_PATH` | нет | `true` | Прямая H.264-ссылка TikTok вместо yt-dlp (576×1024, без перекодирования). Не откатывает уже закэшированные ссылки — см. ниже |
-| `INSTAGRAM_FAST_PATH` | нет | `true` | Прямая ссылка Instagram из GraphQL вместо yt-dlp (~1.9 с против 7.5 с, качество то же) |
-| `YTDLP_CLI_FALLBACK` | нет | `true` | CLI fallback при сбое API |
-| `YTDLP_CLI_TIMEOUT` | нет | `900` | Таймаут CLI-вызова yt-dlp (сек) |
-| `CANARY_ENABLED` | нет | `false` | Канареечная проверка YouTube по расписанию с уведомлением при провале |
-| `CANARY_INTERVAL_HOURS` | нет | `12` | Часы между проверками (1–168, иначе 12) |
-| `CANARY_VIDEO_ID` | нет | `6WFj-CKldv4` | Id эталонного ролика; нужен длиннее пары минут |
-| `DATA_DIR` | нет | корень репозитория | Каталог баз (`analytics.db`, `telegram_cache.db`); в Docker `/app/data` |
-| `TEMP_DIR` | нет | `./temp` | Каталог временных медиа; в Docker `/app/media` — общий том с Bot API |
-| `YOUTUBE_COOKIES_FILE` | нет | `www.youtube.com_cookies.txt` | Имя файла cookies YouTube в `.secrets/` |
-| `TIKTOK_COOKIES_FILE` | нет | `www.tiktok.com_cookies.txt` | Имя файла cookies TikTok в `.secrets/` |
-| `INSTAGRAM_COOKIES_FILE` | нет | `www.instagram.com_cookies.txt` | Имя файла cookies Instagram в `.secrets/` |
-| `TELEGRAM_LOCAL_MODE` | нет | `false` | Локальный Bot API вместо облачного; в Docker `true` |
-| `TELEGRAM_BOT_API_BASE_URL` | нет | — | URL локального Bot API; задаёт `compose.yaml` |
-| `TELEGRAM_BOT_API_FILE_URL` | нет | — | URL файлового эндпоинта; задаёт `compose.yaml` |
-| `TELEGRAM_MAX_FILE_SIZE_MB` | нет | `50` | Желаемый лимит; зажимается режимом: 2000 при локальном Bot API, иначе 50 |
+| `TELEGRAM_TOKEN` | Yes | - | Bot token from @BotFather |
+| `ADMIN_IDS` | Yes | - | Comma-separated administrator IDs |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | For Docker | - | Telegram application credentials |
+| `WEB_USERNAME` | No | `admin` | WebUI username |
+| `WEB_PASSWORD` | No | `changeme` | WebUI password; change it |
+| `WEB_SECRET_KEY` | No | Generated | Session signing key, preferably 64 hex characters |
+| `WEB_PORT` | No | `8080` | WebUI port |
+| `FAIL2BAN_RETRIES` | No | `5` | Failed sign-ins before IP lockout |
+| `FAIL2BAN_TIME` | No | `10m` | Lockout duration, such as `10m`, `1h`, or `300` |
+| `LOG_LEVEL` | No | `INFO` | Log level |
+| `DOWNLOAD_WORKERS` | No | `8` | Blocking worker threads |
+| `BLOCKING_TASK_TIMEOUT` | No | `600` | Blocking task timeout in seconds |
+| `TIKTOK_FAST_PATH` | No | `true` | Direct H.264 TikTok URL instead of yt-dlp, generally 576x1024 |
+| `INSTAGRAM_FAST_PATH` | No | `true` | Direct Instagram GraphQL URL instead of yt-dlp |
+| `YTDLP_CLI_FALLBACK` | No | `true` | CLI fallback after API failure |
+| `YTDLP_CLI_TIMEOUT` | No | `900` | CLI timeout in seconds |
+| `CANARY_ENABLED` | No | `false` | Scheduled YouTube check and failure alert |
+| `CANARY_INTERVAL_HOURS` | No | `12` | Check interval, from 1 to 168 hours |
+| `CANARY_VIDEO_ID` | No | `6WFj-CKldv4` | Reference video ID; use a video longer than a few minutes |
+| `DATA_DIR` | No | Repository root | SQLite directory; `/app/data` in Docker |
+| `TEMP_DIR` | No | `./temp` | Temporary media; shared `/app/media` in Docker |
+| `YOUTUBE_COOKIES_FILE` | No | `www.youtube.com_cookies.txt` | Cookie filename in `.secrets/` |
+| `TIKTOK_COOKIES_FILE` | No | `www.tiktok.com_cookies.txt` | Cookie filename in `.secrets/` |
+| `INSTAGRAM_COOKIES_FILE` | No | `www.instagram.com_cookies.txt` | Cookie filename in `.secrets/` |
+| `TELEGRAM_LOCAL_MODE` | No | `false` | Local Bot API instead of cloud; set to `true` in Docker |
+| `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL` | No | - | Local Bot API endpoints set by `compose.yaml` |
+| `TELEGRAM_MAX_FILE_SIZE_MB` | No | `50` | Requested limit, clamped to 2,000 locally or 50 in cloud mode |
 
-Четыре последние задаёт `compose.yaml`, поэтому в `.env.example` их нет: при
-прямом запуске они не нужны, а в Docker их не надо трогать.
+The final four delivery settings are set by `compose.yaml`; they are not in `.env.example` because direct runs do not need them and Docker users do not need to edit them.
 
----
+### TikTok fast path and cached files
 
-### TIKTOK_FAST_PATH и кэш file_id
+The `file_id` cache is checked before downloading and has a 90-day TTL. Changing `TIKTOK_FAST_PATH` does not alter cached links: after setting it to `false`, a cached 576x1024 file will still be delivered. `/cleanup_cache` deletes only expired entries. For an immediate reset, remove `telegram_cache.db` from `DATA_DIR` and restart the bot.
 
-Кэш `file_id` читается **до** скачивания и живёт 90 дней, поэтому смена флага
-не влияет на уже закэшированные ссылки: после `TIKTOK_FAST_PATH=false` они
-продолжат отдавать 576×1024, записанные быстрым путём.
+## Change with care
 
-Команда `/cleanup_cache` этого не откатывает — она удаляет только записи
-старше 90 дней. Для немедленного сброса нужно удалить файл `telegram_cache.db`
-(каталог `DATA_DIR`) и перезапустить бота.
-
-## Что изменять осторожно
-
-- **`messages.py`**: при изменении сообщений проверяйте, что они не превышают лимиты Telegram (4096 символов для обычных сообщений).
-- **`config.py`**: добавление новых env-переменных требует обновления `.env.example` и `README.md`.
-- **`utils/telegram_utils.py` и `utils/callback_fsm.py`**: изменения формата
-  `callback_data` должны сопровождаться тестами разбора событий и переходов
-  существующих сессий.
-- **`utils/youtube_utils.py`**: логика fallback (cookies → без cookies → CLI) чувствительна к порядку операций. Любые изменения должны сохранять стратегию отката.
-- **`tests/conftest.py`**: заглушка yt_dlp используется многими тестами. Изменения здесь могут повлиять на весь тестовый набор.
-- **SQLite схемы**: при изменении схем `video_cache.db` или `analytics.db` учитывайте WAL mode и необходимость миграций для существующих установок.
+- `messages.py`: Telegram messages must fit its limits, including 4,096 characters for ordinary messages.
+- `config.py`: Update `.env.example` and `README.md` when adding environment variables.
+- `utils/telegram_utils.py` and `utils/callback_fsm.py`: Accompany `callback_data` changes with event-parsing and session-transition tests.
+- `utils/youtube_utils.py`: Preserve the without-cookies, with-cookies, then CLI fallback sequence and its recovery behavior.
+- `tests/conftest.py`: Its yt-dlp stub is shared across many tests.
+- SQLite schemas: Preserve WAL behavior and provide migrations for existing installations when changing `telegram_cache.db` or `analytics.db`.

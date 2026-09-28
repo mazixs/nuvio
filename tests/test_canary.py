@@ -243,6 +243,29 @@ def test_check_removes_downloaded_file(fake_youtube, tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("size_bytes", "expected_category"),
+    [(0, "FILE"), (canary.CANARY_BUDGET_BYTES + 1, "LARGE")],
+)
+def test_canary_reports_invalid_download_size_by_cause(
+    fake_youtube, monkeypatch, size_bytes, expected_category
+):
+    """Пустой и слишком большой файл получают разные коды отказа."""
+
+    def _download(_url, _format_id, session_id, **_kwargs):
+        target = temp_file_manager.get_temp_file_path(session_id, "canary.mp4")
+        with target.open("wb") as output:
+            output.truncate(size_bytes)
+        return target
+
+    monkeypatch.setattr(canary, "download_video", _download)
+    outcome = canary.run_youtube_canary_check("canary-invalid-size")
+
+    assert outcome.category == expected_category
+    assert outcome.error_code.startswith(f"YT-{expected_category}-")
+
+
+@pytest.mark.unit
 def test_check_removes_downloaded_file_after_failure(
     fake_youtube, tmp_path, monkeypatch
 ):

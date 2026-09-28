@@ -1,135 +1,135 @@
 {% extends "base.html" %}
-{% block title %}Дашборд{% endblock %}
+{% block title %}{{ t('Dashboard') }}{% endblock %}
 {% block nav_dashboard %}active{% endblock %}
 {% block content %}
 
 <div class="page-header">
     <div>
-        <h1>Дашборд</h1>
-        <p class="subtitle">Обзор</p>
+        <h1>{{ t('Dashboard') }}</h1>
+        <p class="subtitle">{{ t('Overview') }}</p>
     </div>
 </div>
 
 <!-- KPI: Users -->
 <div class="stats-divider">
-    <span class="label">Пользователи</span>
+    <span class="label">{{ t('Users') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid">
     <div class="card animate-in">
-        <div class="card-label">Всего</div>
+        <div class="card-label">{{ t('Total') }}</div>
         <div class="card-value">{{ total_users }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Новые сегодня</div>
+        <div class="card-label">{{ t('New today') }}</div>
         <div class="card-value">{{ new_users_today }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Новые 7д</div>
+        <div class="card-label">{{ t('New in 7 days') }}</div>
         <div class="card-value">{{ new_users_7d }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Новые 30д</div>
+        <div class="card-label">{{ t('New in 30 days') }}</div>
         <div class="card-value">{{ new_users_30d }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Активные сегодня</div>
+        <div class="card-label">{{ t('Active today') }}</div>
         <div class="card-value">{{ active_today }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Активные 7д</div>
+        <div class="card-label">{{ t('Active in 7 days') }}</div>
         <div class="card-value">{{ active_7d }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Активные 30д</div>
+        <div class="card-label">{{ t('Active in 30 days') }}</div>
         <div class="card-value">{{ active_30d }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Запросов на скачивание</div>
+        <div class="card-label">{{ t('Download requests') }}</div>
         <div class="card-value">{{ total_downloads }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Подтвержденных отправок</div>
+        <div class="card-label">{{ t('Confirmed deliveries') }}</div>
         <div class="card-value">{{ total_deliveries }}</div>
-        <div class="card-hint">Учитываются с момента обновления бота</div>
+        <div class="card-hint">{{ t('Tracked since the bot update') }}</div>
     </div>
 </div>
 
 <!-- KPI: Retention & Churn -->
 <div class="stats-divider">
-    <span class="label">Удержание и отток</span>
+    <span class="label">{{ t('Retention and churn') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid">
     <div class="card accent animate-in">
-        <div class="card-label">Удержание D3</div>
+        <div class="card-label">{{ t('D3 retention') }}</div>
         <div class="card-value">{{ retention_3 }}%</div>
     </div>
     <div class="card accent animate-in">
-        <div class="card-label">Удержание D7</div>
+        <div class="card-label">{{ t('D7 retention') }}</div>
         <div class="card-value">{{ retention_7 }}%</div>
     </div>
     <div class="card accent animate-in">
-        <div class="card-label">Удержание D30</div>
+        <div class="card-label">{{ t('D30 retention') }}</div>
         <div class="card-value">{{ retention_30 }}%</div>
     </div>
     <div class="card danger animate-in">
-        <div class="card-label">Отток 30д</div>
+        <div class="card-label">{{ t('30-day churn') }}</div>
         <div class="card-value">{{ churn_30 }}%</div>
     </div>
 </div>
 
 <!-- Product Metrics -->
 <div class="stats-divider">
-    <span class="label">Продуктовые метрики</span>
+    <span class="label">{{ t('Product metrics') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid-3">
     <div class="card animate-in">
-        <div class="card-label">Среднее запросов / пользователь</div>
+        <div class="card-label">{{ t('Average requests per user') }}</div>
         <div class="card-value">{{ avg_downloads }}</div>
     </div>
     <div class="card accent animate-in">
-        <div class="card-label">Повторные пользователи</div>
+        <div class="card-label">{{ t('Repeat users') }}</div>
         <div class="card-value">{{ repeat_rate }}%</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Вовлечённость (DAU/MAU)</div>
+        <div class="card-label">{{ t('Engagement (DAU/MAU)') }}</div>
         <div class="card-value">{{ engagement }}%</div>
     </div>
 </div>
 
 <!-- Charts -->
 <div class="stats-divider">
-    <span class="label">Аналитика</span>
+    <span class="label">{{ t('Analytics') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="charts-grid">
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-primary"></span> Запросов в день</h3>
+        <h3><span class="dot dot-primary"></span> {{ t('Requests per day') }}</h3>
         <canvas id="downloadsChart"></canvas>
     </div>
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-accent"></span> Новых пользователей в день</h3>
+        <h3><span class="dot dot-accent"></span> {{ t('New users per day') }}</h3>
         <canvas id="newUsersChart"></canvas>
     </div>
 </div>
 
 <div class="charts-grid">
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-primary"></span> Вовлечённость (DAU/MAU) по дням</h3>
+        <h3><span class="dot dot-primary"></span> {{ t('Engagement (DAU/MAU) by day') }}</h3>
         <canvas id="engagementChart"></canvas>
     </div>
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-warn"></span> Использование платформ</h3>
+        <h3><span class="dot dot-warn"></span> {{ t('Platform usage') }}</h3>
         <canvas id="platformChart" style="margin-bottom: 1.25rem;"></canvas>
         {% if platform_conversion %}
         <div style="border-top: 1px solid var(--border); padding-top: 1.25rem;">
-            <h3 style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">ОХВАТ ПОЛЬЗОВАТЕЛЕЙ</h3>
+            <h3 style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">{{ t('USER REACH') }}</h3>
             {% for platform, stats in platform_conversion.items() %}
             <div class="conversion-bar">
                 <div class="bar-label">{{ platform }}</div>
@@ -138,7 +138,7 @@
                         {{ stats.pct_users }}%
                     </div>
                 </div>
-                <div class="bar-stats">{{ stats.users }} из {{ total_users }}</div>
+                <div class="bar-stats">{{ stats.users }} {{ t('of') }} {{ total_users }}</div>
             </div>
             {% endfor %}
         </div>
@@ -148,32 +148,32 @@
 
 <!-- CSI (Customer Satisfaction Index) -->
 <div class="stats-divider">
-    <span class="label">CSI (Удовлетворённость)</span>
+    <span class="label">{{ t('CSI (Satisfaction)') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="cards-grid-3">
     <div class="card accent animate-in">
-        <div class="card-label">Средняя оценка</div>
+        <div class="card-label">{{ t('Average rating') }}</div>
         <div class="card-value">{{ csi.avg_rating }}</div>
     </div>
     <div class="card animate-in">
-        <div class="card-label">Всего голосов</div>
+        <div class="card-label">{{ t('Total responses') }}</div>
         <div class="card-value">{{ csi.total_responses }}</div>
     </div>
     <div class="card danger animate-in">
-        <div class="card-label">Низких оценок (&lt;7)</div>
+        <div class="card-label">{{ t('Low ratings (<7)') }}</div>
         <div class="card-value">{{ csi.recent_low_feedback|length }}</div>
     </div>
 </div>
 
 <div class="charts-grid">
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-primary"></span> Распределение оценок</h3>
+        <h3><span class="dot dot-primary"></span> {{ t('Rating distribution') }}</h3>
         <canvas id="csiDistributionChart"></canvas>
     </div>
     <div class="chart-box animate-in">
-        <h3><span class="dot dot-danger"></span> Отзывы с оценкой ниже 7</h3>
+        <h3><span class="dot dot-danger"></span> {{ t('Feedback below 7') }}</h3>
         {% if csi.recent_low_feedback %}
         <div style="max-height: 300px; overflow-y: auto;">
             {% for item in csi.recent_low_feedback %}
@@ -187,7 +187,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="empty" style="padding: 2rem;">Нет отзывов с низкой оценкой</p>
+        <p class="empty" style="padding: 2rem;">{{ t('No low-rated feedback') }}</p>
         {% endif %}
     </div>
 </div>
@@ -195,19 +195,19 @@
 <!-- Cohort Retention -->
 {% if cohorts %}
 <div class="stats-divider">
-    <span class="label">Когортный анализ (удержание по неделям)</span>
+    <span class="label">{{ t('Weekly cohort retention') }}</span>
     <div class="line"></div>
 </div>
 
 <div class="table-wrapper animate-in" style="margin-bottom: 2rem;">
     <div class="table-header">
-        <h3>Когорта &rarr; Неделя возврата</h3>
+        <h3>{{ t('Cohort → Return week') }}</h3>
     </div>
     <table class="cohort-table">
         <thead>
             <tr>
-                <th>Когорта</th>
-                <th>Размер</th>
+                <th>{{ t('Cohort') }}</th>
+                <th>{{ t('Size') }}</th>
                 {% for i in range(9) %}
                 <th>W{{ i }}</th>
                 {% endfor %}
@@ -223,7 +223,7 @@
                 {% if val != '' %}
                 <td class="cohort-cell" style="background: rgba(16, 185, 129, {{ val / 100 * 0.6 }});">{{ val }}%</td>
                 {% else %}
-                <td class="cohort-cell" style="color: var(--text-muted);">—</td>
+                <td class="cohort-cell" style="color: var(--text-muted);">-</td>
                 {% endif %}
                 {% endfor %}
             </tr>
@@ -237,15 +237,15 @@
 <div class="section">
     <div class="table-wrapper animate-in">
         <div class="table-header">
-            <h3>Популярные видео (Топ 10)</h3>
+            <h3>{{ t('Popular videos (top 10)') }}</h3>
         </div>
         <table class="table">
             <thead>
                 <tr>
                     <th>#</th>
                     <th>URL</th>
-                    <th>Платформа</th>
-                    <th>Запросы</th>
+                    <th>{{ t('Platform') }}</th>
+                    <th>{{ t('Requests') }}</th>
                 </tr>
             </thead>
             <tbody>
@@ -258,7 +258,7 @@
                 </tr>
                 {% endfor %}
                 {% if not popular_videos %}
-                <tr><td colspan="4" class="empty">Нет данных</td></tr>
+                <tr><td colspan="4" class="empty">{{ t('No data') }}</td></tr>
                 {% endif %}
             </tbody>
         </table>
@@ -284,7 +284,7 @@ new Chart(document.getElementById('downloadsChart'), {
     data: {
         labels: dlData.map(d => d.day),
         datasets: [{
-            label: 'Запросы',
+            label: {{ t('Requests') | tojson }},
             data: dlData.map(d => d.cnt),
             backgroundColor: 'rgba(99, 102, 241, 0.7)',
             hoverBackgroundColor: 'rgba(99, 102, 241, 0.9)',
@@ -308,7 +308,7 @@ new Chart(document.getElementById('newUsersChart'), {
     data: {
         labels: nuData.map(d => d.day),
         datasets: [{
-            label: 'Новые пользователи',
+            label: {{ t('New users per day') | tojson }},
             data: nuData.map(d => d.cnt),
             borderColor: '#10b981',
             backgroundColor: 'rgba(16, 185, 129, 0.08)',
@@ -393,7 +393,7 @@ new Chart(document.getElementById('csiDistributionChart'), {
     data: {
         labels: csiLabels,
         datasets: [{
-            label: 'Количество голосов',
+            label: {{ t('Votes') | tojson }},
             data: csiValues,
             backgroundColor: csiLabels.map(i => i < 7 ? 'rgba(239, 68, 68, 0.7)' : (i < 9 ? 'rgba(245, 158, 11, 0.7)' : 'rgba(16, 185, 129, 0.7)')),
             borderRadius: 6,

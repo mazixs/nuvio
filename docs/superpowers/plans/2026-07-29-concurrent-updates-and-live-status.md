@@ -1,62 +1,55 @@
-# Выпуск 1: параллельная обработка апдейтов и живой статус
+# Release 1: Concurrent update processing and live status
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
-**Goal:** Кнопка «Отменить» начинает работать во время скачивания, вторая ссылка принимается не дожидаясь первой, и отметка активности не исчезает после одной сетевой ошибки.
-
-**Architecture:** У PTB по умолчанию `max_concurrent_updates = 1`, и фетчер апдейтов ждёт завершения текущего обработчика. Включаем параллельную обработку явным числом, закрепляем тестом саму доставку нажатия во время долгой задачи, делаем пульс отметки активности живучим и закрепляем тестами свойства общего состояния, на которые параллельность теперь опирается.
-
-**Tech Stack:** Python 3.14, python-telegram-bot 22.8, pytest 9 (маркеры `unit`/`integration`, `--strict-markers`), ruff.
+**Goal:** The "Cancel" button starts working during download, the second link is accepted without waiting for the first one, and the active status marker does not disappear after a single network error.
+**Architecture:** By default, PTB has `max_concurrent_updates = 1`, and the update fetcher waits for the current handler to complete. We explicitly enable concurrent processing via a number, ensure delivery of the "Cancel" button press during a long-running task is tested, make the active status pulsing resilient, and solidify tests for the shared state properties that now depend on concurrency.
+**Tech Stack:** Python 3.14, python-telegram-bot 22.8, pytest 9 (markers `unit`/`integration`, `--strict-markers`), ruff.
 
 ## Global Constraints
 
-- Проект русскоязычный: комментарии, docstrings и user-facing тексты — на русском; идентификаторы — на английском.
-- Никакой новой функциональности в этом выпуске. Очередь задач, тасклист и прогресс — выпуск 2, отдельный план.
-- `ruff check --output-format=github .` должен быть чист; политика правил в `pyproject.toml` (`select = ["E4", "E7", "E9", "F"]`) не меняется.
-- Весь набор тестов проходит целиком (`pytest`), без сети.
-- Импорты в `main.py` намеренно стоят ниже `load_dotenv()`; per-file-ignore `E402` включён. Не переставлять их наверх.
-- `print()` в production-коде запрещён (`tests/test_syntax.py`), логирование — через `utils/logger.py`.
+- The project is Russian-language: comments, docstrings, and user-facing text must be in Russian; identifiers remain in English.
+- No new functionality in this release. Task queue, to-do list, and progress are covered in Release 2, separate plan.
+- `ruff check --output-format=github .` must be clean; the rule policy in `pyproject.toml` (`select = ["E4", "E7", "E9", "F"]`) is not changed.
+- All test suites run completely (`pytest`), without network access.
+- Imports in `main.py` are intentionally placed below `load_dotenv()`; per-file-ignore `E402` is enabled. Do not move them to the top.
+- `print()` is forbidden in production code (`tests/test_syntax.py`); logging is done via `utils/logger.py`.
 - Conventional commits: `feat:`, `fix:`, `docs:`.
 
-## Уже проверено — не выяснять заново
+## Already Verified – Do Not Re-Discover
 
-- `connection_pool_size` у PTB по умолчанию **256**, исчерпание пула к потере отметки активности не приводит.
-- `_check_spam` (`utils/telegram_utils.py:304`) полностью синхронный, без `await` внутри, — в одном event loop он атомарен.
-- `SessionStore.create` и остальные его методы синхронные — переплетения через `await` внутри нет.
-- `utils/temp_file_manager.py` адресует файлы по `session_id` и общего изменяемого состояния не держит.
-- Методы `SessionStore`, меняющие хранилище, называются `create` и `remove` (`utils/callback_fsm.py:68` и `:105`), оба синхронные.
-- `cleanup_temp_files()` **без аргумента** стирает все временные папки, но все три таких вызова (`main.py:285`, `main.py:341`, `main.py:359`) выполняются только при старте и остановке процесса. Во время обработки апдейтов вызывается только `cleanup_temp_files(session_id)`. Правка не нужна.
+- PTB's `connection_pool_size` is **256** by default; pool exhaustion does not lead to loss of active status marker.
+- `_check_spam` (`utils/telegram_utils.py:304`) is fully synchronous, with no `await` inside - it is atomic within a single event loop.
+- `SessionStore.create` and other its methods are synchronous - there is no `await` inside.
+- `utils/temp_file_manager.py` maps files by `session_id` and does not hold any shared mutable state.
+- Methods of `SessionStore` that modify storage are named `create` and `remove` (`utils/callback_fsm.py:68` and `:105`), both synchronous.
+- `cleanup_temp_files()` **without arguments** deletes all temporary folders, but all three such calls (`main.py:285`, `main.py:341`, `main.py:359`) occur only during process startup and shutdown. During update processing, only `cleanup_temp_files(session_id)` is called. No change is needed.
 
 ---
 
 ## File Structure
 
-| Файл | Ответственность | Действие |
-|---|---|---|
-| `main.py` | Константа `UPDATE_CONCURRENCY` и её передача билдеру | Modify |
-| `tests/test_concurrent_update_delivery.py` | Доставка апдейта во время долгой задачи | Create |
-| `utils/telegram_utils.py` | `_pulsing_chat_action` переживает сбой отправки | Modify |
-| `tests/test_chat_action_resilience.py` | Живучесть пульса | Create |
-| `tests/test_shared_state_under_concurrency.py` | Свойства общего состояния, на которые опирается параллельность | Create |
-| `CLAUDE.md`, `AGENTS.md` | Правило «хэндлер не держит фетчер» | Modify |
+| File | Responsibility | Action |
+|-----|----------------|--------|
+| `main.py` | Constant `UPDATE_CONCURRENCY` and its passing to the builder | Modify |
+| `tests/test_concurrent_update_delivery.py` | Delivery of update during a long-running task | Create |
+| `utils/telegram_utils.py` | `_pulsing_chat_action` survives failed message send | Modify |
+| `tests/test_chat_action_resilience.py` | Resilience of pulsing status | Create |
+| `tests/test_shared_state_under_concurrency.py` | Properties of shared state that concurrency now depends on | Create |
+| `CLAUDE.md`, `AGENTS.md` | Rule "handler does not hold fetcher" | Modify |
 
 ---
 
-### Task 1: Доставка нажатия во время долгой задачи
+### Task 1: Delivery of click during a long-running task
 
-Сердце выпуска. Тест сначала падает на текущей конфигурации — это и есть доказательство поломки, а не рассуждение о ней.
-
+The heart of this release. The test initially fails under current configuration - this is proof of the bug, not speculation about it.
 **Files:**
 - Create: `tests/test_concurrent_update_delivery.py`
-- Modify: `main.py:172-196` (функция `_configure_application_builder`)
-- Modify: `main.py` — новая константа рядом с остальными настройками
-
+- Modify: `main.py:172-196` (function `_configure_application_builder`)
+- Modify: `main.py` - new constant alongside other settings
 **Interfaces:**
-- Produces: `main.UPDATE_CONCURRENCY: int` — предел одновременно обрабатываемых апдейтов. Значение читает тест, поэтому оно обязано быть модульной константой, а не литералом внутри вызова.
-
-- [ ] **Step 1: Написать падающий тест**
-
-Создать `tests/test_concurrent_update_delivery.py`:
+- Produces: `main.UPDATE_CONCURRENCY: int` - maximum number of updates processed concurrently. The value is read from the test, so it must be a module-level constant, not a literal inside a function call.
+- [ ] **Step 1: Write a failing test**
+Create `tests/test_concurrent_update_delivery.py`:
 
 ```python
 """Нажатие кнопки обязано доходить до хэндлера, пока идёт долгая задача.
@@ -174,20 +167,11 @@ def test_concurrency_limit_leaves_room_for_navigation():
     assert main.UPDATE_CONCURRENCY > DOWNLOAD_WORKERS
 ```
 
-- [ ] **Step 2: Запустить тест и убедиться, что он падает**
-
+- [ ] **Step 2: Run the test and verify it fails**
 Run: `pytest tests/test_concurrent_update_delivery.py -v`
-
-Expected: FAIL. `test_press_is_handled_before_the_long_task_finishes` и
-`test_concurrency_limit_leaves_room_for_navigation` падают с
-`AttributeError: module 'main' has no attribute 'UPDATE_CONCURRENCY'`.
-`test_default_configuration_is_the_one_that_was_broken` проходит — он описывает
-текущее поведение.
-
-- [ ] **Step 3: Добавить константу в `main.py`**
-
-Вставить после блока импортов и настройки логгера (после строки
-`logger = setup_logger(__name__, level=LOG_LEVEL)`):
+Expected: FAIL. The tests `test_press_is_handled_before_the_long_task_finishes` and `test_concurrency_limit_leaves_room_for_navigation` fail with `AttributeError: module 'main' has no attribute 'UPDATE_CONCURRENCY'`. The test `test_default_configuration_is_the_one_that_was_broken` passes - it describes the current behavior.
+- [ ] **Step 3: Add the constant to `main.py`**
+Insert after the imports and logger setup block (after the line `logger = setup_logger(__name__, level=LOG_LEVEL)`):
 
 ```python
 # Сколько апдейтов бот обрабатывает одновременно.
@@ -203,10 +187,9 @@ Expected: FAIL. `test_press_is_handled_before_the_long_task_finishes` и
 UPDATE_CONCURRENCY = 32
 ```
 
-- [ ] **Step 4: Передать значение билдеру**
-
-В `_configure_application_builder` (`main.py:177`) добавить вызов в цепочку —
-первым, чтобы он не терялся среди таймаутов:
+- [ ] **Step 4: Pass the value to the builder**
+In `_configure_application_builder` (`main.py:177`), add a call to the chain  -
+first, so it won't be lost among the timeouts:
 
 ```python
     builder = (
@@ -216,25 +199,15 @@ UPDATE_CONCURRENCY = 32
         .read_timeout(120.0)
 ```
 
-- [ ] **Step 5: Запустить тесты и убедиться, что они проходят**
-
+- [ ] **Step 5: Run tests and ensure they pass**
 Run: `pytest tests/test_concurrent_update_delivery.py -v`
-Expected: PASS, все три теста.
-
-- [ ] **Step 6: Проверить, что контрактный тест билдера не сломался**
-
+Expected: PASS, all three tests.
+- [ ] **Step 6: Verify that the contract test for the builder did not break**
 Run: `pytest tests/test_local_bot_api_application.py -v`
-Expected: PASS. `_BuilderRecorder` принимает любой метод, поэтому новый вызов
-в цепочке его не ломает. Если упало — значит тест перечисляет вызовы точным
-списком; в этом случае добавить `concurrent_updates` в ожидания, не убирая
-остальных.
-
-- [ ] **Step 7: Запустить весь набор**
-
+Expected: PASS. `_BuilderRecorder` accepts any method, so a new call in the chain does not break it. If it fails, it means the test lists calls exactly as specified; in this case, add `concurrent_updates` to the expectations without removing the others.
+- [ ] **Step 7: Run the full suite**
 Run: `pytest -q`
-Expected: PASS целиком. Особое внимание на `tests/test_main_polling.py` — он
-собирает приложение и мог опираться на прежнюю конфигурацию.
-
+Expected: PASS overall. Pay special attention to `tests/test_main_polling.py` - it builds the application and might have relied on the previous configuration.
 - [ ] **Step 8: Commit**
 
 ```bash
@@ -244,19 +217,16 @@ git commit -m "fix: нажатие кнопки доходит до бота в�
 
 ---
 
-### Task 2: Пульс отметки активности переживает сбой
+### Task 2: Pulse of activity marker experiences a failure
 
 **Files:**
 - Modify: `utils/telegram_utils.py:747-778` (`_pulsing_chat_action`)
 - Create: `tests/test_chat_action_resilience.py`
-
 **Interfaces:**
-- Consumes: ничего из Task 1.
-- Produces: поведение `_pulsing_chat_action` — при ошибке отправки цикл продолжается; выход только по отмене задачи.
-
-- [ ] **Step 1: Написать падающий тест**
-
-Создать `tests/test_chat_action_resilience.py`:
+- Consumes: nothing from Task 1.
+- Produces: behavior of `_pulsing_chat_action` - the loop continues upon sending error; exit only on task cancellation.
+- [ ] **Step 1: Write a failing test**
+Create `tests/test_chat_action_resilience.py`:
 
 ```python
 """Отметка «отправляет видео…» не должна пропадать на длинной отправке.
@@ -353,16 +323,13 @@ def test_disabled_pulse_sends_nothing():
     assert chat.sent == 0
 ```
 
-- [ ] **Step 2: Запустить тест и убедиться, что он падает**
-
+- [ ] **Step 2: Run the test and ensure it fails**
 Run: `pytest tests/test_chat_action_resilience.py -v`
-Expected: FAIL на `test_pulse_continues_after_a_failed_send` —
-`assert 1 > 1`, потому что после первой ошибки цикл выходит.
-Остальные три проходят.
-
-- [ ] **Step 3: Сделать цикл живучим**
-
-В `utils/telegram_utils.py` заменить тело `_pulse`:
+Expected: FAIL on `test_pulse_continues_after_a_failed_send`  -
+`assert 1 > 1`, because after the first error the loop exits.
+The other three tests pass.
+- [ ] **Step 3: Make the loop resilient**
+In `utils/telegram_utils.py`, replace the body of `_pulse`:
 
 ```python
     async def _pulse() -> None:
@@ -387,7 +354,7 @@ Expected: FAIL на `test_pulse_continues_after_a_failed_send` —
             await asyncio.sleep(_CHAT_ACTION_REFRESH_SECONDS)
 ```
 
-Рядом с `_CHAT_ACTION_REFRESH_SECONDS` (`utils/telegram_utils.py:736`) добавить:
+Next to `_CHAT_ACTION_REFRESH_SECONDS` (`utils/telegram_utils.py:736`) add:
 
 ```python
 # Сколько подряд неудачных отметок терпим молча. Одна — рядовой сбой на
@@ -395,9 +362,7 @@ Expected: FAIL на `test_pulse_continues_after_a_failed_send` —
 _CHAT_ACTION_FAILURES_BEFORE_WARNING = 3
 ```
 
-Также поправить docstring контекстного менеджера — прежняя формулировка
-«отказ работу не роняет» остаётся верной, но нужно добавить, что отказ и не
-прекращает попытки:
+Also fix the docstring of the context manager - the previous statement "failure does not lose" remains correct, but we should add that failure does not stop attempts:
 
 ```python
     """Держит отметку «отправляет видео…» в шапке чата на всё время работы.
@@ -410,16 +375,12 @@ _CHAT_ACTION_FAILURES_BEFORE_WARNING = 3
     """
 ```
 
-- [ ] **Step 4: Запустить тесты и убедиться, что они проходят**
-
+- [ ] **Step 4: Run tests and ensure they pass**
 Run: `pytest tests/test_chat_action_resilience.py -v`
-Expected: PASS, все четыре теста.
-
-- [ ] **Step 5: Проверить прежние тесты пульса**
-
+Expected: PASS, all four tests.
+- [ ] **Step 5: Check previous pulse tests**
 Run: `pytest tests/test_chat_action_pulse.py -v`
-Expected: PASS без правок.
-
+Expected: PASS without modifications.
 - [ ] **Step 6: Commit**
 
 ```bash
@@ -429,21 +390,15 @@ git commit -m "fix: отметка активности не пропадает 
 
 ---
 
-### Task 3: Закрепить свойства общего состояния
+### Task 3: Lock shared state properties
 
-Параллельность опирается на то, что общее состояние меняется без `await`
-посередине. Сейчас это так, но держится на случайности — тест превращает это в
-требование.
-
+Concurrency relies on the fact that the shared state changes without `await` in the middle. This is currently true, but it's held by chance - the test will turn this into a requirement.
 **Files:**
 - Create: `tests/test_shared_state_under_concurrency.py`
-
 **Interfaces:**
-- Consumes: `main.UPDATE_CONCURRENCY` из Task 1.
-
-- [ ] **Step 1: Написать тест**
-
-Создать `tests/test_shared_state_under_concurrency.py`:
+- Consumes: `main.UPDATE_CONCURRENCY` from Task 1.
+- [ ] **Step 1: Write a test**
+Create `tests/test_shared_state_under_concurrency.py`:
 
 ```python
 """Общее состояние обязано меняться без `await` посередине.
@@ -516,15 +471,9 @@ def test_two_users_do_not_share_antispam_state():
     assert telegram_utils._check_spam(2, second, now=100.5) is False
 ```
 
-- [ ] **Step 2: Запустить тест**
-
+- [ ] **Step 2: Run the test**
 Run: `pytest tests/test_shared_state_under_concurrency.py -v`
-
-Expected: PASS. Тесты описывают уже существующие свойства — это страховка, а не
-починка. **Если что-то упало — останов:** значит найдено настоящее место
-переплетения, и его надо разобрать до продолжения выпуска, а не обходить
-правкой теста.
-
+Expected: PASS. The tests describe already-existing properties - this is a safeguard, not a fix. **If something fails - stop:** this indicates a real concurrency issue, and it must be resolved before continuing the release, not bypassed by manually editing the test.
 - [ ] **Step 3: Commit**
 
 ```bash
@@ -534,19 +483,14 @@ git commit -m "test: закрепить синхронность правок о
 
 ---
 
-### Task 4: Документация правила
+### Task 4: Documentation of the Rule
 
-Правило неочевидное и легко нарушаемое: теперь хэндлер, который держит апдейт,
-больше не «просто медленный» — он снова ломает отмену.
-
+The rule is subtle and easily violated: now, the handler that holds the update is no longer just "slow" - it again breaks cancellation.
 **Files:**
-- Modify: `CLAUDE.md` — раздел «Key Patterns»
-- Modify: `AGENTS.md` — рядом с описанием архитектуры
-
-- [ ] **Step 1: Дописать правило в `CLAUDE.md`**
-
-В раздел `## Key Patterns`, сразу после пункта про `Async + ThreadPoolExecutor`,
-добавить:
+- Modify: `CLAUDE.md` - section "Key Patterns"
+- Modify: `AGENTS.md` - next to the architecture description
+- [ ] **Step 1: Add the rule to `CLAUDE.md`**
+In the `## Key Patterns` section, immediately after the entry about `Async + ThreadPoolExecutor`, add:
 
 ```markdown
 - **Параллельная обработка апдейтов**: `UPDATE_CONCURRENCY` в `main.py` (32,
@@ -559,10 +503,8 @@ git commit -m "test: закрепить синхронность правок о
   параллельность снова выключат
 ```
 
-- [ ] **Step 2: Дописать в `AGENTS.md`**
-
-Найти строку про планировщик задач и graceful shutdown в описании `main.py` и
-добавить рядом:
+- [ ] **Step 2: Add to `AGENTS.md`**
+Find the line about the task scheduler and graceful shutdown in the description of `main.py` and add next to it:
 
 ```markdown
 - Обрабатывает апдейты параллельно (`UPDATE_CONCURRENCY = 32`): последовательная
@@ -570,11 +512,9 @@ git commit -m "test: закрепить синхронность правок о
   ссылку во время скачивания.
 ```
 
-- [ ] **Step 3: Проверить, что тесты документации не сломались**
-
+- [ ] **Step 3: Check that the documentation tests haven't broken**
 Run: `pytest tests/test_documentation_consistency.py -v`
 Expected: PASS.
-
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -584,18 +524,17 @@ git commit -m "docs: правило про параллельную обрабо
 
 ---
 
-### Task 5: Проверка целиком и выпуск
+### Task 5: Full check and release
 
-- [ ] **Step 1: Полный набор и линтинг**
+- [ ] **Step 1: Complete set and linting**
 
 ```bash
 ruff check --output-format=github .
 pytest -q
 ```
 
-Expected: ruff без замечаний, все тесты проходят.
-
-- [ ] **Step 2: Покрытие не упало ниже порога CI**
+Expected: ruff with no issues, all tests pass.
+- [ ] **Step 2: Coverage did not drop below the CI threshold**
 
 ```bash
 coverage run --branch -m pytest tests/
@@ -603,48 +542,32 @@ coverage report --fail-under=40
 ```
 
 Expected: PASS.
+- [ ] **Step 3: Manually verify on the live bot**
+Mandatory, because the automated test checks the PTB fetcher, not the real Telegram:
+1. Send a link to a large video and start downloading.
+2. Click "Cancel" - the status must change to "Cancelled" within a second, not after the file is sent.
+3. Before the download completes, send a second link - the format menu must appear immediately.
+4. Check the logs to ensure the activity marker does not disappear: `docker compose logs bot | grep -i "activity marker"`.
+- [ ] **Step 4: Release**
+Branch, PR, wait for green CI, rebase and merge, tag `v1.7.1` (bug fixes without new functionality), wait for the image build, then on the server:
 
-- [ ] **Step 3: Проверить руками на живом боте**
-
-Обязательно, потому что автотест проверяет фетчер PTB, а не настоящий Telegram:
-
-1. Прислать ссылку на большое видео, начать скачивание.
-2. Нажать «Отменить» — статус обязан сменяться на «Отменено» **в течение
-   секунды**, а не после отправки файла.
-3. Не дожидаясь конца, прислать вторую ссылку — меню форматов должно прийти
-   сразу.
-4. Проверить в логах, что отметка активности не пропадает: `docker compose logs
-   bot | grep -i "отметка активности"`.
-
-- [ ] **Step 4: Выпуск**
-
-Ветка, PR, дождаться зелёного CI, rebase-мерж, тег `v1.7.1` (исправления без
-новой функциональности), дождаться сборки образа, затем на сервере:
+Replace the example host and directory with the values for your deployment.
 
 ```bash
-ssh dockge 'cd /opt/stacks/nuvio && docker compose pull && docker compose up -d'
+ssh server.example 'cd /path/to/nuvio && docker compose pull && docker compose up -d'
 ```
 
-- [ ] **Step 5: Проверить прод после обновления**
+- [ ] **Step 5: Check the store after update**
 
 ```bash
-ssh dockge 'cd /opt/stacks/nuvio && docker compose ps && docker compose logs bot --since 5m | grep -ciE "error|traceback"'
+ssh server.example 'cd /path/to/nuvio && docker compose ps && docker compose logs bot --since 5m | grep -ciE "error|traceback"'
 ```
 
-Expected: контейнеры `Up`, ошибок 0. Повторить проверку отмены из Step 3 на
-боевом боте.
+Expected: containers are `Up`, 0 errors. Repeat the cancellation check from Step 3 on the production bot.
 
 ---
 
-## Что этот выпуск не делает
+## What this release does not do
 
-Очередь задач, лимит трёх задач, тасклист одним сообщением, проценты
-скачивания, сообщение о потерянной после перезапуска очереди — всё это
-выпуск 2 по спеке
-`docs/superpowers/specs/2026-07-29-download-queue-and-progress-design.md`.
-
-После этого выпуска вторая ссылка **принимается**, но скачивания идут
-одновременно, а не по очереди: пользователь может запустить сколько угодно
-параллельных загрузок в пределах `DOWNLOAD_WORKERS`. Ограничение тремя задачами
-появится в выпуске 2. Риск на этот промежуток осознанный: антиспам (4 запроса
-за 5 секунд) остаётся единственным ограничителем.
+Task queue, three-task limit, task list sent in a single message, download progress percentages, message about lost queue after restart - all of this is part of release 2 according to the spec `docs/superpowers/specs/2026-07-29-download-queue-and-progress-design.md`.
+After this release, the second link is accepted, but downloads happen simultaneously rather than sequentially: users can start as many parallel downloads as desired within the `DOWNLOAD_WORKERS` limit. The three-task limit will appear in release 2. The risk during this period is acknowledged: anti-spam (4 requests every 5 seconds) remains the only constraint.

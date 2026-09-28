@@ -1,74 +1,81 @@
-# Коды ошибок
+# Error codes
 
-Пользователь получает краткое сообщение, привязанное к платформе, и код ошибки.
-Например, бот может сообщить, что материал из Instagram получить не удалось и
-что ссылка могла требовать авторизации, быть удалена или стать недействительной.
-Состояние cookies, внутренние адреса и traceback остаются только в журналах.
+Users receive a short platform-specific message and an error code. For a confirmed access error, the bot may explain that the link requires authorization or that the media was removed. For an internal failure, it reports that the media could not be processed without attributing an unconfirmed cause to the platform. Cookie status, internal addresses, and tracebacks stay in administrative logs.
 
-Формат кода:
+Code format:
 
 ```text
 <PREFIX>-<CATEGORY>-<RANDOM>
 ```
 
-Примеры:
+Examples:
 
 - `YT-ACCESS-A1B2C3`
 - `IG-RATE_LI-Z9X8Y7`
 - `TG-NETWORK-Q1W2E3`
 
-## Префиксы
+## Prefixes
 
-- `YT` - YouTube extractor, metadata, download or merge pipeline
-- `TT` - TikTok extractor or download pipeline
-- `IG` - Instagram extractor or download pipeline
-- `RU` - Rutube extractor or download pipeline
-- `VK` - VK Video extractor or download pipeline
-- `TG` - Telegram API, delivery or network path
-- `FILE` - local filesystem, temp files, permissions, missing file
-- `BOT` - internal bot orchestration, callback handling, generic runtime flow
+- `YT` - YouTube extraction, metadata, download, or merge pipeline.
+- `TT` - TikTok extraction or download pipeline.
+- `IG` - Instagram extraction or download pipeline.
+- `RU` - Rutube extraction or download pipeline.
+- `VK` - VK Video extraction or download pipeline.
+- `TG` - Telegram API, delivery, or network path.
+- `FILE` - local filesystem, temporary files, permissions, or a missing file.
+- `BOT` - bot orchestration, callback handling, or general runtime flow.
 
-## Категории
+## Categories
 
-Категория сокращается до 8 символов в самом коде, поэтому в логе и в коде может использоваться укороченный вид.
+The category segment is limited to eight characters. Logs and codes may therefore use the abbreviated form.
 
-- `ACCESS` - ошибка доступа, чаще всего cookies, restricted content или права на файл
-- `API` - ошибка Telegram API или другого внутреннего API-слоя
-- `CALLBACK` - ошибка callback/inline interaction
-- `DATA` - битые или неполные данные от extractor
-- `EXTRACTO` - сбой extractor/runtime logic
-- `FFMPEG_M` - на сервере отсутствует FFmpeg или merge pipeline не может его использовать
-- `FORMAT_U` - запрошенный формат недоступен или устарел
-- `LARGE` - файл превышает допустимый лимит для выбранного сценария
-- `MEDIA_FO` - CDN отклонил уже выданную ссылку на медиафайл: видео не закрыто, а не отдаётся конкретный поток. Так выглядит и протухшая ссылка, и смена правил выдачи на стороне платформы; серия таких кодов по одной платформе означает второе, и разбор - в [docs/technical/youtube-download-runbook.md](technical/youtube-download-runbook.md)
-- `NETWORK` - временная сетевая ошибка
-- `RATE_LI` - rate-limit со стороны платформы
-- `SEND` - ошибка финальной отправки файла пользователю
-- `TIMEOUT` - истечение таймаута
-- `UNKNOWN` - неклассифицированная ошибка
+- `ACCESS` - confirmed access error, usually involving cookies, restricted media, or file permissions.
+- `ACCESS_R` - YouTube restricted access to the video.
+- `API` - Telegram API or another internal API layer failed.
+- `COOKIE` - a cookie file could not be read or parsed.
+- `DATA` - incomplete or corrupt data from an extractor.
+- `DOWNLOAD` - the downloader refused without enough evidence for a more specific cause.
+- `EXTRACTO` - extractor or runtime logic failed.
+- `FFMPEG` - FFmpeg media processing failed.
+- `FFMPEG_M` - FFmpeg is missing or the merge pipeline cannot use it.
+- `FILE` - an expected local file is missing.
+- `FORMAT_U` - the requested format is unavailable or obsolete.
+- `IO` - an I/O error that cannot be classified more precisely from `errno`.
+- `LARGE` - the file exceeds the limit for the selected delivery path.
+- `MEDIA_FO` - the CDN rejected an issued media URL. This does not establish that the video is private: an individual stream may have expired or platform delivery rules may have changed. A cluster of these codes for one platform suggests the latter; investigate with the [YouTube download runbook](technical/youtube-download-runbook.md).
+- `NETWORK` - temporary network error.
+- `NETWORK_` - timeout or network refusal during a YouTube download.
+- `RATE_LI` - platform rate limit.
+- `RENDER` - Telegram rejected message markup.
+- `ROUTE` - the handler received a post type that needs another delivery path.
+- `STORAGE` - insufficient disk space.
+- `STORY_UN` - this handler does not support Instagram Stories.
+- `TIMEOUT` - operation timed out.
+- `UNEXPECT` - unexpected exception with no confirmed cause in its type or message. Do not present this category as an access restriction or network failure; record the exception type and stage in administrative logs.
 
-## Диагностика в рабочем окружении
+New errors must not use the `UNKNOWN` category. Previously issued `UNKNOWN` codes remain only in old logs and messages. When a connection breaks after a Telegram request, the delivery outcome may be unknown; do not retry automatically even when the network error type is known.
 
-1. Пользователь присылает вам короткий код ошибки.
-2. Ищите этот код в `journalctl` или в вашем log sink.
-3. В log entry смотрите:
+## Diagnosis in the running environment
+
+1. Ask the user for the short error code.
+2. Search for it in `journalctl` or your log sink.
+3. Inspect the log entry for:
    - platform
    - stage
    - session_id
-   - url
-   - cookie_health_status
-   - cookie_health_summary
-   - traceback
+   - URL
+   - category and exception
+   - cookie_status and cookie_summary
+   - traceback.
 
-Пример поиска в systemd:
+Example systemd search:
 
 ```bash
 journalctl -u nuvio.service -n 500 --no-pager | grep "YT-ACCESS-A1B2C3"
 ```
 
-## Примечания
+## Notes
 
-- Состояние cookies отражается в журнале через `cookie_health_status`, но не
-  показывается пользователю.
-- Не передавайте пользователям traceback, текст extractor errors, пути к файлам, имена модулей или структуру сервера.
-- Если ошибка массовая и повторяется по многим кодам одной категории, сначала проверяйте `yt-dlp`, cookies и сеть сервера.
+- Cookie status is logged as `cookie_status`; it is not shown to users.
+- Do not send users tracebacks, extractor error text, file paths, module names, or server structure.
+- If errors of one category increase across many codes, check yt-dlp, cookies, and server network conditions first.

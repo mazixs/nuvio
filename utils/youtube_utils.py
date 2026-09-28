@@ -559,7 +559,7 @@ def download_video(
 
     if YTDLP_CLI_FALLBACK:
         error_kind = classify_download_error_kind(str(final_error or ""))
-        if error_kind != "ACCESS_RESTRICTED":
+        if error_kind not in {"ACCESS_RESTRICTED", "RATE_LIMIT"}:
             logger.warning("Переключаемся на локальный CLI fallback yt-dlp")
             cli_overrides: list[tuple[bool, str | None, bool]] = [
                 (False, None, False),
@@ -721,10 +721,9 @@ def download_audio_native(
                 exc_info=True,
             )
 
-    if (
-        YTDLP_CLI_FALLBACK
-        and classify_download_error_kind(str(final_error or "")) != "ACCESS_RESTRICTED"
-    ):
+    if YTDLP_CLI_FALLBACK and classify_download_error_kind(
+        str(final_error or "")
+    ) not in {"ACCESS_RESTRICTED", "RATE_LIMIT"}:
         logger.warning("Переключаемся на CLI fallback для нативного аудио")
         for use_cookies, override_format in (
             (False, None),
@@ -893,10 +892,9 @@ def download_audio(
                 "Ошибка при скачивании аудио даже с cookies: %s", e, exc_info=True
             )
 
-    if (
-        YTDLP_CLI_FALLBACK
-        and classify_download_error_kind(str(final_error or "")) != "ACCESS_RESTRICTED"
-    ):
+    if YTDLP_CLI_FALLBACK and classify_download_error_kind(
+        str(final_error or "")
+    ) not in {"ACCESS_RESTRICTED", "RATE_LIMIT"}:
         logger.warning("Переключаемся на CLI fallback для %s-аудио", preferred_codec)
         for use_cookies, override_format in (
             (False, None),

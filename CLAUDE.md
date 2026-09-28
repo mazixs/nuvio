@@ -1,203 +1,116 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for working with the Nuvio codebase. Read `AGENTS.md` for the complete environment table, security rules, and CI/CD overview.
 
-## Project Overview
-
-Nuvio — Telegram-бот для скачивания медиа с YouTube, TikTok, Instagram,
-Rutube и VK Video. Python 3.14+, async-архитектура на python-telegram-bot.
-Включает WebUI-дашборд аналитики и локальный Telegram Bot API.
-
-Проект русскоязычный: комментарии, docstrings, user-facing тексты и
-документация — на русском; идентификаторы кода — на английском.
-
-**`AGENTS.md`** содержит расширенный справочник (полная таблица env-переменных,
-детали безопасности, разбор CI/CD). Читай его, когда нужны подробности,
-которых нет здесь.
+Nuvio is a Python 3.14+ asynchronous Telegram bot for downloading media from YouTube, TikTok, Instagram, Rutube, and VK Video. It includes an analytics WebUI and uses a local Telegram Bot API in Docker. Documentation is in English. Bot messages, comments, and docstrings remain in Russian; code identifiers are English. The WebUI defaults to English and offers Russian.
 
 ## Commands
 
 ```bash
-# Окружение (в репозитории есть .venv)
 python -m pip install --requirement requirements-dev.txt
-
-# Запуск бота
 python main.py
-
-# WebUI-дашборд (отдельный процесс)
 python -m web
-
-# Docker: сборка из исходников
 docker compose --env-file .secrets/.env -f compose.yaml -f compose.dev.yaml up --build
-# Docker: готовый образ из GHCR
 docker compose --env-file .secrets/.env up -d
-
-# Тесты — весь набор проходит за ~5 секунд без сети, запускай его целиком
 pytest
-pytest tests/test_youtube_smoke.py  # один файл
-pytest -k "test_name"               # один тест
-pytest -m syntax                    # только синтаксис + ruff
-
-# Линтинг (та же команда, что в CI)
+pytest tests/test_youtube_smoke.py
+pytest -k "test_name"
+pytest -m syntax
 ruff check --output-format=github .
-
-# Покрытие (порог CI)
 coverage run --branch -m pytest tests/
-coverage report --fail-under=40
+coverage report --fail-under=70
 ```
 
-Прямой запуск использует облачный Bot API с лимитом 50 МБ. Полный
-Docker-стек отправляет файлы до 2 ГБ через локальный Bot API.
+A direct run uses the cloud Bot API and its 50 MB limit. The Docker stack uses the local Bot API for files up to 2 GB.
 
 ## Architecture
 
-**Точка входа**: `main.py` — async event-loop, graceful shutdown
-(SIGINT/SIGTERM), регистрация хэндлеров, периодические job'ы (очистка кэша
-раз в сутки, `VACUUM` раз в неделю, рассылка CSI-опросов). `.env` грузится из
-`.secrets/.env`; `.env.local` и корневой `.env` — только для обратной
-совместимости. **Импорты в `main.py` намеренно стоят ниже `load_dotenv()`** —
-для этого в `pyproject.toml` включён per-file-ignore `E402`. Не переставляй их
-наверх.
+**Entry point:** `main.py` sets up the event loop, handlers, graceful SIGINT/SIGTERM shutdown, daily cache cleanup, weekly `VACUUM`, and CSI surveys. It loads `.secrets/.env`; `.env.local` and root `.env` remain legacy fallbacks. Imports intentionally follow `load_dotenv()`; `pyproject.toml` grants this file `E402`. Do not move those imports above environment loading.
 
-**Конфигурация**: `config.py` — типизированный парсинг env. `resolve_secret_path()`
-предпочитает `.secrets/<file>`, но поддерживает legacy-файлы в корне.
-`MAX_FILE_SIZE_MB` жёстко зажимается режимом доставки: 2000 при
-`TELEGRAM_LOCAL_MODE=true`, иначе 50 — независимо от того, что задано в
-`TELEGRAM_MAX_FILE_SIZE_MB`. При локальном режиме `validate_config()` требует
-`http://` в URL Bot API.
+**Configuration:** `config.py` parses typed environment settings. `resolve_secret_path()` prefers `.secrets/<file>` and supports legacy root files. `MAX_FILE_SIZE_MB` is clamped by delivery mode to 2,000 MB with `TELEGRAM_LOCAL_MODE=true` and 50 MB otherwise. In local mode, `validate_config()` requires `http://` for the Bot API URL.
 
-**Основные модули в `utils/`**:
-- `telegram_utils.py` (~2800 строк) — хэндлеры, координация пользовательского потока, антиспам, коды ошибок, отправка файлов
-- `callback_fsm.py` — `CallbackEvent.parse()` (единственный парсер callback-данных) и `SessionStore` (LRU, максимум 5 сессий на пользователя)
-- `platform_actions.py` — чистые решения платформенных действий и ключей кэша
-- `file_delivery.py` — выбор Telegram-метода отправки по расширению файла
-- `public_errors.py` — безопасная классификация ошибок в user-facing текст
-- `ytdlp_common.py` — общие для всех загрузчиков сетевые опции yt-dlp, exponential backoff, проверка лимита размера
-- `fast_path.py` — общие примитивы быстрых путей: `FastPathUnavailable` и проверка ссылки по allowlist доменов (одна реализация на все платформы намеренно — это проверка безопасности)
-- `url_delivery.py` — чистое решение «отдать ссылку вместо файла»: лимиты 20 МБ на медиа и 5 МБ на фото, allowlist доменов (собирается из allowlist'ов быстрых путей, чтобы не разойтись), поиск прямой ссылки на выбранный формат. Скачивает ссылку инфраструктура Telegram, а не локальный Bot API, — поэтому лимит не снимается режимом `--local`
-- `instagram_fast_path.py` — чистый разбор GraphQL-ответа Instagram: прямая ссылка из `video_versions` вместо yt-dlp, отказ на каруселях и фото-постах, allowlist доменов Meta. Включается `INSTAGRAM_FAST_PATH`, при отказе — откат на yt-dlp
-- `tiktok_fast_path.py` — чистый разбор ответа резолвера TikTok: прямая H.264-ссылка вместо yt-dlp, признак «`music` — это звук видео, а не библиотечный трек», проверка ссылок по allowlist доменов (`is_allowed_media_url`). Включается `TIKTOK_FAST_PATH`, при отказе — откат на yt-dlp
-- `youtube_utils.py` — YouTube/Shorts через yt-dlp с cookie-поддержкой и smart retry
-- `tiktok_instagram_utils.py` (~2100 строк) — TikTok (множественные API-хосты, backoff) и Instagram (rate-limit aware, cookies для приватных профилей, фото-посты и карусели)
-- `rutube_vk_utils.py` — Rutube и VK Video; для VK стратегия `best[protocol=https]` в обход фрагментированного HLS
-- `media_processor.py` — FFmpeg: извлечение аудио (MP3 192k), конвертация WebM→MP4, мерж аудио/видео
-- `video_cache.py` — SQLite-кэш `file_id`, ключ `(url, format_id)`, WAL, TTL 90 дней
-- `analytics_db.py` — SQLite-аналитика: `users`, `events`, `csi_responses`, `settings` (WAL, миграции через `PRAGMA table_info`). `settings` — общее место записи для бота и WebUI: это разные процессы, у которых совпадает только том `DATA_DIR`. Настройка `csi_interval_days` читается на каждой рассылке, поэтому смена частоты опроса не требует перезапуска; испорченное или выходящее за диапазон 1–365 значение молча заменяется на 14 дней — рассылка не должна падать из-за настройки
-- `ytdlp_runtime.py` — установленная версия yt-dlp и CLI fallback (`python -m yt_dlp`)
-- `cookie_manager.py` / `cookie_health.py` — админский интерфейс загрузки и валидации cookies. Проба читает `PROBE_BODY_READ_BYTES` тела ответа: признаки неавторизованности у YouTube лежат за 18-й тысячей байт, а на редирект `consent.youtube.com` попадает только незалогиненный, поэтому маркер нужен и по URL
-- `cookie_workfile.py` — рабочая копия cookie-файла. yt-dlp перезаписывает переданный `cookiefile` содержимым своего jar после запроса, поэтому платформа может удалить из файла cookie своим ответом: замерено, что один прогон YouTube убирает `YSC` (15 записей становятся 14), а у TikTok и Instagram на тех же прогонах не пропадает ничего. Загрузчики отдают yt-dlp копию в `DATA_DIR/cookie-work`, а загруженный админом оригинал остаётся целым. Ни один загрузчик не должен передавать оригинал напрямую
-- `download_report.py` — побочный канал диагностики на сессию: хвост строк вывода yt-dlp и формат, который загрузчик реально принёс. Канал именно побочный, потому что загрузчики отдают путь к файлу, и менять их сигнатуры ради диагностики значило бы тронуть все пять каскадов. Читают его краш-репорт и выбор ключа кэша; доступ под замком — состояние делят event loop и потоки пула
-- `canary.py` — плановая проверка YouTube: качает настоящим путём бота продакшн-опциями и **мимо кэша `file_id`**, ролик берёт длиннее пары минут. Все три условия обязательны: маленький `Range` отдавал 206 при мёртвом продакшн-запросе на 10 МБ, кэш отдал бы готовый `file_id`, а короткий ролик проходил при полностью сломанном YouTube. При провале сообщает администраторам; пакет в работающем контейнере не меняет. Включается `CANARY_ENABLED`
-- `logger.py`, `cache_commands.py`, `temp_file_manager.py`
+**Main modules:**
 
-**Расположение БД** зависит от `DATA_DIR`: локально — корень репозитория
-(`analytics.db`, `telegram_cache.db`), в Docker — том `bot-data` на `/app/data`.
-Временные медиа — в `TEMP_DIR` (локально `./temp`, в Docker общий том
-`shared-media` на `/app/media`, чтобы Bot API читал файлы по абсолютному пути).
-
-**WebUI** (`web/`): FastAPI + Jinja2 + Uvicorn. Логин с PBKDF2 и timing-safe
-сравнением, in-memory fail2ban с уведомлением админов в Telegram, `/health`
-для healthcheck'ов Compose и CI-smoke. Swagger/ReDoc отключены. Порт — `WEB_PORT`.
-`/settings` — единственная страница, которая пишет: любой новый POST-роут здесь
-опирается на cookie сессии со `SameSite=lax` вместо отдельного CSRF-токена, и
-отдельная защита понадобится, если у cookie когда-нибудь сменят `same_site`.
-
-**Поток обработки запроса**: URL → валидация (regex) → `get_video_info` в
-ThreadPoolExecutor → inline-меню выбора формата → callback → проверка кэша
-(hit → `file_id`, miss → **попытка отдать прямую ссылку**, при отказе download в
-пуле потоков → кэширование) → отправка → удаление временного медиа и
-уничтожение сессии.
-
-**Доставка по ссылке** применяется до скачивания: медиа до 20 МБ (фото до 5 МБ)
-с разрешённого домена уходит в Telegram ссылкой, диск не задействуется вовсе.
-Работает для видео и звука TikTok, видео Instagram, фото-постов обеих платформ
-(целиком или никак) и progressive-форматов YouTube; audio-only YouTube, VK и Rutube так отдать нельзя — это измерено, см.
-`docs/technical/latency-disk-network-research.md` §8. Любой отказ Telegram —
-не ошибка, а сигнал идти обычным путём; отказ запоминается на 15 минут по паре
-«домен + вид медиа», потому что CDN может отказывать Telegram, оставаясь
-доступным для нас.
-
-**FSM** — неявная, сессионная: состояние = наличие inline-клавиатуры в
-конкретном сообщении. Формат callback-данных: `s|{token}|main|{action}`,
-`s|{token}|format|{action}|{value}`, `csi|{rating}`. Сессии живут в
-`context.user_data["sessions"]` и **не переживают перезапуск процесса**.
-Разбор архитектуры и список известных узких мест — `docs/technical/fsm-architecture.md`.
-
-## Key Patterns
-
-- **Async + ThreadPoolExecutor**: блокирующие операции (yt-dlp, FFmpeg) выполняются в пуле (`DOWNLOAD_WORKERS=8`, `BLOCKING_TASK_TIMEOUT=600`). `run_blocking` по таймауту помечает сессию отменённой: `wait_for` отменяет только ожидание, а поток продолжает качать — замерено, что загрузка дожила до конца через 4 минуты после своего таймаута. Поэтому вызовы, принадлежащие сессии, обязаны передавать `session_id=`
-- **Параллельная обработка апдейтов**: `UPDATE_CONCURRENCY` в `main.py` (32, заведомо больше `DOWNLOAD_WORKERS`). До её включения PTB обрабатывал апдейты строго по одному, и нажатие «Отменить» лежало в очереди всё скачивание — механизм отмены был исправен, но сигнал до него не доходил, поэтому тесты отмены оставались зелёными. Отсюда правило: **хэндлер не имеет права держать фетчер апдейтов дольше необходимого**; блокирующая работа — только через `run_blocking` с `session_id=`. Долгую фоновую работу запускай через `context.application.create_task` — PTB проводит её исключения через глобальный обработчик ошибок и дожидается задач при `stop()`. Тест доставки — `tests/test_concurrent_update_delivery.py`, он падает, если параллельность снова выключат
-- **Правка сообщений**: только через `safe_edit_message_text`. Она считает неошибкой два исхода — «текст не изменился» и «сообщение удалено пользователем». Прямой `query.edit_message_text` в обработчике ошибки даёт каскад: правка падает, сообщение об этой ошибке падает так же, и всё уезжает в глобальный хэндлер
-- **Отправка видео обязана нести `width`, `height` и `duration`**. Bot API эти поля не вычисляет, а подставляет ноль (`Client.cpp`, `process_send_video_query`), после чего размеры пытается определить сервер Telegram — и на тяжёлых файлах сдаётся, записывая `320x320`. Признак срыва виден в ответе API: вместе с размерами пропадает миниатюра. Клиент iOS рисует строго по этим атрибутам, поэтому 16:9 сжимается по горизонтали, а 9:16 растягивается по ширине; Android и Desktop измеряют поток сами, и дефект у них не виден. Замерено: 124 КБ и 4.9 МБ определяются верно, 35.8 МБ дают квадрат — **проверять такие гипотезы только на настоящих файлах, синтетический ролик даёт ложноотрицательный результат**. Разбор — `docs/technical/adr-002-ios-video-compatibility.md`
-- **В Telegram уезжает только H.264 8 бит (`yuv420p`)**. Кодек проверяется у готового файла через `ffprobe`, а не по расширению: `merge_output_format: "mp4"` заставляет yt-dlp класть VP9 в MP4 (в `get_compatible_ext` явный `preferences=['mp4']` выставляет `allow_mkv=False`), поэтому проверка `.webm` бесполезна. Замерено отправкой одного ролика в четырёх видах на iPhone: VP9 и AV1 дают **чёрный экран** при играющем звуке, H.264 играет плавно и в 8, и в 10 битах. Любая команда libx264 несёт `-pix_fmt yuv420p` — это консервативная мера, а не починка наблюдаемого дефекта: 8 бит поддерживаются везде, поддержка 10 зависит от устройства. **Причина рывков не найдена**, версии про VP9 и про High 10 опровергнуты замером — см. ADR-002
-- **match-case**: разбор callback-событий, выбор платформы/формата
-- **Exception.add_note()**: обогащение ошибок контекстом
-- **Коды ошибок**: `<PREFIX>-<CATEGORY>-<RANDOM6>` — префиксы YT/TT/IG/RU/VK/TG/FILE/BOT, категории ACCESS/NETWORK/TIMEOUT/MEDIA_FORBIDDEN/FORMAT_UNAVAILABLE/FFMPEG_MISSING/EXTRACTOR_RUNTIME/UNKNOWN. Пользователь видит только безопасный текст + код; cookies, пути и traceback уходят в админский лог
-- **Порядок попыток у загрузчиков**: без cookies → с cookies → CLI `python -m yt_dlp`. Порядок критичен и для YouTube именно такой: авторизованная сессия переводит yt-dlp на клиентов `tv_downgraded`/`web_safari`, которым нужен PO-токен, а работающий без токена `android_vr` yt-dlp вычёркивает при наличии auth-cookies — замерено, что с cookie-файлом список форматов выходит пустым («Requested format is not available»), и весь список бот получает анонимной попыткой. Cookies остаются на возрастные ограничения и приватные видео. Instagram устроен так же — без cookies первым; у TikTok порядок обратный, там cookies идут первыми (`use_cookies_first` в `tiktok_instagram_utils.py`)
-- **403 на медиафайле — не запрет доступа**: CDN отказывает по уже выданной ссылке, а не закрывает видео. Категория `MEDIA_FORBIDDEN` (`utils/public_errors.py`) отделяет этот случай от `ACCESS_RESTRICTED`: она повторяется с backoff (свежий разбор даёт свежую ссылку), открывает CLI-fallback и не будит админов. Строгий `ACCESS_RESTRICTED` остаётся за «private video», «login required» и голым 403 без упоминания медиа
-- **Версия yt-dlp зажата на nightly**: 18 августа 2026 YouTube сломал скачивание по прямым ссылкам `videoplayback` для клиентов стабильной 2026.7.4 — запрос без `Range` и запрос на 10 МБ (штатный `http_chunk_size` бота) получали 403, а с куском 1 МБ скачивался ровно первый мегабайт. Замерено на двух разных исходящих адресах, так что дело не в IP. Nightly `2026.8.18.122307.dev0` перешла на клиент `visionos`, и те же 137+140 с теми же опциями качаются целиком — [yt-dlp#17456](https://github.com/yt-dlp/yt-dlp/issues/17456). Текущая версия закреплена в `requirements.in`; менять ее через `scripts/update_ytdlp.py` и новый образ
-- **SQLite WAL mode** во всех БД; все запросы параметризованы (`?`)
-- **Вывод yt-dlp не глушится**: `apply_network_opts` подставляет логгер-адаптер, и предупреждения («cookies are no longer valid», «formats require a GVS PO Token», «forcing SABR streaming») уходят и в `bot.log`, и в хвост сессии. Раньше стоял `no_warnings: True`, и объяснение отказа приходилось добывать по SSH. Строки `[download]` в хвост не попадают: их десятки в секунду, они вытеснили бы полезное из шестидесяти строк. `no_warnings: False` ставится страховкой — в текущей yt-dlp ветка логгера в `report_warning` проверяется раньше флага, но порядок может измениться
-- **Кэш пишется под фактический формат**: каскад фолбеков при 403 подменяет формат молча, а ключ кэша `combined:{format_id}` обещает конкретный, поэтому перед записью берётся `download_report.delivered_format(session_id)`. Ключи-корзины (`tg_video`, `direct_video`) конкретный формат не обещают и остаются как были
-- **Сообщения**: все user-facing тексты в `messages.py`, не хардкодить в хэндлерах
-- **Антиспам**: 4 запроса за 5 секунд → cooldown 10 секунд (`_SPAM_*` в `telegram_utils.py`)
-- **Логирование**: rotating file handler (10MB, 5 backups) → `logs/bot.log`
-
-## Testing
-
-Маркеры (`--strict-markers` включён): `syntax`, `unit`, `integration`.
-Fixtures и hooks — `tests/conftest.py`, там же лёгкая заглушка `yt_dlp` для
-сред без библиотеки. Тесты YouTube используют мокированный `YoutubeDL` (без
-сети), реальные cookie-файлы отключаются через monkeypatch. Системные
-зависимости: FFmpeg, git, Docker (только для CI-этапа сборки).
-
-### Тесты-контракты на файлы конфигурации
-
-Значительная часть набора проверяет **текст** конфигов, а не поведение кода.
-Правка инфраструктуры почти всегда требует синхронной правки этих тестов:
-
-| Меняешь | Ломается |
+| Module | Responsibility |
 |---|---|
-| `.github/workflows/*.yml` | `test_workflow_quality_gates.py` — требует pinning Actions по полному 40-символьному SHA, `permissions: contents: read`, `concurrency`, ровно 3 `timeout-minutes` на workflow, порядок job'ов `test → docker → release`, Trivy/actionlint по digest, smoke-проверки по canonical digest |
-| `Dockerfile`, `Dockerfile.telegram-bot-api` | базовые образы обязаны быть пришпилены по `@sha256:`; ревизия telegram-bot-api зафиксирована конкретным коммитом |
-| `requirements*.in/.txt` | `test_environment_template.py` и `test_workflow_quality_gates.py` — сверяют точные версии прямых зависимостей, наличие `--hash=sha256:` и отсутствие dev-инструментов в runtime |
-| `pyproject.toml` | ожидается ровно `select = ["E4", "E7", "E9", "F"]` — политика намеренно узкая, чтобы обновление ruff не включало новые правила молча |
-| `.env.example` | `test_environment_template.py` — обязательные ключи без настройки обновления внутри контейнера |
-| `compose.yaml` / `compose.dev.yaml` | `test_compose_configuration.py` — локальный Bot API, общий том `shared-media`, порт 8081 не публикуется наружу, legacy `docker-compose*.yml` отсутствуют |
-| `pytest.ini`, `messages.py`, `video_cache.py` | `test_dead_code_contract.py` — запрещает вернуть маркеры `slow:`/`network:`, флаги `--run-slow`/`--run-network` и удалённые константы/хелперы |
-| `.github/dependabot.yml` | ожидаются группы minor/patch для всех трёх экосистем |
+| `utils/telegram_utils.py` | Handlers, user flow, spam protection, errors, and delivery |
+| `utils/callback_fsm.py` | `CallbackEvent.parse()`, the single callback parser, and `SessionStore` with up to five sessions per user |
+| `utils/platform_actions.py` | Platform action and cache-key decisions |
+| `utils/file_delivery.py` | Select the Telegram send method by file type |
+| `utils/public_errors.py` | Safe public error classification |
+| `utils/ytdlp_common.py` | Shared yt-dlp network options, backoff, and size checks |
+| `utils/fast_path.py` | Fast-path primitives and shared domain allowlist checks |
+| `utils/url_delivery.py` | Decide whether to send a direct URL; 20 MB media and 5 MB photo limits |
+| `utils/instagram_fast_path.py` | Instagram GraphQL video URL with Meta domain allowlist and yt-dlp fallback |
+| `utils/tiktok_fast_path.py` | TikTok resolver H.264 URL, audio-source marker, allowlist, and yt-dlp fallback |
+| `utils/youtube_utils.py` | YouTube and Shorts through yt-dlp, cookies, and retries |
+| `utils/tiktok_instagram_utils.py` | TikTok and Instagram downloaders, photos, and carousels |
+| `utils/rutube_vk_utils.py` | Rutube and VK Video; VK uses `best[protocol=https]` to avoid fragmented HLS |
+| `utils/media_processor.py` | FFmpeg audio extraction, conversion, and merging |
+| `utils/video_cache.py` | SQLite `file_id` cache keyed by URL and format, WAL, 90-day TTL |
+| `utils/analytics_db.py` | Users, events, CSI, settings, and SQLite migrations |
+| `utils/ytdlp_runtime.py` | Installed yt-dlp version and CLI fallback |
+| `utils/cookie_manager.py`, `utils/cookie_health.py`, `utils/cookie_workfile.py` | Administrator cookie uploads, validation, and working copies |
+| `utils/download_report.py` | Per-session yt-dlp diagnostic tail and actual delivered format |
+| `utils/canary.py` | Scheduled real YouTube download without the `file_id` cache |
 
-Кроме того, `tests/test_ruff.py` запускает `ruff check` внутри pytest, а
-`tests/test_syntax.py` запрещает `print()` в production-коде и звёздочные
-импорты во всём проекте.
+`analytics_db.settings` is shared by separate bot and WebUI processes through `DATA_DIR`. `csi_interval_days` is read for every survey run, so changing it in the WebUI needs no restart. Invalid or out-of-range values fall back to 14 days.
 
-## Environment
+yt-dlp rewrites a supplied `cookiefile` from its jar. A measured YouTube request removed `YSC` from a 15-cookie file, whereas tested TikTok and Instagram requests removed none. Downloaders must use a working copy under `DATA_DIR/cookie-work` and preserve the administrator-uploaded original. `cookie_health.py` reads enough response body to see late YouTube authentication markers and also checks redirects to `consent.youtube.com`.
 
-Обязательные переменные Docker: `TELEGRAM_TOKEN`, `ADMIN_IDS`, `TELEGRAM_API_ID`,
-`TELEGRAM_API_HASH`. Для прямого запуска достаточно `TELEGRAM_TOKEN` и `ADMIN_IDS`.
-Опциональные: `WEB_*`, `FAIL2BAN_*`, `DATA_DIR`, `TEMP_DIR`, `YTDLP_*`, `CANARY_*`,
-`TELEGRAM_LOCAL_MODE`, `TELEGRAM_BOT_API_*`. Шаблон — `.env.example`,
-полная таблица с значениями по умолчанию — в `AGENTS.md`.
+Locally, `DATA_DIR` defaults to the repository root and holds `analytics.db` and `telegram_cache.db`. Docker mounts `bot-data` at `/app/data`. Temporary media lives in `TEMP_DIR`, locally `./temp` and in Docker the shared `/app/media` volume, so the local Bot API can read absolute paths.
 
-## Что изменять осторожно
+**WebUI:** FastAPI, Jinja2, and Uvicorn provide PBKDF2 plus timing-safe sign-in checks, in-memory IP fail2ban with administrator alerts, and `/health` for Compose and CI. Swagger and ReDoc are disabled. `WEB_PORT` sets the port. The `/settings` page writes data; its current POST relies on a session cookie with `SameSite=lax` rather than a separate CSRF token. Revisit that protection if the cookie's `same_site` changes.
 
-- **`messages.py`** — лимит Telegram 4096 символов на сообщение
-- **`config.py`** — новая env-переменная требует обновления `.env.example` (иначе падает тест) и `README.md`
-- **`callback_fsm.py` + `telegram_utils.py`** — смена формата `callback_data` ломает уже отправленные пользователям кнопки; сопровождай тестами разбора событий
-- **Вытеснение сессий** — `SessionStore` держит 5 записей на пользователя и вытесняет старые, но **никогда не удаляет временные файлы**: прежняя версия звала `cleanup_temp_files` для вытесненной сессии и на проде сносила каталог идущей загрузки (замер: 12 сессий у одного пользователя, файл исчезал между готовностью и отправкой). Занятые сессии не вытесняются вовсе — признак занятости `_session_is_disposable` смотрит, есть ли файлы в каталоге, потому что в записи лежит `session_id`, по которому владелец потом удалит файлы. `hard_limit` страхует от роста, если занято всё
-- **`cancellation.py`** — отмена длительных задач по `session_id`. `CancelledByUser`
-  наследуется от `BaseException` намеренно (как `asyncio.CancelledError`): она
-  летит мимо широких `except Exception` в обработчиках платформ к единственному
-  перехвату в `button_callback`. До yt-dlp отмена доходит через `progress_hooks`,
-  которые ставит `apply_network_opts(..., session_id=...)` — проверено, что
-  yt-dlp пропускает исключение из хука как есть
-- **Меню форматов** — два уровня: разделы (`main|video_menu`, `main|audio_menu`, `main|subtitles`), затем выбор. Из `format`-действий живы только `combined` и `audio_only`; `best`, `audio_best`, `mp3_min` и `video_only` удалены вместе с кнопками и закреплены в `test_dead_code_contract.py`
-- **Субтитры** — каскад: `main|subtitles` → язык (`format|subs_lang|ru`) → формат
-  (`format|subs|ru:srt`). Предлагаются только русский и английский, TXT
-  собирается из SRT в `utils/subtitles.py`
-- **Отмена** — кнопка есть на каждом экране: на ожидании разбора ссылки, в
-  главном меню и на всех статусах скачивания. Сессия заводится **до** разбора
-  ссылки именно ради этого, иначе кнопке не за что зацепиться
-- **`youtube_utils.py`** — цепочка fallback чувствительна к порядку операций
-- **`tests/conftest.py`** — заглушка `yt_dlp` используется всем набором
-- **Схемы SQLite** — учитывай WAL и необходимость миграции существующих установок (образец — миграция `last_csi_sent` в `analytics_db.py`)
+**Request flow:** URL validation, `get_video_info` in a worker thread, format menu, callback, format-specific cache check, then a cache hit or URL-delivery attempt. If Telegram rejects direct URL delivery, the bot downloads in the worker pool, sends the file, caches the returned `file_id`, cleans temporary media, and ends the session.
+
+Direct URL delivery applies before download for allowed domains and media up to 20 MB (photos up to 5 MB). It covers TikTok video/audio, Instagram video, atomic photo sets from both platforms, and progressive YouTube formats. The Telegram infrastructure fetches the URL, so local Bot API mode does not raise this limit. YouTube audio-only, VK, and Rutube were measured as unsuitable for this path; see `docs/technical/latency-disk-network-research.md`, section 8. A Telegram rejection falls back to file delivery. Rejections are remembered for 15 minutes by domain and media type.
+
+**FSM:** State is tied to the inline keyboard on a specific message. Callback forms include `s|{token}|main|{action}`, `s|{token}|format|{action}|{value}`, and `csi|{rating}`. Sessions live in `context.user_data["sessions"]` and do not survive a process restart. See `docs/technical/fsm-architecture.md`.
+
+## Behavior that must remain intact
+
+- Blocking yt-dlp and FFmpeg operations run in a `ThreadPoolExecutor` (`DOWNLOAD_WORKERS=8`, `BLOCKING_TASK_TIMEOUT=600`). `asyncio.wait_for` cancels waiting, not the worker thread; one measured download continued for four minutes after timeout. Session-owned work must pass `session_id=`.
+- `UPDATE_CONCURRENCY=32` in `main.py` allows cancellation callbacks and new URLs during a download. Sequential update processing previously hid a working cancellation mechanism behind the update queue. Use `run_blocking(..., session_id=...)` for blocking work and `context.application.create_task` for long background work. `tests/test_concurrent_update_delivery.py` protects this behavior.
+- Edit existing Telegram messages through `safe_edit_message_text`. It treats unchanged text and user-deleted messages as benign. A direct edit in an error handler can cause cascading failures.
+- Every video send must include `width`, `height`, and `duration`. Telegram inferred `320x320` for measured 10.67 MB and 35.8 MB files when dimensions were omitted, distorting iOS playback. Synthetic tiny files missed the defect. See ADR-002.
+- Send only finished-file H.264 8-bit `yuv420p` video to Telegram. Inspect with `ffprobe`, not filename extension: yt-dlp can place VP9 in MP4. VP9 and AV1 produced black screens with playing audio on the tested iPhone; H.264 High 10 played smoothly, so forcing `-pix_fmt yuv420p` is a conservative compatibility rule, not a claimed fix for the observed stutter. A separate stutter cause was not confirmed.
+- Error codes follow `PREFIX-CATEGORY-RANDOM` with platform prefixes in `AGENTS.md` and categories in `docs/error-codes.md`. Use `UNEXPECT` for unconfirmed causes and keep exception types in logs. Users receive safe text and a code; internal paths, cookies, and tracebacks stay in administrator diagnostics.
+- YouTube and Instagram try without cookies, then with cookies, then CLI where applicable. Authenticated YouTube can lose the token-free `android_vr` client and require a PO token. TikTok tries cookies first. Preserve these platform-specific orders.
+- A 403 on the media URL is `MEDIA_FORBIDDEN`, distinct from a private or otherwise restricted video. Retry with backoff and fresh extraction, then use CLI fallback where applicable. A final failure is reported to administrators by the current `_should_notify_admins_platform_failure()` rule.
+- Pin yt-dlp in `requirements.in` and update through `scripts/update_ytdlp.py` and a new image. The 2026-08-18 incident showed that a 10 MB `Range` request could fail while a small probe worked; see the YouTube runbook.
+- Do not suppress yt-dlp warnings. `apply_network_opts` writes them to `bot.log` and the per-session tail in `utils/download_report.py`. Progress lines are excluded from that 60-line tail. The actual delivered format from `download_report.delivered_format(session_id)` determines a format-specific cache key after fallback.
+- Use parameterized SQLite queries with WAL. Keep user messages in `messages.py`. Spam protection allows four requests in five seconds before a ten-second cooldown. Logs rotate at 10 MB with five backups.
+
+## Tests and configuration contracts
+
+Pytest uses strict `syntax`, `unit`, and `integration` markers. `tests/conftest.py` supplies fixtures and a lightweight yt-dlp stub; YouTube tests mock `YoutubeDL` and disable real cookies. FFmpeg and Git are system dependencies; Docker is required for the CI build stage.
+
+Several tests inspect **configuration text**, so infrastructure edits must update their contracts:
+
+| Change | Related checks |
+|---|---|
+| `.github/workflows/*.yml` | `test_workflow_quality_gates.py`: full SHA pins, minimal permissions, concurrency, timeouts, job order, digest checks |
+| `Dockerfile`, `Dockerfile.telegram-bot-api` | Pinned base-image digests and Bot API revision |
+| `requirements*.in/.txt` | `test_environment_template.py`, `test_workflow_quality_gates.py`: exact direct versions, hashes, runtime/dev split |
+| `pyproject.toml` | Exactly `select = ["E4", "E7", "E9", "F"]` |
+| `.env.example` | Required environment keys and no in-container update settings |
+| `compose.yaml`, `compose.dev.yaml` | Local Bot API, `shared-media`, unexposed port 8081, no legacy compose files |
+| `pytest.ini`, `messages.py`, `utils/video_cache.py` | `test_dead_code_contract.py`: removed markers, flags, constants, and helpers stay removed |
+| `.github/dependabot.yml` | Minor/patch groups for three ecosystems |
+
+`tests/test_ruff.py` runs Ruff within pytest. `tests/test_syntax.py` forbids production `print()` and star imports.
+
+Docker requires `TELEGRAM_TOKEN`, `ADMIN_IDS`, `TELEGRAM_API_ID`, and `TELEGRAM_API_HASH`; direct runs need the first two. Other settings include `WEB_*`, `FAIL2BAN_*`, `DATA_DIR`, `TEMP_DIR`, `YTDLP_*`, `CANARY_*`, and local Bot API variables. Use `.env.example` and the full table in `AGENTS.md`.
+
+## Change with care
+
+- `messages.py`: Keep messages within Telegram's 4,096-character limit.
+- `config.py`: Add new keys to `.env.example` and `README.md`.
+- `callback_fsm.py` and `telegram_utils.py`: Callback format changes break buttons already sent to users; cover parsing and transitions.
+- Session eviction: `SessionStore` keeps five entries per user but **must not delete temporary media** when evicting. An earlier version removed an active download directory after 12 sessions from one user. Busy sessions are protected by `_session_is_disposable`; `hard_limit` bounds growth if all are busy.
+- `cancellation.py`: `CancelledByUser` deliberately inherits `BaseException`, like `asyncio.CancelledError`, to bypass broad platform `except Exception` handlers and reach the one handler in `button_callback`. `apply_network_opts(..., session_id=...)` installs yt-dlp `progress_hooks`; tests showed yt-dlp propagates their exception.
+- Format menus have two levels: `main|video_menu`, `main|audio_menu`, `main|subtitles`, then a choice. Live `format` actions are `combined` and `audio_only`; `best`, `audio_best`, `mp3_min`, and `video_only` were removed.
+- Subtitles use `main|subtitles` -> `format|subs_lang|ru` -> `format|subs|ru:srt`. The menu offers Russian and English; `utils/subtitles.py` builds TXT from SRT.
+- Cancellation is available while parsing a URL, in the main menu, and during downloads. The session starts **before** link extraction so the button has a target.
+- Preserve YouTube fallback order, the shared yt-dlp test stub, SQLite WAL, and migration behavior. `analytics_db.py` migration of `last_csi_sent` is an example.

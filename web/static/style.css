@@ -137,6 +137,29 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
 
 .nav-links { display: flex; gap: 0.25rem; align-items: center; }
 
+.language-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.125rem;
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+}
+
+.language-switch a {
+    padding: 0.2rem 0.45rem;
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.language-switch a:hover,
+.language-switch a:focus-visible { color: var(--text); background: var(--surface-hover); }
+.language-switch a[aria-current="true"] { color: var(--text); background: var(--primary); }
+.language-switch a:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+.login-language { margin-top: 1.5rem; }
+
 .nav-link {
     color: var(--text-muted);
     font-size: 0.875rem;
@@ -917,12 +940,6 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
     transition: color var(--transition);
 }
 
-.track-count::after {
-    content: ' отправок';
-    color: var(--text-muted);
-    font-size: 0.68rem;
-}
-
 .track-rail {
     position: relative;
     height: 2.25rem;
@@ -1221,8 +1238,8 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
     .cards-grid { grid-template-columns: repeat(2, 1fr); }
     .cards-grid-3 { grid-template-columns: repeat(2, 1fr); }
     .card-value { font-size: 1.5rem; }
-    .navbar { padding: 0 1rem; }
-    .nav-links { gap: 0.125rem; }
+    .navbar { padding: 0.5rem 1rem; min-height: 60px; height: auto; gap: 0.5rem; flex-wrap: wrap; }
+    .nav-links { gap: 0.125rem; flex-wrap: wrap; }
     .nav-link { padding: 0.4rem 0.6rem; font-size: 0.8rem; }
     .table th, .table td { padding: 0.65rem 0.75rem; }
     .url-cell { max-width: 180px; }

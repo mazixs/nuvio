@@ -1,190 +1,94 @@
-# Архитектура Nuvio
+# Nuvio architecture
 
-## Общая архитектура
+## Overview
 
-Nuvio — асинхронный Telegram-бот для скачивания видео, фото-постов и аудио с YouTube, TikTok, Instagram, Rutube и VK Video. Построен на базе python-telegram-bot с async-архитектурой. Включает WebUI-дашборд аналитики на FastAPI.
+Nuvio is an asynchronous Telegram bot for downloading video, photo posts, and audio from YouTube, TikTok, Instagram, Rutube, and VK Video. It uses python-telegram-bot for the bot and a separate FastAPI process for the analytics WebUI.
 
----
+## Entry point: `main.py`
 
-## Точка входа (main.py)
+`main.py` starts the asyncio event loop and owns the bot lifecycle. It:
 
-Файл `main.py` является единственной точкой входа в приложение.
+- Loads `.secrets/.env` as the working configuration. Root `.env` and `.env.local` remain compatibility paths; Compose does not use them.
+- Validates required settings and records the yt-dlp version included in the image.
+- Registers `/start`, `/help`, `/download`, `/admin`, `/cache_stats`, `/cleanup_cache`, and `/search_cache`, along with URL, callback, and cookie-upload handlers.
+- Schedules cache cleanup, database VACUUM, and CSI survey dispatch. The per-user CSI interval comes from the shared `csi_interval_days` setting.
+- Handles SIGINT and SIGTERM for graceful shutdown and sends crash reports to administrators through the global error handler.
 
-- Запускает asyncio event loop.
-- Использует `.secrets/.env` как рабочий файл настроек. `.env.local` и
-  корневой `.env` читаются только как устаревший путь совместимости; Compose их
-  не использует.
-- Валидирует конфигурацию и записывает версию yt-dlp из закрепленного образа.
-- Регистрирует обработчики команд: `/start`, `/help`, `/download`, `/admin`, `/cache_stats`, `/cleanup_cache`, `/search_cache`.
-- Регистрирует обработчики сообщений: загрузка документов (cookie upload), обработка URL, callback-запросы от inline-кнопок.
-- Планирует периодические задачи: ежедневная очистка кэша (TTL 90 дней), еженедельный VACUUM баз данных, ежедневная рассылка CSI-опросов активным пользователям (частота опроса для одного пользователя берётся из настройки `csi_interval_days`).
-- Реализует graceful shutdown через обработку сигналов SIGINT/SIGTERM с использованием `asyncio.Event`.
-- Глобальный обработчик ошибок отправляет крэш-репорты администраторам.
+## Request flow
 
----
-
-## Поток обработки запроса
-
-```
-URL
- -> валидация по регулярному выражению
- -> определение платформы (YouTube / TikTok / Instagram / Rutube / VK Video)
- -> получение информации о видео
- -> inline-клавиатура с кнопками выбора формата
- -> пользователь выбирает формат
- -> скачивание в ThreadPoolExecutor
- -> проверка кэша file_id:
-      hit  -> мгновенная повторная отправка
-      miss -> скачивание + сохранение в кэш
- -> отправка файла через локальный Telegram Bot API по пути в общем томе
- -> сохранение file_id в кэш
- -> удаление временного медиа
+```text
+URL received
+  -> validate URL and identify platform
+  -> extract metadata and show format choices
+  -> user selects a format
+  -> check the file_id cache for the selected format
+      -> hit: send the saved Telegram file_id
+      -> miss: download and process media in ThreadPoolExecutor
+          -> send through the local Telegram Bot API using a shared file path
+          -> save the returned file_id
+  -> remove temporary media
 ```
 
----
+Exact branches vary by platform and by whether the result is a video, audio file, photo set, or link. Callback data is tied to a session, and long-running work supports cancellation.
 
-## Модули
+## Modules
 
-### config.py
+### `config.py`
 
-Централизованная конфигурация приложения.
+Parses and validates environment variables, resolves cookie paths, and prefers `.secrets/` while retaining a legacy root-path fallback. `TELEGRAM_TOKEN` is required for the bot.
 
-- Парсинг переменных окружения с типизацией: `_parse_bool`, `_parse_log_level`, `_parse_admin_ids`, `_parse_ytdlp_release_channel`.
-- Функция `resolve_secret_path()`: приоритет отдается директории `.secrets/`, с fallback на корень проекта.
-- Валидация обязательных переменных (в первую очередь `TELEGRAM_TOKEN`).
-- Пути к cookie-файлам определяются с поддержкой переопределения через переменные окружения.
+### Telegram handlers and callback state
 
-### Telegram-поток и FSM
+`utils/telegram_utils.py` handles commands, URLs, inline buttons, and delivery. Related responsibilities are separated into:
 
-Основной модуль бота, содержит всю логику взаимодействия с пользователем.
+- `utils/callback_fsm.py` - callback parsing and session storage.
+- `utils/platform_actions.py` - platform action and cache-key decisions.
+- `utils/file_delivery.py` - choosing the Telegram delivery method for a file.
+- `utils/public_errors.py` - safe, platform-specific error classification.
+- `utils/cancellation.py` - cancellation of long-running work by session ID.
 
-- Все обработчики: команды, callback-кнопки, обработка URL, отправка файлов.
-- `SmartVideoSender` с кэшированием file_id для повторной отправки без повторного скачивания.
-- Обработчик ошибок с отправкой крэш-репортов администраторам.
-- Коды ошибок в формате `<PREFIX>-<CATEGORY>-<RANDOM>` (префиксы: YT, TT, IG, TG, FILE, BOT; категории: ACCESS, NETWORK, TIMEOUT и другие).
-- Защита от спама: 4 запроса за 5 секунд активируют cooldown на 10 секунд.
+The bot limits repeated requests: four requests in five seconds trigger a ten-second cooldown. Public error IDs use `<PREFIX>-<CATEGORY>-<RANDOM>`; see the [error code reference](../error-codes.md).
 
-Чистые границы вынесены в отдельные модули:
+### Platform downloaders
 
-- `utils/callback_fsm.py` — разбор callback-событий и хранилище сессий;
-- `utils/platform_actions.py` — ключи платформенных действий;
-- `utils/file_delivery.py` — выбор Telegram-метода по виду файла;
-- `utils/public_errors.py` — безопасная классификация ошибок.
+- `utils/youtube_utils.py` uses yt-dlp for YouTube and Shorts, with format selection, cookies when needed, and bounded retry and fallback behavior.
+- `utils/tiktok_instagram_utils.py` handles TikTok and Instagram media, including photo posts and carousels. Platform-specific fast paths and yt-dlp fallbacks live in adjacent modules.
+- `utils/rutube_vk_utils.py` handles Rutube and VK Video, including archive URL normalization and size-aware format selection.
 
-### utils/youtube_utils.py
+### Media processing
 
-Загрузка видео с YouTube и YouTube Shorts.
+`utils/media_processor.py` uses FFmpeg and ffprobe for audio extraction, MP3 conversion at 192k, WebM-to-MP4 conversion, stream merging, codec checks, and compatibility processing.
 
-- Основан на yt-dlp.
-- Поддержка cookie-файлов через пути, заданные в конфигурации.
-- Интеллектуальная логика повторных попыток (smart retry).
+### SQLite state
 
-### utils/tiktok_instagram_utils.py
+- `utils/video_cache.py` stores Telegram file IDs in `telegram_cache.db`. The cache uses WAL and a 90-day TTL for quick repeated delivery.
+- `utils/analytics_db.py` stores users, events, CSI responses, and settings in `analytics.db`. It uses WAL, manual read/write transactions, and `BEGIN IMMEDIATE` for writes.
+- The `settings` table is shared by the bot and WebUI: the WebUI changes the CSI interval, and the bot reads it for survey dispatch.
 
-Загрузка видео с TikTok и Instagram.
+### yt-dlp runtime
 
-- TikTok: использование нескольких API-хостов, exponential backoff при ошибках.
-- Instagram: учет rate-limit, поддержка cookie для доступа к приватным профилям.
+`utils/ytdlp_runtime.py` reports the pinned yt-dlp version and supports a CLI fallback with `python -m yt_dlp`. Version updates are prepared with `scripts/update_ytdlp.py` and reach a running bot through a newly released image.
 
-### utils/media_processor.py
+### Local Telegram Bot API
 
-Операции обработки медиафайлов через FFmpeg.
+Compose runs a separate `telegram-bot-api` service with `--local`. It reads files by absolute path from the `shared-media` volume and supports delivery up to 2 GB. Its port is available only inside the Compose network.
 
-- Извлечение аудио в формат MP3 (битрейт 192k).
-- Конвертация WebM в MP4.
-- Объединение (merge) аудио- и видеодорожек.
+### Support modules
 
-### utils/video_cache.py
+- `utils/cookie_manager.py` and `utils/cookie_health.py` provide administrator cookie upload and health checks.
+- `utils/logger.py` writes `logs/bot.log` with 10 MB rotation and five backups.
+- `utils/cache_commands.py` implements cache administration commands.
+- `utils/temp_file_manager.py` manages temporary media and cleanup.
 
-Кэш file_id для мгновенной повторной отправки файлов.
+## WebUI
 
-- SQLite в режиме WAL для конкурентного доступа.
-- TTL 90 дней, операции очистки и VACUUM.
-- При повторном запросе того же видео файл отправляется мгновенно через сохраненный file_id.
+The separate `web/` process uses FastAPI, Jinja2, and Uvicorn. It has sign-in, dashboard, user list and detail, and settings pages. Credentials are checked against environment settings with PBKDF2 password hashing and timing-safe comparison; sessions are signed with `WEB_SECRET_KEY`. The WebUI opens in English and offers a Russian language switch.
 
-### utils/analytics_db.py
+The dashboard shows users, retention, CSI/NPS, and Chart.js charts. `/api/summary` provides JSON metrics. The CSI interval form is the state-changing page; its session cookie uses `SameSite=lax`. `WEB_PORT` defaults to 8080.
 
-Аналитика использования бота.
+## Design patterns
 
-- SQLite в режиме WAL (`PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`).
-- Таблицы: `users`, `events`, `csi_responses`, `settings`.
-- `settings` — общее место записи для двух процессов: WebUI меняет значение, бот читает его на каждой рассылке.
-- CSI-функции: сбор опросов (0–10), текстовая обратная связь, метрики NPS/CSI для дашборда.
-- Данные используются WebUI-дашбордом.
-
-### utils/ytdlp_runtime.py
-
-Управление жизненным циклом yt-dlp.
-
-- Опциональное обновление при запуске бота; по умолчанию используется
-  зафиксированная в `requirements.txt` версия.
-- CLI fallback: при сбое API используется вызов `python -m yt_dlp`.
-
-### Локальный Telegram Bot API
-
-- Запущен отдельным сервисом Compose с флагом `--local`.
-- Получает файл по абсолютному пути в общем томе `shared-media`.
-- Разрешает отправку файлов до 2 ГБ без внешнего промежуточного хранилища.
-- Порт API доступен только внутри сети Compose.
-
-### utils/cookie_manager.py и utils/cookie_health.py
-
-Управление cookie-файлами.
-
-- Административный интерфейс загрузки cookie через Telegram.
-- Валидация и проверка работоспособности cookie.
-
-### utils/logger.py
-
-Настройка логирования.
-
-- Rotating file handler: максимальный размер файла 10MB, хранение 5 резервных копий.
-- Путь: `logs/bot.log`.
-
-### utils/cache_commands.py
-
-Команды управления кэшем.
-
-- Обработчики команд `/cache_stats`, `/cleanup_cache`, `/search_cache`.
-
-### utils/temp_file_manager.py
-
-Управление временными файлами.
-
-- Контроль жизненного цикла временных файлов.
-- Автоматическая очистка при завершении работы бота.
-
----
-
-## WebUI (web/)
-
-Веб-интерфейс аналитики, построенный на FastAPI.
-
-- Стек: FastAPI + Jinja2 (шаблонизация) + Uvicorn (ASGI-сервер).
-- Аутентификация на основе сессий, пароль хранится как SHA-256 хэш.
-- Страницы: логин, дашборд, список пользователей, детальная информация о пользователе, настройки.
-- `/settings` — единственная страница, меняющая состояние: POST защищён cookie сессии со `SameSite=lax`, которую браузер не отправляет при межсайтовом запросе.
-- Дашборд включает KPI (пользователи, удержание, CSI/NPS) и графики Chart.js.
-- JSON API: эндпоинт `/api/summary`.
-- CSI-метрики: средний балл, NPS, распределение оценок, текстовая обратная связь по низким оценкам.
-- Порт настраивается через переменную `WEB_PORT` (по умолчанию 8080).
-
----
-
-## Базы данных
-
-Проект использует две SQLite базы данных, обе работают в режиме WAL (Write-Ahead Logging) для обеспечения конкурентного доступа.
-
-- `video_cache.db` — кэш file_id для мгновенной повторной отправки файлов.
-- `analytics.db` — аналитика: данные о пользователях и событиях.
-
----
-
-## Ключевые паттерны
-
-- **Async + ThreadPoolExecutor**: блокирующие операции yt-dlp/FFmpeg выполняются в пуле потоков (`DOWNLOAD_WORKERS=8`), не блокируя event loop.
-- **match-case**: используется для выбора платформы, формата скачивания и обработки callback-запросов (включая CSI-рейтинги).
-- **Exception.add_note()**: обогащение исключений дополнительным контекстом для отладки.
-- **Коды ошибок**: структурированный формат `<PREFIX>-<CATEGORY>-<RANDOM>` для быстрой идентификации проблем.
-- **Централизация текстов**: все пользовательские сообщения вынесены в `messages.py`.
-- **SQLite WAL с ручными транзакциями**: `isolation_level=None`, чтение через `_cursor_read()`, запись через `_cursor_write()` с `BEGIN IMMEDIATE`.
+- **Async and worker threads:** yt-dlp and FFmpeg run in `ThreadPoolExecutor`, leaving the event loop responsive. `DOWNLOAD_WORKERS` defaults to 8.
+- **Typed callback sessions:** Inline actions carry session tokens so choices and cancellation apply to the correct request.
+- **Structured errors:** Public messages use centralized text in `messages.py`; detailed exceptions remain in administrative logs and can carry context through `Exception.add_note()`.
+- **SQLite WAL and explicit transactions:** Read and write helpers support concurrent bot and WebUI access.

@@ -141,7 +141,7 @@ def test_missing_url_and_session_are_marked_plainly(monkeypatch):
 
     asyncio.run(
         telegram_utils._notify_admins_crash(
-            error_code="BOT-UNKNOWN-ABC123",
+            error_code="BOT-UNEXPECT-ABC123",
             platform="bot",
             stage="callback",
             url=None,

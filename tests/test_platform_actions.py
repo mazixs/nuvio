@@ -47,11 +47,22 @@ def _cache_readers_in_actions(actions: tuple[str, ...]) -> list[str]:
         if not isinstance(node, ast.match_case):
             continue
         pattern = node.pattern
-        if not (
+        if isinstance(pattern, ast.MatchOr):
+            constants = [
+                value.value.value
+                for value in pattern.patterns
+                if isinstance(value, ast.MatchValue)
+                and isinstance(value.value, ast.Constant)
+            ]
+        elif (
             isinstance(pattern, ast.MatchValue)
             and isinstance(pattern.value, ast.Constant)
-            and pattern.value.value in actions
         ):
+            constants = [pattern.value.value]
+        else:
+            constants = []
+        matched_actions = [action for action in constants if action in actions]
+        if not matched_actions:
             continue
 
         for statement in node.body:
@@ -59,7 +70,9 @@ def _cache_readers_in_actions(actions: tuple[str, ...]) -> list[str]:
                 if isinstance(inner, ast.Call) and (
                     _called_name(inner) in _CACHE_READER_NAMES
                 ):
-                    found.append(f"{pattern.value.value}: {_called_name(inner)}")
+                    found.extend(
+                        f"{action}: {_called_name(inner)}" for action in matched_actions
+                    )
 
     return found
 
@@ -67,6 +80,8 @@ def _cache_readers_in_actions(actions: tuple[str, ...]) -> list[str]:
 def test_main_action_cache_keys_are_explicit():
     assert cache_key_for_main_action("tiktok", "tiktok_download") == "direct_video"
     assert cache_key_for_main_action("instagram", "instagram_download") == "direct_video"
+    assert cache_key_for_main_action("tiktok", "tiktok_download_desc") == "direct_video"
+    assert cache_key_for_main_action("instagram", "instagram_download_desc") == "direct_video"
     assert cache_key_for_main_action("youtube", "tg_video") == "tg_video"
     assert cache_key_for_main_action("youtube", "audio_m4a") == "audio_m4a"
 
