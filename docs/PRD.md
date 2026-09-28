@@ -408,7 +408,7 @@ Tag v* → Release:
 | Package | Purpose |
 |---|---|
 | `python-telegram-bot[job-queue]` 22.8 | Telegram Bot API (async) |
-| `yt-dlp[default]` 2026.9.16.232951.dev0 | Downloading videos from platforms |
+| `yt-dlp[default]` 2026.9.27.232945.dev0 | Downloading videos from platforms |
 | `curl_cffi` 0.16.0 | Impersonation of HTTP requests from browsers |
 | `httpx` 0.28.1 | HTTP client |
 | `python-dotenv` 1.2.2 | Load environment settings |

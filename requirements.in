@@ -1,6 +1,6 @@
 # Прямые runtime-зависимости для Python 3.14
 python-telegram-bot[job-queue]==22.8
-yt-dlp[default]==2026.9.16.232951.dev0
+yt-dlp[default]==2026.9.27.232945.dev0
 curl_cffi==0.16.3
 httpx==0.28.1
 python-dotenv==1.2.3

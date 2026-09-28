@@ -335,7 +335,7 @@ uv pip compile --python-version 3.14 --generate-hashes --output-file requirement
 Для yt-dlp используйте одну команду с точной версией:
 
 ```bash
-python scripts/update_ytdlp.py 2026.9.16.232951.dev0
+python scripts/update_ytdlp.py 2026.9.27.232945.dev0
 ```
 
 Она обновляет pin и оба lock-файла, затем проверяет код. Еженедельная задача

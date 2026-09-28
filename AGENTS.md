@@ -11,7 +11,7 @@ Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, 
 ## Technology
 
 - Python 3.14+ and asynchronous `python-telegram-bot` 22.8.
-- yt-dlp `2026.9.16.232951.dev0` nightly, pinned in `requirements.in`.
+- yt-dlp `2026.9.27.232945.dev0` nightly, pinned in `requirements.in`.
 - FastAPI 0.141.1, Uvicorn, and Jinja2 for the WebUI.
 - SQLite in WAL mode: `telegram_cache.db` for file IDs and `analytics.db` for analytics.
 - System FFmpeg; Docker Compose with a local Telegram Bot API.
