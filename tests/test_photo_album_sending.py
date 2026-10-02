@@ -908,3 +908,171 @@ def test_retry_after_delay_can_be_cancelled_before_retry(monkeypatch):
             )
     finally:
         forget_cancellation(session_id)
+
+
+def _mixed_paths(tmp_path, names):
+    paths = []
+    for name in names:
+        path = tmp_path / name
+        path.write_bytes(b"media")
+        paths.append(path)
+    return paths
+
+
+def test_mixed_group_photo_refusal_sends_items_one_by_one(monkeypatch, tmp_path):
+    paths = _mixed_paths(tmp_path, ("a.jpg", "clip.mp4", "b.jpg"))
+    monkeypatch.setattr(telegram_utils, "TELEGRAM_LOCAL_MODE", False)
+    geometry = AsyncMock(return_value={"width": 640, "height": 360, "duration": 8})
+    monkeypatch.setattr(telegram_utils, "run_blocking", geometry)
+    events = []
+
+    async def reply_photo(photo, caption=None, **_kwargs):
+        events.append(("photo", Path(photo.name).name, caption))
+        if Path(photo.name).name == "b.jpg":
+            raise telegram.error.BadRequest("IMAGE_PROCESS_FAILED")
+        return SimpleNamespace(message_id=len(events))
+
+    async def reply_video(video, caption=None, **kwargs):
+        events.append(("video", Path(video.name).name, caption, kwargs["width"], kwargs["duration"]))
+        return SimpleNamespace(message_id=len(events))
+
+    async def reply_document(document, caption=None, **_kwargs):
+        events.append(("document", Path(document.name).name, caption))
+        return SimpleNamespace(message_id=len(events))
+
+    message = SimpleNamespace(
+        reply_media_group=AsyncMock(
+            side_effect=telegram.error.BadRequest("PHOTO_INVALID_DIMENSIONS")
+        ),
+        reply_photo=AsyncMock(side_effect=reply_photo),
+        reply_video=AsyncMock(side_effect=reply_video),
+        reply_document=AsyncMock(side_effect=reply_document),
+    )
+    session = {"session_id": "mixed-fallback", "_delivered_items": 10}
+    items = [
+        {"kind": "photo", "path": paths[0]},
+        {"kind": "video", "path": paths[1]},
+        {"kind": "photo", "path": paths[2]},
+    ]
+
+    sent = asyncio.run(
+        telegram_utils._send_mixed_media_group(
+            SimpleNamespace(message=message), items, "Recipe", session
+        )
+    )
+
+    assert events == [
+        ("photo", "a.jpg", "Recipe"),
+        ("video", "clip.mp4", None, 640, 8),
+        ("photo", "b.jpg", None),
+        ("document", "b.jpg", None),
+    ]
+    assert len(sent) == 3
+    assert session["_delivered_items"] == 13
+    assert session["_delivery_progress"] == 13
+    assert geometry.await_count == 1
+
+
+def test_single_mixed_video_keeps_measured_geometry(monkeypatch, tmp_path):
+    (path,) = _mixed_paths(tmp_path, ("clip.mp4",))
+    monkeypatch.setattr(
+        telegram_utils,
+        "run_blocking",
+        AsyncMock(return_value={"width": 720, "height": 1280, "duration": 0}),
+    )
+    reply_video = AsyncMock(return_value=SimpleNamespace(message_id=1))
+
+    asyncio.run(
+        telegram_utils._send_mixed_media_group(
+            SimpleNamespace(message=SimpleNamespace(reply_video=reply_video)),
+            [{"kind": "video", "path": path}],
+            None,
+            {"session_id": "single-mixed-video"},
+        )
+    )
+
+    kwargs = reply_video.await_args.kwargs
+    assert (kwargs["width"], kwargs["height"]) == (720, 1280)
+    assert "duration" not in kwargs
+    assert kwargs["supports_streaming"] is True
+
+
+def test_single_photo_format_refusal_goes_straight_to_document(monkeypatch, tmp_path):
+    (path,) = _mixed_paths(tmp_path, ("only.jpg",))
+    monkeypatch.setattr(telegram_utils, "TELEGRAM_LOCAL_MODE", False)
+    reply_photo = AsyncMock(side_effect=telegram.error.BadRequest("PHOTO_INVALID_DIMENSIONS"))
+    reply_document = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    session = {"session_id": "single-photo-document"}
+
+    sent = asyncio.run(
+        telegram_utils._send_photo_file_group(
+            SimpleNamespace(
+                message=SimpleNamespace(reply_photo=reply_photo, reply_document=reply_document)
+            ),
+            [path],
+            "Caption",
+            session,
+        )
+    )
+
+    assert [message.message_id for message in sent] == [9]
+    reply_photo.assert_awaited_once()
+    assert reply_document.await_args.kwargs["caption"] == "Caption"
+    assert session["_first_media_message"].message_id == 9
+    assert session["_delivered_items"] == 1
+
+
+@pytest.mark.parametrize(
+    "error,progress,expected_text,unknown",
+    [
+        (telegram.error.BadRequest("chat not found"), 2, telegram_utils.PHOTO_POST_PARTIAL, False),
+        (telegram.error.Forbidden("bot was blocked"), 0, "TG-", False),
+        (telegram.error.TimedOut(), 2, telegram_utils.DELIVERY_OUTCOME_UNKNOWN, True),
+        (telegram.error.NetworkError("reset"), 0, telegram_utils.DELIVERY_OUTCOME_UNKNOWN, True),
+    ],
+)
+def test_photo_post_telegram_errors_keep_their_public_outcome(
+    monkeypatch, tmp_path, error, progress, expected_text, unknown
+):
+    (path,) = _mixed_paths(tmp_path, ("frame.jpg",))
+    monkeypatch.setattr(
+        tiktok_instagram_utils, "resolve_photo_post_handoff", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        tiktok_instagram_utils,
+        "download_tiktok_photo_post_assets",
+        lambda *_args: {"items": [{"kind": "photo", "path": path}], "audio": None},
+    )
+
+    async def fail_group(*_args):
+        raise error
+
+    monkeypatch.setattr(telegram_utils, "_send_photo_file_group", fail_group)
+    monkeypatch.setattr(telegram_utils, "_schedule_platform_failure_log", lambda **_kw: None)
+    cleanup_session = AsyncMock()
+    cleanup_idle = Mock()
+    monkeypatch.setattr(telegram_utils, "_cleanup_user_session", cleanup_session)
+    monkeypatch.setattr(telegram_utils, "_cleanup_session_when_idle", cleanup_idle)
+    query = _query(SimpleNamespace(), session_token="errors")
+    session = {
+        "url": "https://www.tiktok.com/@cook/photo/123",
+        "session_id": "photo-errors",
+        "platform": "tiktok",
+        "_delivery_progress": progress,
+        "video_info": {"_nuvio_tiktok_photo_post": True},
+    }
+
+    asyncio.run(
+        telegram_utils._send_photo_post_assets(
+            query, "errors", session, SimpleNamespace(user_data={})
+        )
+    )
+
+    assert expected_text in query.edit_message_text.await_args.args[0]
+    assert bool(session.get("_delivery_outcome_unknown")) is unknown
+    if unknown:
+        cleanup_session.assert_awaited_once()
+        cleanup_idle.assert_not_called()
+    else:
+        cleanup_session.assert_not_awaited()
+        cleanup_idle.assert_called_once_with("photo-errors")

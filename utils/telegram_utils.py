@@ -1377,9 +1377,7 @@ def _description_for_delivery(session_data: dict) -> str | None:
 
 
 def _description_chunks_for_delivery(session_data: dict) -> list[str]:
-    caption, chunks = description_delivery_plan(_description_for_delivery(session_data))
-    session_data["_description_caption"] = caption
-    return chunks
+    return description_delivery_plan(_description_for_delivery(session_data))[1]
 
 
 async def _send_description_chunks(
@@ -1789,18 +1787,18 @@ async def _deliver_photo_post_by_url(
         logger.info("Пропускаю фото-пост ссылками: CDN недавно отказал Telegram")
         return DeliveryOutcome("refused")
 
-    sizes = media_album_sizes(len(plan.images))
     offset = 0
     sent_messages = []
-    caption = description_delivery_plan(
+    caption, description_chunks = description_delivery_plan(
         _description_for_delivery(delivery_state)
-    )[0]
-    for block_index, group_size in enumerate(sizes, start=1):
+    )
+    for block_index, group_size in enumerate(
+        media_album_sizes(len(plan.images)), start=1
+    ):
         group = plan.images[offset : offset + group_size]
         if is_cancelled(str(delivery_state.get("session_id") or "")):
             raise CancelledByUser("отправка альбома отменена")
         try:
-            delivery_state["_delivery_request_in_flight"] = True
             if len(group) == 1:
                 messages = [
                     await _call_telegram_with_retry_after(
@@ -1833,7 +1831,6 @@ async def _deliver_photo_post_by_url(
             ):
                 raise
             _HANDOFF_REFUSALS.remember(group[0].url, group[0].kind, now)
-            delivery_state["_delivered_items"] = offset
             logger.warning(
                 "Telegram не принял URL блока фото-поста после %s кадров: %s",
                 offset,
@@ -1845,7 +1842,7 @@ async def _deliver_photo_post_by_url(
                 confirmed_items=offset,
                 error=error,
             )
-        except (telegram.error.NetworkError, telegram.error.TimedOut) as error:
+        except telegram.error.NetworkError as error:
             delivery_state["_delivery_outcome_unknown"] = True
             return DeliveryOutcome(
                 "unknown",
@@ -1853,8 +1850,6 @@ async def _deliver_photo_post_by_url(
                 confirmed_items=offset,
                 error=error,
             )
-        finally:
-            delivery_state["_delivery_request_in_flight"] = False
         if offset == 0 and messages:
             delivery_state["_first_media_message"] = messages[0]
         sent_messages.extend(messages)
@@ -1870,24 +1865,17 @@ async def _deliver_photo_post_by_url(
             group_size,
         )
 
-    caption_value, description_chunks = description_delivery_plan(
-        _description_for_delivery(delivery_state)
+    await _send_description_chunks(
+        query,
+        description_chunks,
+        delivery_state.get("_first_media_message"),
+        delivery_state,
     )
-    if caption_value is None and description_chunks:
-        sent = await _send_description_chunks(
-            query,
-            description_chunks,
-            delivery_state.get("_first_media_message"),
-            delivery_state,
-        )
-        if sent:
-            delivery_state["_description_sent"] = True
 
     if plan.audio:
         if is_cancelled(str(delivery_state.get("session_id") or "")):
             raise CancelledByUser("отправка аудио отменена")
         try:
-            delivery_state["_delivery_request_in_flight"] = True
             audio_message = await _call_telegram_with_retry_after(
                 lambda: query.message.reply_audio(
                     do_quote=False,
@@ -1913,8 +1901,6 @@ async def _deliver_photo_post_by_url(
                 "unknown", tuple(sent_messages), confirmed_items=offset,
                 audio_delivered=None, error=error,
             )
-        finally:
-            delivery_state["_delivery_request_in_flight"] = False
         delivery_state["_audio_delivered"] = True
         sent_messages.append(audio_message)
 
@@ -1958,25 +1944,114 @@ def _is_photo_format_refusal(error: telegram.error.BadRequest) -> bool:
     )
 
 
-async def _send_photo_path_as_document(
+@contextlib.contextmanager
+def _upload_source(path: Path):
+    """Дает путь для локального Bot API или открытый поток для облачного.
+
+    Второе значение перематывает поток перед повтором после RetryAfter.
+    """
+    if TELEGRAM_LOCAL_MODE:
+        yield path.resolve(), None
+        return
+    with path.open("rb") as handle:
+        yield handle, lambda: handle.seek(0)
+
+
+def _album_input(source):
+    """Оборачивает поток так, чтобы PTB читал его только при выгрузке."""
+    if TELEGRAM_LOCAL_MODE:
+        return source
+    return telegram.InputFile(source, attach=True, read_file_handle=False)
+
+
+def _reset_all(sources: list[tuple[object, object]]):
+    resets = [reset for _source, reset in sources if reset]
+    if not resets:
+        return None
+
+    def reset_files() -> None:
+        for reset in resets:
+            reset()
+
+    return reset_files
+
+
+async def _send_items_one_by_one(
     query: telegram.CallbackQuery,
-    image_path: Path,
+    items: list[tuple[str, Path, dict]],
     caption: str | None,
     session_data: dict,
-) -> telegram.Message:
-    telegram_file = image_path.resolve() if TELEGRAM_LOCAL_MODE else image_path.open("rb")
-    try:
-        return await query.message.reply_document(
-            do_quote=False,
-            document=telegram_file,
-            caption=caption,
-            parse_mode=None,
-            write_timeout=1800,
-            read_timeout=1800,
+    *,
+    photo_refused: bool,
+    cancel_reason: str,
+) -> list[telegram.Message]:
+    """Досылает отклоненный альбом по одному элементу в исходном порядке.
+
+    sendMediaGroup отклоняется целиком, поэтому повтор не создает дублей.
+    Фото с отказом по формату уходит тем же файлом как документ. Если
+    отклонено было одиночное фото, повторять sendPhoto незачем.
+    """
+    results = []
+    progress_base = int(session_data.get("_delivered_items") or 0)
+    for index, (kind, path, geometry) in enumerate(items):
+        if is_cancelled(str(session_data.get("session_id") or "")):
+            raise CancelledByUser(cancel_reason)
+        item_caption = caption if index == 0 else None
+        with _upload_source(path) as (source, reset):
+            if kind == "video":
+                sent = await _call_telegram_with_retry_after(
+                    lambda: query.message.reply_video(
+                        do_quote=False,
+                        video=source,
+                        caption=item_caption,
+                        parse_mode=None,
+                        supports_streaming=True,
+                        **geometry,
+                    ),
+                    session_data,
+                    reset_files=reset,
+                )
+            else:
+                def send_document():
+                    return _call_telegram_with_retry_after(
+                        lambda: query.message.reply_document(
+                            do_quote=False,
+                            document=source,
+                            caption=item_caption,
+                            parse_mode=None,
+                        ),
+                        session_data,
+                        reset_files=reset,
+                    )
+
+                if photo_refused:
+                    sent = await send_document()
+                else:
+                    try:
+                        sent = await _call_telegram_with_retry_after(
+                            lambda: query.message.reply_photo(
+                                do_quote=False,
+                                photo=source,
+                                caption=item_caption,
+                                parse_mode=None,
+                            ),
+                            session_data,
+                            reset_files=reset,
+                        )
+                    except telegram.error.BadRequest as photo_error:
+                        if not _is_photo_format_refusal(photo_error):
+                            raise
+                        if reset:
+                            reset()
+                        sent = await send_document()
+        results.append(sent)
+        session_data.setdefault("_first_media_message", sent)
+        session_data["_confirmed_delivery_messages"] = (
+            *session_data.get("_confirmed_delivery_messages", ()), sent
         )
-    finally:
-        if not TELEGRAM_LOCAL_MODE:
-            telegram_file.close()
+        session_data["_delivered_items"] = progress_base + len(results)
+        session_data["_delivery_progress"] = progress_base + len(results)
+    return results
 
 
 async def _send_photo_file_group(
@@ -1988,32 +2063,17 @@ async def _send_photo_file_group(
     """Отправляет последовательную группу фото и сохраняет документный откат."""
     if is_cancelled(str(session_data.get("session_id") or "")):
         raise CancelledByUser("отправка фото отменена")
-    opened = []
-    media = []
-
-    def reset_opened_files() -> None:
-        for telegram_file in opened:
-            telegram_file.seek(0)
-
-    try:
-        for index, image_path in enumerate(image_paths):
-            telegram_file = (
-                image_path.resolve()
-                if TELEGRAM_LOCAL_MODE
-                else image_path.open("rb")
+    with contextlib.ExitStack() as stack:
+        sources = [stack.enter_context(_upload_source(path)) for path in image_paths]
+        reset_files = _reset_all(sources)
+        media = [
+            InputMediaPhoto(
+                media=_album_input(source),
+                caption=caption if index == 0 else None,
+                parse_mode=None,
             )
-            if not TELEGRAM_LOCAL_MODE:
-                opened.append(telegram_file)
-            media.append(
-                InputMediaPhoto(
-                    media=(telegram_file if TELEGRAM_LOCAL_MODE else telegram.InputFile(
-                        telegram_file, attach=True, read_file_handle=False
-                    )),
-                    caption=caption if index == 0 else None,
-                    parse_mode=None,
-                )
-            )
-        session_data["_delivery_request_in_flight"] = True
+            for index, (source, _reset) in enumerate(sources)
+        ]
         try:
             if len(media) == 1:
                 message = await _call_telegram_with_retry_after(
@@ -2026,77 +2086,25 @@ async def _send_photo_file_group(
                         read_timeout=1800,
                     ),
                     session_data,
-                    reset_files=reset_opened_files,
+                    reset_files=reset_files,
                 )
                 return [message]
             return await _call_telegram_with_retry_after(
                 lambda: query.message.reply_media_group(media=media, do_quote=False),
                 session_data,
-                reset_files=reset_opened_files,
+                reset_files=reset_files,
             )
         except telegram.error.BadRequest as error:
             if not _is_photo_format_refusal(error):
                 raise
-            # sendMediaGroup отклонен целиком, поэтому безопасно повторить этот
-            # блок по одному элементу и отправить только проблемное как файл.
-            result = []
-            progress_base = int(session_data.get("_delivered_items") or 0)
-            for index, image_path in enumerate(image_paths):
-                if is_cancelled(str(session_data.get("session_id") or "")):
-                    raise CancelledByUser("отправка фото отменена")
-                item_caption = caption if index == 0 else None
-                telegram_file = (
-                    image_path.resolve()
-                    if TELEGRAM_LOCAL_MODE
-                    else image_path.open("rb")
-                )
-                try:
-                    try:
-                        sent = await _call_telegram_with_retry_after(
-                            lambda: query.message.reply_photo(
-                                do_quote=False,
-                                photo=telegram_file,
-                                caption=item_caption,
-                                parse_mode=None,
-                            ),
-                            session_data,
-                            reset_files=lambda: telegram_file.seek(0)
-                            if not TELEGRAM_LOCAL_MODE
-                            else None,
-                        )
-                    except telegram.error.BadRequest as photo_error:
-                        if not _is_photo_format_refusal(photo_error):
-                            raise
-                        if not TELEGRAM_LOCAL_MODE:
-                            telegram_file.seek(0)
-                        sent = await _call_telegram_with_retry_after(
-                            lambda: query.message.reply_document(
-                                do_quote=False,
-                                document=telegram_file,
-                                caption=item_caption,
-                                parse_mode=None,
-                            ),
-                            session_data,
-                            reset_files=lambda: telegram_file.seek(0)
-                            if not TELEGRAM_LOCAL_MODE
-                            else None,
-                        )
-                    result.append(sent)
-                    session_data.setdefault("_first_media_message", sent)
-                    session_data["_confirmed_delivery_messages"] = (
-                        *session_data.get("_confirmed_delivery_messages", ()), sent
-                    )
-                    session_data["_delivered_items"] = progress_base + len(result)
-                    session_data["_delivery_progress"] = progress_base + len(result)
-                finally:
-                    if not TELEGRAM_LOCAL_MODE:
-                        telegram_file.close()
-            return result
-        finally:
-            session_data["_delivery_request_in_flight"] = False
-    finally:
-        for telegram_file in opened:
-            telegram_file.close()
+    return await _send_items_one_by_one(
+        query,
+        [("photo", path, {}) for path in image_paths],
+        caption,
+        session_data,
+        photo_refused=len(image_paths) == 1,
+        cancel_reason="отправка фото отменена",
+    )
 
 
 async def _send_mixed_media_group(
@@ -2121,27 +2129,23 @@ async def _send_mixed_media_group(
             logger.warning("Не удалось измерить видео карусели %s: %s", path, error)
             return {}
 
-    opened = []
-    media = []
-    normalized = []
+    prepared = []
+    for item in items:
+        kind = item.get("kind")
+        path = Path(item["path"])
+        if kind not in {"photo", "video"} or not _file_ready_to_send(path):
+            raise FileNotFoundError(str(path))
+        prepared.append((kind, path, await geometry_for(path) if kind == "video" else {}))
 
-    def reset_opened_files() -> None:
-        for file_handle in opened:
-            file_handle.seek(0)
-
-    try:
-        for item in items:
-            kind = item.get("kind")
-            path = Path(item["path"])
-            if kind not in {"photo", "video"} or not _file_ready_to_send(path):
-                raise FileNotFoundError(str(path))
-            file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
-            if not TELEGRAM_LOCAL_MODE:
-                opened.append(file_input)
-            normalized.append((kind, path))
-            item_caption = caption if not media else None
+    with contextlib.ExitStack() as stack:
+        sources = [stack.enter_context(_upload_source(path)) for _kind, path, _g in prepared]
+        reset_files = _reset_all(sources)
+        media = []
+        for index, ((kind, _path, geometry), (source, _reset)) in enumerate(
+            zip(prepared, sources)
+        ):
+            item_caption = caption if index == 0 else None
             if kind == "video":
-                geometry = await geometry_for(path)
                 media_geometry = dict(geometry)
                 if media_geometry.get("duration") is not None:
                     media_geometry["duration"] = timedelta(
@@ -2149,9 +2153,7 @@ async def _send_mixed_media_group(
                     )
                 media.append(
                     InputMediaVideo(
-                        media=(file_input if TELEGRAM_LOCAL_MODE else telegram.InputFile(
-                            file_input, attach=True, read_file_handle=False
-                        )),
+                        media=_album_input(source),
                         caption=item_caption,
                         parse_mode=None,
                         supports_streaming=True,
@@ -2161,23 +2163,20 @@ async def _send_mixed_media_group(
             else:
                 media.append(
                     InputMediaPhoto(
-                        media=(file_input if TELEGRAM_LOCAL_MODE else telegram.InputFile(
-                            file_input, attach=True, read_file_handle=False
-                        )),
+                        media=_album_input(source),
                         caption=item_caption,
                         parse_mode=None,
                     )
                 )
 
-        session_data["_delivery_request_in_flight"] = True
         try:
             if len(media) > 1:
                 return await _call_telegram_with_retry_after(
                     lambda: query.message.reply_media_group(media=media, do_quote=False),
                     session_data,
-                    reset_files=reset_opened_files,
+                    reset_files=reset_files,
                 )
-            kind, _path = normalized[0]
+            kind, _path, geometry = prepared[0]
             file_input = media[0].media
             if kind == "video":
                 return [
@@ -2188,14 +2187,10 @@ async def _send_mixed_media_group(
                             caption=caption,
                             parse_mode=None,
                             supports_streaming=True,
-                            **{
-                                key: value
-                                for key, value in media[0].to_dict().items()
-                                if key in {"width", "height", "duration"} and value
-                            },
+                            **{key: value for key, value in geometry.items() if value},
                         ),
                         session_data,
-                        reset_files=reset_opened_files,
+                        reset_files=reset_files,
                     )
                 ]
             return [
@@ -2207,88 +2202,20 @@ async def _send_mixed_media_group(
                         parse_mode=None,
                     ),
                     session_data,
-                    reset_files=reset_opened_files,
+                    reset_files=reset_files,
                 )
             ]
         except telegram.error.BadRequest as error:
-            if not any(item.get("kind") == "photo" for item in items) or not _is_photo_format_refusal(error):
+            if not any(kind == "photo" for kind, _path, _g in prepared) or not _is_photo_format_refusal(error):
                 raise
-            results = []
-            progress_base = int(session_data.get("_delivered_items") or 0)
-            for index, (kind, path) in enumerate(normalized):
-                if is_cancelled(str(session_data.get("session_id") or "")):
-                    raise CancelledByUser("отправка карусели отменена")
-                item_caption = caption if index == 0 else None
-                if kind == "video":
-                    geometry = await geometry_for(path)
-                    file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
-                    try:
-                        sent = await _call_telegram_with_retry_after(
-                            lambda: query.message.reply_video(
-                                do_quote=False,
-                                video=file_input,
-                                caption=item_caption,
-                                parse_mode=None,
-                                supports_streaming=True,
-                                **geometry,
-                            ),
-                            session_data,
-                            reset_files=lambda: file_input.seek(0)
-                            if not TELEGRAM_LOCAL_MODE
-                            else None,
-                        )
-                    finally:
-                        if not TELEGRAM_LOCAL_MODE:
-                            file_input.close()
-                else:
-                    file_input = path.resolve() if TELEGRAM_LOCAL_MODE else path.open("rb")
-                    try:
-                        try:
-                            sent = await _call_telegram_with_retry_after(
-                                lambda: query.message.reply_photo(
-                                    do_quote=False,
-                                    photo=file_input,
-                                    caption=item_caption,
-                                    parse_mode=None,
-                                ),
-                                session_data,
-                                reset_files=lambda: file_input.seek(0)
-                                if not TELEGRAM_LOCAL_MODE
-                                else None,
-                            )
-                        except telegram.error.BadRequest as photo_error:
-                            if not _is_photo_format_refusal(photo_error):
-                                raise
-                            if not TELEGRAM_LOCAL_MODE:
-                                file_input.seek(0)
-                            sent = await _call_telegram_with_retry_after(
-                                lambda: query.message.reply_document(
-                                    do_quote=False,
-                                    document=file_input,
-                                    caption=item_caption,
-                                    parse_mode=None,
-                                ),
-                                session_data,
-                                reset_files=lambda: file_input.seek(0)
-                                if not TELEGRAM_LOCAL_MODE
-                                else None,
-                            )
-                    finally:
-                        if not TELEGRAM_LOCAL_MODE:
-                            file_input.close()
-                results.append(sent)
-                session_data.setdefault("_first_media_message", sent)
-                session_data["_confirmed_delivery_messages"] = (
-                    *session_data.get("_confirmed_delivery_messages", ()), sent
-                )
-                session_data["_delivered_items"] = progress_base + len(results)
-                session_data["_delivery_progress"] = progress_base + len(results)
-            return results
-        finally:
-            session_data["_delivery_request_in_flight"] = False
-    finally:
-        for file_input in opened:
-            file_input.close()
+    return await _send_items_one_by_one(
+        query,
+        prepared,
+        caption,
+        session_data,
+        photo_refused=len(prepared) == 1,
+        cancel_reason="отправка карусели отменена",
+    )
 
 
 async def _deliver_plan(
@@ -2879,21 +2806,14 @@ async def _handle_main_callback(
 
     match action:
         case "tiktok_download" | "tiktok_download_desc":
-            is_photo_post = bool(
-                session_data.get("video_info", {}).get("_nuvio_tiktok_photo_post")
-            )
-            if is_photo_post:
+            if session_data.get("video_info", {}).get("_nuvio_tiktok_photo_post"):
                 await _send_photo_post_assets(
                     query, session_token, session_data, context
                 )
                 return
 
             # Проверяем кэш перед скачиванием
-            cache_key = (
-                None
-                if is_photo_post
-                else _cache_format_id_for_main_action("tiktok", action)
-            )
+            cache_key = _cache_format_id_for_main_action("tiktok", action)
             if cache_key:
                 cached = telegram_cache.get(url, format_id=cache_key)
                 if cached:
@@ -3073,21 +2993,14 @@ async def _handle_main_callback(
                 await query.edit_message_text(INSTAGRAM_CAROUSEL_INCOMPLETE)
                 await _cleanup_user_session(user_id, context, session_token)
                 return
-            is_photo_post = bool(
-                session_data.get("video_info", {}).get("_nuvio_instagram_photo_post")
-            )
-            if is_photo_post:
+            if session_data.get("video_info", {}).get("_nuvio_instagram_photo_post"):
                 await _send_photo_post_assets(
                     query, session_token, session_data, context
                 )
                 return
 
             # Проверяем кэш перед скачиванием
-            cache_key = (
-                None
-                if is_photo_post
-                else _cache_format_id_for_main_action("instagram", action)
-            )
+            cache_key = _cache_format_id_for_main_action("instagram", action)
             if cache_key:
                 cached = telegram_cache.get(url, format_id=cache_key)
                 if cached:
@@ -4315,10 +4228,11 @@ async def _send_photo_post_assets(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Отправляет фото-пост последовательными альбомами и отдельным аудио."""
+    from utils import tiktok_instagram_utils as sources
+
     user_id = query.from_user.id
     url = session_data["url"]
     session_id = session_data["session_id"]
-    platform = session_data.get("platform", "tiktok")
     back_markup = (
         _build_back_markup(session_token)
         if session_token
@@ -4326,41 +4240,66 @@ async def _send_photo_post_assets(
             [[InlineKeyboardButton(BTN_BACK, callback_data="main|back")]]
         )
     )
+    cancel_markup = _build_cancel_markup(session_token) if session_token else None
 
-    if platform == "instagram":
-        from utils.tiktok_instagram_utils import (
-            download_instagram_photo_post_assets as download_photo_post_assets,
-        )
-
-        downloading_photos_message = DOWNLOADING_PHOTOS_MESSAGE
+    if session_data.get("platform") == "instagram":
+        platform = "instagram"
+        download_photo_post_assets = sources.download_instagram_photo_post_assets
         empty_images_message = ERROR_INSTAGRAM_NO_PHOTOS
-        platform_for_errors = "instagram"
         images_key = "_nuvio_instagram_images"
         audio_key = "_nuvio_instagram_audio_url"
         referer = "https://www.instagram.com/"
     else:
-        from utils.tiktok_instagram_utils import (
-            download_tiktok_photo_post_assets as download_photo_post_assets,
-        )
-
-        downloading_photos_message = DOWNLOADING_PHOTOS_MESSAGE
+        platform = "tiktok"
+        download_photo_post_assets = sources.download_tiktok_photo_post_assets
         empty_images_message = ERROR_TIKTOK_NO_PHOTOS
-        platform_for_errors = "tiktok"
         images_key = "_nuvio_tiktok_images"
         audio_key = "_nuvio_tiktok_audio_url"
         referer = "https://www.tiktok.com/"
 
+    async def finish_delivery() -> None:
+        await _record_delivery(user_id, session_data)
+        await _edit_delivery_status(
+            query,
+            DESCRIPTION_SEND_FAILED
+            if session_data.get("_description_delivery_failed")
+            else FILE_SENT
+        )
+        await _cleanup_user_session(user_id, context, session_token)
+
+    def log_failure(stage: str, error_code: str, error: BaseException) -> None:
+        _schedule_platform_failure_log(
+            platform=platform,
+            stage=stage,
+            url=url,
+            error_code=error_code,
+            exc=error,
+            session_id=session_id,
+        )
+
+    async def report_failure(text: str) -> None:
+        await _edit_delivery_status(
+            query,
+            PHOTO_POST_PARTIAL if session_data.get("_delivery_progress") else text,
+            reply_markup=back_markup,
+        )
+        _cleanup_session_when_idle(session_id)
+
+    async def report_telegram_failure(error: telegram.error.TelegramError) -> None:
+        error_code = _make_error_code_for_exception(
+            platform, error, prefix_platform="telegram"
+        )
+        log_failure("send_photo_post_telegram", error_code, error)
+        await report_failure(USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code))
+
     try:
         await _edit_delivery_status(
-            query, downloading_photos_message,
-            reply_markup=_build_cancel_markup(session_token) if session_token else None,
+            query, DOWNLOADING_PHOTOS_MESSAGE, reply_markup=cancel_markup
         )
 
         # Прямая отправка сохраняет старый быстрый путь. Отказ URL в первой
         # группе разрешает скачать весь пост; после частичной отправки скачивается
         # весь набор, но пользователю отправляется только неподтвержденный остаток.
-        from utils.tiktok_instagram_utils import resolve_photo_post_handoff
-
         video_info = session_data.get("video_info") or {}
         is_mixed = bool(video_info.get("_nuvio_instagram_mixed_post"))
         if is_mixed and not video_info.get("_nuvio_instagram_carousel_complete"):
@@ -4369,7 +4308,7 @@ async def _send_photo_post_assets(
             return
         if not is_mixed and not session_data.get("_delivered_items"):
             photo_plan = await run_blocking(
-                resolve_photo_post_handoff,
+                sources.resolve_photo_post_handoff,
                 list(video_info.get(images_key) or []),
                 video_info.get(audio_key),
                 referer,
@@ -4392,7 +4331,7 @@ async def _send_photo_post_assets(
                 if outcome.state == "unknown":
                     logger.warning(
                         "Неизвестный исход URL-отправки: platform=%s session=%s confirmed=%s error=%s",
-                        platform_for_errors,
+                        platform,
                         session_id,
                         outcome.confirmed_items,
                         type(outcome.error).__name__ if outcome.error else "unknown",
@@ -4401,14 +4340,7 @@ async def _send_photo_post_assets(
                     await _cleanup_user_session(user_id, context, session_token)
                     return
                 if outcome.state == "delivered":
-                    await _record_delivery(query.from_user.id, session_data)
-                    await _edit_delivery_status(
-                        query,
-                        DESCRIPTION_SEND_FAILED
-                        if session_data.get("_description_delivery_failed")
-                        else FILE_SENT
-                    )
-                    await _cleanup_user_session(user_id, context, session_token)
+                    await finish_delivery()
                     return
 
         assets = await run_blocking(
@@ -4424,19 +4356,18 @@ async def _send_photo_post_assets(
             video_info = asset_info
             session_data["video_info"] = asset_info
             is_mixed = bool(asset_info.get("_nuvio_instagram_mixed_post"))
-        image_paths = list(assets.get("images") or [])
         media_items = list(assets.get("items") or [])
         audio_path = assets.get("audio")
-
-        if not media_items:
-            media_items = [{"kind": "photo", "path": path} for path in image_paths]
         if not media_items:
             raise Exception(empty_images_message)
 
         delivered_items = int(session_data.get("_delivered_items") or 0)
-        expected_count = len(video_info.get(images_key) or [])
-        if is_mixed:
-            expected_count = len(video_info.get("_nuvio_instagram_carousel_items") or [])
+        expected_count = len(
+            video_info.get(
+                "_nuvio_instagram_carousel_items" if is_mixed else images_key
+            )
+            or []
+        )
         if delivered_items and (
             delivered_items > len(media_items)
             or (expected_count and expected_count != len(media_items))
@@ -4448,8 +4379,9 @@ async def _send_photo_post_assets(
         caption, description_chunks = description_delivery_plan(
             _description_for_delivery(session_data)
         )
-        pending_items = media_items[delivered_items:]
-        for block_index, group in enumerate(chunk_media(pending_items), start=1):
+        for block_index, group in enumerate(
+            chunk_media(media_items[delivered_items:]), start=1
+        ):
             if is_cancelled(session_id):
                 raise CancelledByUser("отправка публикации отменена")
             group_caption = caption if delivered_items == 0 else None
@@ -4471,32 +4403,26 @@ async def _send_photo_post_assets(
             session_data["_delivery_progress"] = delivered_items
             logger.info(
                 "Медиа-блок доставлен: platform=%s session=%s block=%s transport=file items=%s",
-                platform_for_errors,
+                platform,
                 session_id,
                 block_index,
                 len(group),
             )
 
-        if description_chunks and not session_data.get("_description_attempted"):
-            sent = await _send_description_chunks(
-                query,
-                description_chunks,
-                session_data.get("_first_media_message"),
-                session_data,
-            )
-            if sent:
-                session_data["_description_sent"] = True
+        await _send_description_chunks(
+            query,
+            description_chunks,
+            session_data.get("_first_media_message"),
+            session_data,
+        )
 
         if audio_path and not session_data.get("_audio_delivered"):
             if is_cancelled(session_id):
                 raise CancelledByUser("отправка аудио отменена")
             await _edit_delivery_status(
-                query, DOWNLOADING_AUDIO_MESSAGE,
-                reply_markup=_build_cancel_markup(session_token) if session_token else None,
+                query, DOWNLOADING_AUDIO_MESSAGE, reply_markup=cancel_markup
             )
-            audio_file = audio_path.resolve() if TELEGRAM_LOCAL_MODE else audio_path.open("rb")
-            try:
-                session_data["_delivery_request_in_flight"] = True
+            with _upload_source(audio_path) as (audio_file, reset_audio):
                 await _call_telegram_with_retry_after(
                     lambda: query.message.reply_audio(
                         do_quote=False,
@@ -4506,36 +4432,16 @@ async def _send_photo_post_assets(
                         read_timeout=1800,
                     ),
                     session_data,
-                    reset_files=lambda: audio_file.seek(0)
-                    if not TELEGRAM_LOCAL_MODE
-                    else None,
+                    reset_files=reset_audio,
                 )
-            finally:
-                session_data["_delivery_request_in_flight"] = False
-                if not TELEGRAM_LOCAL_MODE:
-                    audio_file.close()
             session_data["_audio_delivered"] = True
 
-        await _record_delivery(query.from_user.id, session_data)
-        await _edit_delivery_status(
-            query,
-            DESCRIPTION_SEND_FAILED
-            if session_data.get("_description_delivery_failed")
-            else FILE_SENT
-        )
-        await _cleanup_user_session(user_id, context, session_token)
+        await finish_delivery()
     except (FileNotFoundError, PermissionError) as e:
         error_code = _make_error_code_for_exception(
-            platform_for_errors, e, prefix_platform="file"
+            platform, e, prefix_platform="file"
         )
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_access",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
-        )
+        log_failure("send_photo_post_access", error_code, e)
         await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
@@ -4543,81 +4449,23 @@ async def _send_photo_post_assets(
         )
         _cleanup_session_when_idle(session_id)
     except telegram.error.BadRequest as e:
-        error_code = _make_error_code_for_exception(
-            platform_for_errors, e, prefix_platform="telegram"
-        )
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_telegram",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
-        )
-        await _edit_delivery_status(
-            query,
-            PHOTO_POST_PARTIAL
-            if session_data.get("_delivery_progress")
-            else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
-        )
-        _cleanup_session_when_idle(session_id)
+        await report_telegram_failure(e)
     except telegram.error.NetworkError as e:
         session_data["_delivery_outcome_unknown"] = True
         error_code = _make_error_code_for_exception(
-            platform_for_errors, e, prefix_platform="telegram"
+            platform, e, prefix_platform="telegram"
         )
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_network",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
-        )
+        log_failure("send_photo_post_network", error_code, e)
         await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN)
         await _cleanup_user_session(user_id, context, session_token)
     except telegram.error.TelegramError as e:
-        error_code = _make_error_code_for_exception(
-            platform_for_errors, e, prefix_platform="telegram"
-        )
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_telegram",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
-        )
-        await _edit_delivery_status(
-            query,
-            PHOTO_POST_PARTIAL
-            if session_data.get("_delivery_progress")
-            else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
-        )
-        _cleanup_session_when_idle(session_id)
+        await report_telegram_failure(e)
     except Exception as e:
         error_code = _make_error_code(
-            platform_for_errors,
-            _classify_internal_error_category(platform_for_errors, e),
+            platform, _classify_internal_error_category(platform, e)
         )
-        _schedule_platform_failure_log(
-            platform=platform_for_errors,
-            stage="send_photo_post_unexpected",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_id,
-        )
-        await _edit_delivery_status(
-            query,
-            PHOTO_POST_PARTIAL
-            if session_data.get("_delivery_progress")
-            else _build_public_error_message(platform_for_errors, error_code, e),
-            reply_markup=back_markup,
-        )
-        _cleanup_session_when_idle(session_id)
+        log_failure("send_photo_post_unexpected", error_code, e)
+        await report_failure(_build_public_error_message(platform, error_code, e))
 
 
 def _file_ready_to_send(file_path: Path) -> bool:

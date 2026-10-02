@@ -1206,7 +1206,7 @@ def test_photo_post_failure_keeps_session_for_back_button(monkeypatch):
     query = _DummyQuery()
 
     async def fake_run_blocking(*args, **kwargs):
-        return {"images": [], "audio": None}
+        return {"items": [], "audio": None}
 
     monkeypatch.setattr(telegram_utils, "run_blocking", fake_run_blocking)
     monkeypatch.setattr(

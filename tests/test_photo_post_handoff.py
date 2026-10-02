@@ -217,3 +217,125 @@ def test_unknown_outcome_after_first_album_returns_confirmed_progress():
     assert outcome.messages == tuple(first_group)
     assert session_data["_delivery_outcome_unknown"] is True
     assert reply_media_group.await_count == 2
+
+
+# --- скачивание фото-поста файлами ------------------------------------------
+
+
+@pytest.fixture
+def remote_files(monkeypatch, tmp_path):
+    """Записывает скачивания вместо сетевых запросов."""
+    calls = []
+
+    def fake_download(url, destination, referer=None, expected_content_type=None):
+        calls.append((url, destination.name, referer))
+        destination.write_bytes(b"media")
+        return destination
+
+    monkeypatch.setattr(tiktok_instagram_utils, "_download_remote_file", fake_download)
+    monkeypatch.setattr(
+        tiktok_instagram_utils,
+        "get_temp_file_path",
+        lambda _session_id, name: tmp_path / name,
+    )
+    return calls
+
+
+def _tiktok_photo_info():
+    return {
+        "_nuvio_tiktok_photo_post": True,
+        "title": "Рецепт",
+        "_nuvio_tiktok_images": ["https://cdn.example/a.jpeg", "https://cdn.example/b"],
+        "_nuvio_tiktok_audio_url": "https://cdn.example/track",
+    }
+
+
+def _instagram_photo_info():
+    return {
+        "_nuvio_instagram_photo_post": True,
+        "title": "Пост",
+        "_nuvio_instagram_images": ["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"],
+        "_nuvio_instagram_audio_url": "https://cdn.example/sound",
+    }
+
+
+def test_tiktok_photo_post_assets_keep_order_and_names(remote_files, tmp_path):
+    assets = tiktok_instagram_utils.download_tiktok_photo_post_assets(
+        "https://www.tiktok.com/@cook/photo/1", "sid", _tiktok_photo_info()
+    )
+
+    assert remote_files == [
+        ("https://cdn.example/a.jpeg", "Рецепт_01.jpeg", None),
+        ("https://cdn.example/b", "Рецепт_02.jpg", None),
+        ("https://cdn.example/track", "Рецепт_audio.mp3", None),
+    ]
+    assert [item["path"].name for item in assets["items"]] == [
+        "Рецепт_01.jpeg",
+        "Рецепт_02.jpg",
+    ]
+    assert all(item["kind"] == "photo" for item in assets["items"])
+    assert assets["audio"] == tmp_path / "Рецепт_audio.mp3"
+
+
+def test_instagram_photo_post_assets_use_instagram_referer(remote_files, tmp_path):
+    assets = tiktok_instagram_utils.download_instagram_photo_post_assets(
+        "https://www.instagram.com/p/abc/", "sid", _instagram_photo_info()
+    )
+
+    referer = "https://www.instagram.com/"
+    assert remote_files == [
+        ("https://cdn.example/a.jpg", "Пост_01.jpg", referer),
+        ("https://cdn.example/b.jpg", "Пост_02.jpg", referer),
+        ("https://cdn.example/sound", "Пост_audio.m4a", referer),
+    ]
+    assert [item["path"].name for item in assets["items"]] == ["Пост_01.jpg", "Пост_02.jpg"]
+    assert assets["audio"] == tmp_path / "Пост_audio.m4a"
+
+
+@pytest.mark.parametrize(
+    "download,info,expected",
+    [
+        (
+            tiktok_instagram_utils.download_tiktok_photo_audio,
+            _tiktok_photo_info,
+            ("https://cdn.example/track", "Рецепт_audio.mp3", None),
+        ),
+        (
+            tiktok_instagram_utils.download_instagram_photo_audio,
+            _instagram_photo_info,
+            ("https://cdn.example/sound", "Пост_audio.m4a", "https://www.instagram.com/"),
+        ),
+    ],
+)
+def test_photo_post_audio_skips_image_downloads(remote_files, tmp_path, download, info, expected):
+    result = download("https://example.test/post", "sid", None, False, info())
+
+    assert remote_files == [expected]
+    assert result == tmp_path / expected[1]
+
+
+def test_photo_post_audio_missing_track_is_reported(remote_files):
+    info = _tiktok_photo_info()
+    info["_nuvio_tiktok_audio_url"] = None
+
+    with pytest.raises(tiktok_instagram_utils.PhotoPostAudioMissingError):
+        tiktok_instagram_utils.download_tiktok_photo_audio(
+            "https://example.test/post", "sid", None, False, info
+        )
+    assert remote_files == []
+
+
+def test_disallowed_url_cancels_handoff_before_any_probe(monkeypatch):
+    probed = []
+    monkeypatch.setattr(
+        tiktok_instagram_utils,
+        "probe_remote_size",
+        lambda url, referer=None: probed.append(url) or 100,
+    )
+
+    plan = tiktok_instagram_utils.resolve_photo_post_handoff(
+        [IMAGES[0], "http://telegram-bot-api:8081/file/image.jpg"], AUDIO, REFERER
+    )
+
+    assert plan is None
+    assert probed == []

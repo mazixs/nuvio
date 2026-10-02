@@ -150,7 +150,9 @@ def test_partial_retry_skips_url_and_sends_only_remaining_files(monkeypatch, tmp
     resolver = Mock(side_effect=AssertionError("URL уже частично отправлен"))
     monkeypatch.setattr(sources, "resolve_photo_post_handoff", resolver)
     monkeypatch.setattr(
-        sources, "download_tiktok_photo_post_assets", lambda *_args: {"images": paths}
+        sources,
+        "download_tiktok_photo_post_assets",
+        lambda *_args: {"items": [{"kind": "photo", "path": path} for path in paths]},
     )
 
     async def blocking(func, *args, **_kwargs):
