@@ -36,7 +36,12 @@ from utils.media_processor import (
 from utils.fast_path import FastPathUnavailable
 from utils.instagram_fast_path import InstagramFastMedia, parse_instagram_fast_media
 from utils.tiktok_fast_path import FastMedia, parse_fast_media
-from utils.url_delivery import PhotoPostHandoff, UrlHandoff, plan_url_handoff
+from utils.url_delivery import (
+    PhotoPostHandoff,
+    UrlHandoff,
+    is_handoff_url,
+    plan_url_handoff,
+)
 from config import (
     INSTAGRAM_COOKIES_PATH,
     INSTAGRAM_FAST_PATH,
@@ -934,12 +939,10 @@ def resolve_photo_post_handoff(
     весь замысел. Звук без картинок или картинки без звука — тоже не тот пост,
     который ожидает пользователь.
     """
-    if not image_urls:
+    targets = [*image_urls, audio_url] if audio_url else list(image_urls)
+    # Ссылку вне allowlist не замеряем вовсе: запрос ушел бы на чужой адрес.
+    if not image_urls or not all(is_handoff_url(target) for target in targets):
         return None
-
-    targets = list(image_urls)
-    if audio_url:
-        targets.append(audio_url)
 
     with ThreadPoolExecutor(
         max_workers=min(PHOTO_POST_PROBE_WORKERS, len(targets))
@@ -1168,34 +1171,59 @@ def _build_tiktok_photo_info(url: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _collect_tiktok_photo_assets(
-    url: str,
+def _photo_title_seed(info: dict[str, Any], fallback: str) -> str:
+    return _normalize_filename_component(str(info.get("title") or fallback), fallback)
+
+
+def _download_photo_images(
+    image_urls: Sequence[str],
     session_id: str,
-    cached_info: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], list[Path], Path | None]:
-    info = cached_info if _is_tiktok_photo_post_info(cached_info) else None
-    if info is None:
-        info = _build_tiktok_photo_info(url, _fetch_tiktok_photo_post_data(url))
+    title_seed: str,
+    referer: str | None = None,
+) -> list[Path]:
+    return [
+        _download_remote_file(
+            image_url,
+            get_temp_file_path(
+                session_id,
+                f"{title_seed}_{index:02d}{_guess_extension(image_url, '.jpg')}",
+            ),
+            referer=referer,
+        )
+        for index, image_url in enumerate(image_urls, start=1)
+    ]
 
-    title_seed = _normalize_filename_component(
-        str(info.get("title") or "tiktok_photo_post"), "tiktok_photo_post"
+
+def _download_photo_audio(
+    audio_url: str | None,
+    session_id: str,
+    title_seed: str,
+    default_ext: str,
+    referer: str | None = None,
+) -> Path | None:
+    if not audio_url:
+        return None
+    audio_path = get_temp_file_path(
+        session_id, f"{title_seed}_audio{_guess_extension(str(audio_url), default_ext)}"
     )
-    image_paths: list[Path] = []
-    for index, image_url in enumerate(info.get("_nuvio_tiktok_images") or [], start=1):
-        image_path = get_temp_file_path(
-            session_id, f"{title_seed}_{index:02d}{_guess_extension(image_url, '.jpg')}"
-        )
-        image_paths.append(_download_remote_file(image_url, image_path))
+    return _download_remote_file(str(audio_url), audio_path, referer=referer)
 
-    audio_url = info.get("_nuvio_tiktok_audio_url")
-    audio_path: Path | None = None
-    if audio_url:
-        audio_path = get_temp_file_path(
-            session_id, f"{title_seed}_audio{_guess_extension(str(audio_url), '.mp3')}"
-        )
-        audio_path = _download_remote_file(str(audio_url), audio_path)
 
-    return info, image_paths, audio_path
+def _tiktok_photo_info(url: str, cached_info: dict[str, Any] | None) -> dict[str, Any]:
+    if _is_tiktok_photo_post_info(cached_info):
+        return cached_info
+    return _build_tiktok_photo_info(url, _fetch_tiktok_photo_post_data(url))
+
+
+def _download_tiktok_photo_audio_file(
+    info: dict[str, Any], session_id: str
+) -> Path | None:
+    return _download_photo_audio(
+        info.get("_nuvio_tiktok_audio_url"),
+        session_id,
+        _photo_title_seed(info, "tiktok_photo_post"),
+        ".mp3",
+    )
 
 
 def _extract_instagram_shortcode(url: str) -> str | None:
@@ -1767,42 +1795,37 @@ def _enrich_instagram_carousel_info(url: str, info: dict[str, Any]) -> dict[str,
     return carousel_info
 
 
-def _collect_instagram_photo_assets(
-    url: str,
-    session_id: str,
-    cached_info: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], list[Path], Path | None]:
-    info = cached_info if _is_instagram_photo_post_info(cached_info) else None
-    if info is None:
-        info = _build_instagram_photo_info(url, _fetch_instagram_photo_post_media(url))
+def _instagram_photo_info(
+    url: str, cached_info: dict[str, Any] | None
+) -> dict[str, Any]:
+    if _is_instagram_photo_post_info(cached_info):
+        return cached_info
+    return _build_instagram_photo_info(url, _fetch_instagram_photo_post_media(url))
 
-    title_seed = _normalize_filename_component(
-        str(info.get("title") or "instagram_photo_post"), "instagram_photo_post"
+
+def _download_instagram_photo_audio_file(
+    info: dict[str, Any], session_id: str, title_seed: str
+) -> Path | None:
+    return _download_photo_audio(
+        info.get("_nuvio_instagram_audio_url"),
+        session_id,
+        title_seed,
+        ".m4a",
+        referer="https://www.instagram.com/",
     )
-    image_paths: list[Path] = []
-    for index, image_url in enumerate(
-        info.get("_nuvio_instagram_images") or [], start=1
-    ):
-        image_path = get_temp_file_path(
-            session_id, f"{title_seed}_{index:02d}{_guess_extension(image_url, '.jpg')}"
-        )
-        image_paths.append(
-            _download_remote_file(
-                image_url, image_path, referer="https://www.instagram.com/"
-            )
-        )
 
-    audio_url = info.get("_nuvio_instagram_audio_url")
-    audio_path: Path | None = None
-    if audio_url:
-        audio_path = get_temp_file_path(
-            session_id, f"{title_seed}_audio{_guess_extension(str(audio_url), '.m4a')}"
-        )
-        audio_path = _download_remote_file(
-            str(audio_url), audio_path, referer="https://www.instagram.com/"
-        )
 
-    return info, image_paths, audio_path
+def _collect_instagram_photo_assets(
+    session_id: str, info: dict[str, Any]
+) -> tuple[list[Path], Path | None]:
+    title_seed = _photo_title_seed(info, "instagram_photo_post")
+    image_paths = _download_photo_images(
+        info.get("_nuvio_instagram_images") or [],
+        session_id,
+        title_seed,
+        referer="https://www.instagram.com/",
+    )
+    return image_paths, _download_instagram_photo_audio_file(info, session_id, title_seed)
 
 
 def _collect_instagram_mixed_carousel_assets(
@@ -1820,11 +1843,8 @@ def _collect_instagram_mixed_carousel_assets(
     ):
         raise ValueError("Не удалось подтвердить полный состав карусели Instagram.")
 
-    title_seed = _normalize_filename_component(
-        str(info.get("title") or "instagram_carousel"), "instagram_carousel"
-    )
+    title_seed = _photo_title_seed(info, "instagram_carousel")
     downloaded: list[dict[str, Any]] = []
-    image_paths: list[Path] = []
     for index, item in enumerate(items, start=1):
         kind = item["kind"]
         if kind not in {"photo", "video"}:
@@ -1845,20 +1865,9 @@ def _collect_instagram_mixed_carousel_assets(
             media_path = _ensure_ios_compatible_video(
                 media_path, session_id, "Instagram carousel"
             )
-        else:
-            image_paths.append(media_path)
         downloaded.append({"kind": kind, "path": media_path})
 
-    audio_url = info.get("_nuvio_instagram_audio_url")
-    audio_path = None
-    if audio_url:
-        audio_path = get_temp_file_path(
-            session_id,
-            f"{title_seed}_audio{_guess_extension(str(audio_url), '.m4a')}",
-        )
-        audio_path = _download_remote_file(
-            str(audio_url), audio_path, referer="https://www.instagram.com/"
-        )
+    audio_path = _download_instagram_photo_audio_file(info, session_id, title_seed)
     info["_nuvio_instagram_images"] = [
         item.get("url")
         for item in items
@@ -1867,21 +1876,31 @@ def _collect_instagram_mixed_carousel_assets(
     return info, downloaded, audio_path
 
 
+def _photo_assets(
+    info: dict[str, Any], image_paths: list[Path], audio_path: Path | None
+) -> dict[str, Any]:
+    return {
+        "info": info,
+        "items": [{"kind": "photo", "path": path} for path in image_paths],
+        "audio": audio_path,
+    }
+
+
 def download_tiktok_photo_post_assets(
     url: str,
     session_id: str,
     cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Скачивает изображения и звук TikTok-фото-поста для поэтапной отправки."""
-    info, image_paths, audio_path = _collect_tiktok_photo_assets(
-        url, session_id, cached_info
+    info = _tiktok_photo_info(url, cached_info)
+    image_paths = _download_photo_images(
+        info.get("_nuvio_tiktok_images") or [],
+        session_id,
+        _photo_title_seed(info, "tiktok_photo_post"),
     )
-    return {
-        "info": info,
-        "images": image_paths,
-        "items": [{"kind": "photo", "path": path} for path in image_paths],
-        "audio": audio_path,
-    }
+    return _photo_assets(
+        info, image_paths, _download_tiktok_photo_audio_file(info, session_id)
+    )
 
 
 def download_tiktok_photo_audio(
@@ -1891,10 +1910,9 @@ def download_tiktok_photo_audio(
     force_local: bool = False,
     cached_info: dict[str, Any] | None = None,
 ) -> Path | str:
-    """Скачивает аудиодорожку TikTok-фото-поста."""
-    info, _image_paths, audio_path = _collect_tiktok_photo_assets(
-        url, session_id, cached_info
-    )
+    """Скачивает аудиодорожку TikTok-фото-поста без его изображений."""
+    info = _tiktok_photo_info(url, cached_info)
+    audio_path = _download_tiktok_photo_audio_file(info, session_id)
     if output_dir is not None:
         logger.debug(
             "output_dir=%s передан для аудио фото-поста, используется временная директория сессии",
@@ -1913,29 +1931,15 @@ def download_instagram_photo_post_assets(
     cached_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Скачивает изображения и звук Instagram фото-поста для поэтапной отправки."""
-    if not _is_instagram_photo_post_info(cached_info):
-        cached_info = _build_instagram_photo_info(url, _fetch_instagram_photo_post_media(url))
-    if cached_info.get("_nuvio_instagram_carousel_incomplete"):
+    info = _instagram_photo_info(url, cached_info)
+    if info.get("_nuvio_instagram_carousel_incomplete"):
         raise ValueError("Не удалось подтвердить полный состав карусели Instagram.")
-    if cached_info.get("_nuvio_instagram_mixed_post"):
+    if info.get("_nuvio_instagram_mixed_post"):
         info, items, audio_path = _collect_instagram_mixed_carousel_assets(
-            url, session_id, cached_info
+            url, session_id, info
         )
-        return {
-            "info": info,
-            "items": items,
-            "images": [item["path"] for item in items if item["kind"] == "photo"],
-            "audio": audio_path,
-        }
-    info, image_paths, audio_path = _collect_instagram_photo_assets(
-        url, session_id, cached_info
-    )
-    return {
-        "info": info,
-        "images": image_paths,
-        "items": [{"kind": "photo", "path": path} for path in image_paths],
-        "audio": audio_path,
-    }
+        return {"info": info, "items": items, "audio": audio_path}
+    return _photo_assets(info, *_collect_instagram_photo_assets(session_id, info))
 
 
 def download_instagram_photo_audio(
@@ -1945,9 +1949,10 @@ def download_instagram_photo_audio(
     force_local: bool = False,
     cached_info: dict[str, Any] | None = None,
 ) -> Path | str:
-    """Скачивает аудиодорожку Instagram фото-поста."""
-    info, _image_paths, audio_path = _collect_instagram_photo_assets(
-        url, session_id, cached_info
+    """Скачивает аудиодорожку Instagram фото-поста без его изображений."""
+    info = _instagram_photo_info(url, cached_info)
+    audio_path = _download_instagram_photo_audio_file(
+        info, session_id, _photo_title_seed(info, "instagram_photo_post")
     )
     if output_dir is not None:
         logger.debug(

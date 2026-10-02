@@ -40,6 +40,7 @@ __all__ = [
     "find_format_geometry",
     "find_format_url",
     "handoff_limit_for",
+    "is_handoff_url",
     "plan_url_handoff",
 ]
 
@@ -102,6 +103,11 @@ def handoff_limit_for(kind: HandoffKind) -> int:
     return MAX_PHOTO_HANDOFF_BYTES if kind == "photo" else MAX_HANDOFF_BYTES
 
 
+def is_handoff_url(url: str | None) -> bool:
+    """Проверяет, что ссылку разрешено передать Telegram."""
+    return bool(url) and is_allowed_media_url(url, ALLOWED_HANDOFF_DOMAINS)
+
+
 def plan_url_handoff(
     url: str | None,
     kind: HandoffKind,
@@ -120,7 +126,7 @@ def plan_url_handoff(
     """
     if not size or size <= 0 or size > handoff_limit_for(kind):
         return None
-    if not url or not is_allowed_media_url(url, ALLOWED_HANDOFF_DOMAINS):
+    if not is_handoff_url(url):
         return None
     geometry = geometry or {}
     return UrlHandoff(

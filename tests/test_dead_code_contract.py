@@ -75,6 +75,15 @@ def test_obsolete_cache_helpers_are_removed():
     assert not hasattr(CachedVideo, "to_dict")
 
 
+def test_unused_photo_post_helpers_are_removed():
+    """Документный откат фото идет через общий поэлементный путь альбома."""
+    assert not hasattr(telegram_utils, "_send_photo_path_as_document")
+
+    source = (ROOT / "utils" / "telegram_utils.py").read_text(encoding="utf-8")
+    for gone in ('"_description_sent"', '"_description_caption"'):
+        assert gone not in source, gone
+
+
 def test_unused_pytest_network_scaffolding_is_removed():
     conftest = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
     pytest_ini = (ROOT / "pytest.ini").read_text(encoding="utf-8")
