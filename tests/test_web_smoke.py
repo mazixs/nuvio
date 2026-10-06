@@ -28,7 +28,8 @@ def test_web_lifespan_closes_analytics_connection(tmp_path, monkeypatch):
 
     async def scenario():
         async with web_app.lifespan(web_app.app):
-            assert hasattr(analytics_db._local, "conn")
+            assert (tmp_path / "analytics.db").exists()
+            assert not hasattr(analytics_db._local, "conn")
 
         assert not hasattr(analytics_db._local, "conn")
 

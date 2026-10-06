@@ -18,6 +18,7 @@ from utils.cookie_workfile import working_cookie_file
 from utils.cancellation import CancelledByUser, is_cancelled
 from utils.download_report import record_delivered_format
 from utils.logger import setup_logger
+from utils.media_errors import DurationLimitError
 from utils.temp_file_manager import get_temp_file_path
 from utils.media_processor import ensure_ios_compatible_video
 from utils.ytdlp_runtime import extract_cli_output_path, run_yt_dlp_cli
@@ -105,9 +106,7 @@ def get_video_info(url: str, session_id: str | None = None) -> dict[str, Any]:
             duration = info.get("duration")
             if duration and duration > MAX_VIDEO_DURATION:
                 logger.warning(f"Видео слишком длинное: {duration} секунд")
-                raise Exception(
-                    f"Видео слишком длинное. Максимальная длительность: {MAX_VIDEO_DURATION // 60} минут."
-                )
+                raise DurationLimitError(duration, MAX_VIDEO_DURATION)
             logger.info("Информация о видео успешно получена.")
             return info
 
@@ -131,6 +130,8 @@ def get_video_info(url: str, session_id: str | None = None) -> dict[str, Any]:
 
     try:
         return _get_info(True)
+    except DurationLimitError:
+        raise
     except Exception as e:
         logger.error(
             f"Ошибка при получении информации о видео даже с cookies: {e}",
@@ -338,7 +339,7 @@ def _build_cli_download_command(
         str(DEFAULT_YTDLP_NETWORK_OPTS["socket_timeout"]),
         "--concurrent-fragments",
         str(DEFAULT_YTDLP_NETWORK_OPTS["concurrent_fragment_downloads"]),
-        "--skip-unavailable-fragments",
+        "--abort-on-unavailable-fragments",
         "--no-continue",
         "--print",
         "after_move:filepath",
@@ -991,8 +992,7 @@ def download_subtitles(
             subtitle_file = base_filename.with_suffix(f".{track}.{requested_format}")
 
             if not subtitle_file.exists():
-                logger.error(f"Файл субтитров не найден: {subtitle_file}")
-                return None
+                raise FileNotFoundError("Скачанный файл субтитров не найден")
 
             if subtitle_format == "txt":
                 subtitle_file = _convert_subtitles_to_text(subtitle_file)

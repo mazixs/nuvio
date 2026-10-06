@@ -38,25 +38,14 @@ def test_adr_001_records_fast_path_supersession():
 
 
 @pytest.mark.unit
-def test_fast_path_flag_documents_cache_reset():
-    """Смена флага не влияет на уже закэшированные ссылки — это надо сказать.
-
-    Кэш file_id читается до скачивания и живёт 90 дней, поэтому после
-    TIKTOK_FAST_PATH=false прежние URL продолжат отдавать 576×1024.
-    """
-    documents = {
-        ".env.example": (ROOT / ".env.example").read_text(encoding="utf-8"),
-        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
-        "AGENTS.md": (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
-    }
-
-    for name, text in documents.items():
+def test_fast_path_flag_documents_cache_recipe():
+    """Флаг входит в рецепт; пригодные ссылки без явной очистки не истекают."""
+    for name in (".env.example", "README.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
         assert "TIKTOK_FAST_PATH" in text, name
-        assert "cache" in text.lower(), name
-        assert "/cleanup_cache" in text, f"{name}: нет упоминания команды кэша"
-        # /cleanup_cache снимает только просроченные записи, поэтому честный
-        # способ немедленного откатa — удаление файла кэша.
-        assert "telegram_cache.db" in text, f"{name}: нет способа откатить кэш"
+        assert "recipe" in text.lower(), name
+        assert "WebUI" in text and "/cleanup_cache" in text, name
+        assert "no expiration" in text, name
 
 
 @pytest.mark.unit
@@ -88,7 +77,8 @@ def test_cleanup_cache_command_only_removes_expired_records():
     assert hasattr(cache_commands, "cleanup_cache_command")
 
     source = inspect.getsource(cache_commands.cleanup_cache_command)
-    assert "cleanup_expired(ttl_days=90)" in source
+    assert "run_db(cleanup_cache, telegram_cache)" in source
+    assert "get_cache_policy" in source
 
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert 'CommandHandler("cleanup_cache", cleanup_cache_command)' in main_source

@@ -61,7 +61,7 @@ The bot limits repeated requests: four requests in five seconds trigger a ten-se
 
 ### SQLite state
 
-- `utils/video_cache.py` stores Telegram file IDs in `telegram_cache.db`. The cache uses WAL and a 90-day TTL for quick repeated delivery.
+- `utils/video_cache.py` stores Telegram file IDs in `telegram_cache.db`. The cache uses WAL and retains valid references by default. Optional idle-age cleanup is configured in the WebUI; actual media kinds and ordered publication manifests are bot/recipe scoped.
 - `utils/analytics_db.py` stores users, events, CSI responses, and settings in `analytics.db`. It uses WAL, manual read/write transactions, and `BEGIN IMMEDIATE` for writes.
 - The `settings` table is shared by the bot and WebUI: the WebUI changes the CSI interval, and the bot reads it for survey dispatch.
 

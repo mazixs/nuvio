@@ -111,7 +111,7 @@ grep "ERROR_CODE" logs/bot.log
 
 ### Cache uses too much space
 
-- `/cleanup_cache` removes entries older than 90 days.
+- `/cleanup_cache` follows the persisted WebUI policy. With cleanup disabled, it deletes nothing. Enable cleanup and select an idle period in Settings if needed.
 - `VACUUM` runs automatically once a week.
 - `/cache_stats` shows current cache statistics.
 
@@ -119,7 +119,7 @@ grep "ERROR_CODE" logs/bot.log
 
 - The cache stores Telegram `file_id` values in SQLite and survives bot restarts.
 - Check that `telegram_cache.db` has not been removed.
-- A damaged database is recreated on the next start, but its cache entries are lost.
+- A cache outage becomes a cache miss; initialization failure disables caching for that process. Preserve the database for diagnosis and restore a verified backup if needed. The bot does not delete a damaged database automatically.
 
 ## Logs
 

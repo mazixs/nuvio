@@ -91,6 +91,9 @@ def cancellation_hook(session_id: str) -> Callable[[dict[str, Any]], None]:
     """Возвращает progress hook для yt-dlp, прерывающий отменённую загрузку."""
 
     def _hook(_status: dict[str, Any]) -> None:
+        from utils.work_budget import check
+
+        check()
         if is_cancelled(session_id):
             raise CancelledByUser(f"загрузка сессии {session_id} отменена")
 

@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import os
 import subprocess
+import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -26,7 +27,7 @@ def _status_path() -> Path:
 @lru_cache(maxsize=1)
 def runtime_components() -> dict[str, str]:
     """Проверяет локальные компоненты один раз за жизнь процесса."""
-    versions = {"yt_dlp_loaded": yt_dlp.version.__version__}
+    versions = {"yt_dlp_loaded": yt_dlp.version.__version__, "sqlite": sqlite3.sqlite_version}
     for package, key in (("yt-dlp", "yt_dlp_installed"), ("yt-dlp-ejs", "ejs")):
         try:
             versions[key] = importlib.metadata.version(package)
@@ -81,6 +82,7 @@ def format_runtime_status() -> str:
             f"- Образ: {parts['image']}",
             f"- yt-dlp: {parts['yt_dlp_loaded']} (пакет: {parts['yt_dlp_installed']})",
             f"- EJS: {parts['ejs']}; Deno: {parts['deno']}",
+            f"- SQLite: {parts['sqlite']}",
             f"- YouTube: {canary.get('state', 'неизвестно')}",
             f"- Проверено: {canary.get('updated_at', 'еще не проверялось')}",
             f"- Уведомление: {canary.get('notification', 'не требовалось')}",

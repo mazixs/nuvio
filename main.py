@@ -18,6 +18,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     ContextTypes,
+    TypeHandler,
 )
 
 # Load file-based environment variables from canonical to legacy paths.
@@ -41,6 +42,7 @@ from config import (  # noqa: E402
     validate_config,
 )
 from utils.canary import youtube_canary_job  # noqa: E402
+from utils.db_worker import run_db
 from utils.logger import setup_logger  # noqa: E402
 from utils.temp_file_manager import cleanup_stale_temp_files  # noqa: E402
 from utils.cache_commands import (
@@ -62,6 +64,10 @@ from utils.analytics_db import (  # noqa: E402
     get_csi_interval_days,
     get_users_for_csi,
     prune_old_event_urls,
+)
+from utils.user_access import guard_user_access  # noqa: E402
+from utils.feedback import (  # noqa: E402
+    feedback_command, cancel_feedback_command, feedback_callback, feedback_text,
 )
 
 # Настройка логирования
@@ -151,11 +157,23 @@ def _polling_error_callback(exc: telegram.error.TelegramError) -> None:
 
 
 async def scheduled_cache_cleanup(context: ContextTypes.DEFAULT_TYPE):
-    """Периодическая очистка кеша (запускается раз в сутки)."""
+    """Применяет только явно включенную политику кеша."""
+    from utils.cache_policy import cleanup_cache
+    from utils.db_worker import run_db
+
     try:
-        deleted = await asyncio.to_thread(telegram_cache.cleanup_expired, ttl_days=90)
-        if deleted > 0:
-            logger.info(f"🧹 Автоматическая очистка кэша: удалено {deleted} записей")
+        deleted = await run_db(cleanup_cache, telegram_cache)
+        logger.info("Очистка кеша по политике WebUI: удалено %s", deleted)
+    except Exception:
+        logger.exception("Не удалось выполнить настроенную очистку кеша")
+
+
+async def scheduled_housekeeping(context: ContextTypes.DEFAULT_TYPE):
+    """Обслуживает временные файлы независимо от хранения file_id."""
+    try:
+        from utils.delivery_journal import journal
+
+        await run_db(journal.prune_known)
         removed, failed = await asyncio.to_thread(cleanup_old_workfiles)
         logger.info("Очистка старых копий cookies: удалено %s, ошибок %s", removed, failed)
         from utils.telegram_utils import active_download_sessions
@@ -164,7 +182,7 @@ async def scheduled_cache_cleanup(context: ContextTypes.DEFAULT_TYPE):
             cleanup_stale_temp_files, active_sessions=active_download_sessions()
         )
         logger.info("Очистка брошенных медиа: удалено %s, ошибок %s", removed, failed)
-        removed_urls, backup = await asyncio.to_thread(prune_old_event_urls)
+        removed_urls, backup = await run_db(prune_old_event_urls)
         if removed_urls:
             logger.info(
                 "Старые URL аналитики удалены: %s; проверенная копия: %s",
@@ -180,7 +198,7 @@ async def scheduled_cache_vacuum(context: ContextTypes.DEFAULT_TYPE):
     try:
         db_path = telegram_cache.db_path
         before = db_path.stat().st_size if db_path.exists() else 0
-        await asyncio.to_thread(telegram_cache.vacuum)
+        await run_db(telegram_cache.vacuum)
         after = db_path.stat().st_size if db_path.exists() else 0
         logger.info(
             "🧽 VACUUM кэша завершён: размер %.2f МБ → %.2f МБ",
@@ -201,8 +219,8 @@ async def scheduled_csi_dispatch(context: ContextTypes.DEFAULT_TYPE):
     try:
         from utils.telegram_utils import send_csi_request
 
-        interval_days = await asyncio.to_thread(get_csi_interval_days)
-        user_ids = await asyncio.to_thread(
+        interval_days = await run_db(get_csi_interval_days)
+        user_ids = await run_db(
             get_users_for_csi, days_since_last=interval_days, min_active_days=1
         )
         for user_id in user_ids:
@@ -281,6 +299,12 @@ def _build_application() -> Application:
 
     application.add_error_handler(_global_error_handler)
 
+    application.add_handler(TypeHandler(telegram.Update, guard_user_access, block=True), group=-100)
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, feedback_text, block=True), group=-1)
+    application.add_handler(CommandHandler("feedback", feedback_command))
+    application.add_handler(CommandHandler("cancel", cancel_feedback_command))
+    application.add_handler(CallbackQueryHandler(feedback_callback, pattern=r"^feedback\|"))
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
@@ -305,6 +329,7 @@ def _build_application() -> Application:
         application.job_queue.run_repeating(
             scheduled_cache_cleanup, interval=86400, first=60
         )
+        application.job_queue.run_repeating(scheduled_housekeeping, interval=86400, first=120)
         application.job_queue.run_repeating(
             scheduled_cache_vacuum, interval=604800, first=600
         )
@@ -372,6 +397,12 @@ async def run_bot() -> None:
     application = _build_application()
     try:
         await application.initialize()
+        from utils.db_worker import run_db
+        from utils.delivery_journal import journal
+
+        recovered = await run_db(journal.recover)
+        if recovered:
+            logger.warning("Восстановлены неизвестные исходы отправок: %s. Автоповтор выключен.", recovered)
         await application.start()
         if not application.updater:
             raise RuntimeError("Updater не инициализирован")
@@ -382,8 +413,11 @@ async def run_bot() -> None:
             error_callback=_polling_error_callback,
         )
 
-        cache_stats = telegram_cache.get_stats()
-        logger.info(f"💾 В кэше {cache_stats['total_videos']} видео")
+        from utils.cache_access import cache_call
+
+        cache_stats = await cache_call(telegram_cache.get_stats)
+        if cache_stats:
+            logger.info("В прежнем кеше %s записей", cache_stats["total_videos"])
         logger.info("✅ Бот запущен и готов к работе!")
         logger.info("⚡ Система быстрой доставки активна")
 
@@ -418,6 +452,9 @@ def main() -> None:
         exc.add_note("main.py: глобальный обработчик ошибок")
         logger.error(f"Неожиданная ошибка: {exc}", exc_info=True)
     finally:
+        from utils.db_worker import shutdown_db_worker
+
+        shutdown_db_worker()
         logger.info("Завершение процесса бота")
 
 

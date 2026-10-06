@@ -49,7 +49,7 @@ def test_public_classifier_agrees_with_downloader():
 
 
 def test_execute_with_backoff_retries_media_403(monkeypatch):
-    monkeypatch.setattr("utils.ytdlp_common.time.sleep", lambda _: None)
+    monkeypatch.setattr("utils.ytdlp_common.work_budget.pause", lambda _: None)
     attempts: list[int] = []
 
     def flaky():
@@ -63,7 +63,7 @@ def test_execute_with_backoff_retries_media_403(monkeypatch):
 
 
 def test_execute_with_backoff_keeps_access_restriction_fatal(monkeypatch):
-    monkeypatch.setattr("utils.ytdlp_common.time.sleep", lambda _: None)
+    monkeypatch.setattr("utils.ytdlp_common.work_budget.pause", lambda _: None)
     attempts: list[int] = []
 
     def restricted():
@@ -85,7 +85,7 @@ def test_execute_with_backoff_keeps_access_restriction_fatal(monkeypatch):
 def test_youtube_access_failures_are_expected_without_retry_or_traceback(
     monkeypatch, caplog, error, category
 ):
-    monkeypatch.setattr("utils.ytdlp_common.time.sleep", lambda _: None)
+    monkeypatch.setattr("utils.ytdlp_common.work_budget.pause", lambda _: None)
     attempts = []
 
     def rejected():

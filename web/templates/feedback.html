@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ t('Feedback') }}{% endblock %}
+{% block nav_feedback %}active{% endblock %}
+{% block content %}
+<div class="page-header">
+    <div><h1>{{ t('Feedback') }}</h1><p class="subtitle">{{ t('User reports and suggestions sent through the bot') }}</p></div>
+</div>
+<nav class="feedback-filters" aria-label="{{ t('Feedback status') }}">
+    {% for value, label in [('open', 'Open'), ('closed', 'Closed'), ('all', 'All')] %}
+    <a class="btn {% if status == value %}btn-primary{% endif %}" href="/feedback?status={{ value }}" {% if status == value %}aria-current="page"{% endif %}>{{ t(label) }}</a>
+    {% endfor %}
+</nav>
+<section aria-label="{{ t('Feedback') }}">
+{% for entry in feedback %}
+    <article class="feedback-entry" aria-labelledby="feedback-{{ entry.id }}">
+        <div class="feedback-header">
+            <h2 id="feedback-{{ entry.id }}">#{{ entry.id }} <a href="/users/{{ entry.user_id }}">{{ entry.username or entry.first_name or entry.user_id }}</a></h2>
+            <span class="subtitle">{{ entry.created_at[:19] }} UTC</span>
+        </div>
+        <p class="feedback-meta"><span class="badge">{{ t('Open') if entry.status == 'open' else t('Closed') }}</span>
+            {% if entry.is_blocked %}<span class="badge badge-danger">{{ t('Blocked') }}</span>{% endif %}
+            {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
+        </p>
+        {% if entry.source_url %}<p class="feedback-source">{{ entry.source_url }}</p>{% endif %}
+        <p class="feedback-text">{{ entry.text }}</p>
+        <div class="feedback-actions">
+            <a href="/users/{{ entry.user_id }}" class="btn">{{ t('User profile and access') }}</a>
+            <form action="/feedback/{{ entry.id }}/status" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="status" value="{{ 'closed' if entry.status == 'open' else 'open' }}">
+                <button type="submit" class="btn">{{ t('Mark as handled') if entry.status == 'open' else t('Reopen') }}</button>
+            </form>
+        </div>
+    </article>
+{% else %}
+    <p class="empty">{{ t('No feedback in this view') }}</p>
+{% endfor %}
+</section>
+<div class="pagination">
+    {% if page > 1 %}<a class="btn" href="/feedback?status={{ status }}&amp;page={{ page - 1 }}">{{ t('Previous') }}</a>{% endif %}
+    <span class="page-info">{{ t('Page') }} {{ page }}</span>
+    {% if has_next %}<a class="btn" href="/feedback?status={{ status }}&amp;page={{ page + 1 }}">{{ t('Next') }}</a>{% endif %}
+</div>
+{% endblock %}

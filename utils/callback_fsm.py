@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import re
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any
@@ -31,8 +32,14 @@ class CallbackEvent:
                     session_token=token,
                     value=value,
                 )
-            case ["csi", rating] if rating.isdigit() and 0 <= int(rating) <= 10:
+            case ["csi", token, rating] if re.fullmatch(r"[a-f0-9]{12}", token) and re.fullmatch(r"[0-9]{1,2}", rating) and 0 <= int(rating) <= 10:
+                return cls(scope="csi", action="rate", session_token=token, value=rating)
+            case ["csi", rating] if re.fullmatch(r"[0-9]{1,2}", rating) and 0 <= int(rating) <= 10:
                 return cls(scope="csi", action="rate", value=rating)
+            case ["feedback", "open", value] if value == "general" or re.fullmatch(r"(?:YT|TT|IG|RU|VK|TG|FILE|BOT)-[A-Z_]{1,8}-[A-F0-9]{6}", value):
+                return cls(scope="feedback", action="open", value=value)
+            case ["feedback", "cancel", token] if re.fullmatch(r"[a-f0-9]{12}", token):
+                return cls(scope="feedback", action="cancel", value=token)
             case _:
                 return None
 

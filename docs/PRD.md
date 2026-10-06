@@ -142,12 +142,12 @@ A direct run through the cloud Bot API has a 50 MB limit.
 
 ```text
 Telegram CDN: immediate repeat delivery by file_id
-  -> SQLite file ID cache: key (URL, format_id), 90-day TTL
+  -> SQLite file ID cache: bot/source/recipe keys, actual kinds and ordered manifests
   -> On a cache miss: yt-dlp download, FFmpeg if needed, Telegram upload
   -> Save the returned file_id; delete temporary media
 ```
 
-The cache stores the `file_id`, platform, size, duration, and timestamps. Expired entries are cleaned daily.
+The cache stores Telegram references, dimensions, timestamps, source aliases, and complete ordered publication manifests. Valid entries have no expiration by default. Optional cleanup uses days since successful reuse and is managed in the WebUI; temporary media cleanup remains independent.
 
 ### 4.4 Processing flows
 

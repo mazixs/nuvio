@@ -2,7 +2,7 @@
 Кэширование file_id для мгновенной доставки видео.
 
 Telegram сохраняет загруженные файлы и присваивает им file_id.
-При повторной отправке того же file_id - доставка мгновенна (0 секунд).
+При повторной отправке file_id скачивание и загрузка файла не нужны.
 """
 
 import sqlite3
@@ -49,16 +49,18 @@ class CachedVideo:
     duration: int | None = None
     title: str | None = None
 
-    def is_valid(self, cache_ttl_days: int = 90) -> bool:
+    def is_valid(self, cache_ttl_days: int | None = None) -> bool:
         """
         Проверяет, не истек ли кэш.
 
         Args:
-            cache_ttl_days: TTL кэша в днях (по умолчанию 90 дней)
+            cache_ttl_days: Явный срок; без него запись не истекает.
 
         Returns:
             True если кэш валиден
         """
+        if cache_ttl_days is None:
+            return True
         age = datetime.now() - self.cached_at
         return age < timedelta(days=cache_ttl_days)
 
@@ -66,12 +68,10 @@ class TelegramVideoCache:
     """
     Кэш file_id для видео.
 
-    Обеспечивает мгновенную доставку для повторных запросов:
-    - 1-й запрос: скачивание + загрузка (5-10 мин)
-    - 2+ запросы: мгновенная отправка (0 сек)
+    Повторная доставка использует сохраненный Telegram file_id.
 
     Использует SQLite в WAL-режиме с оптимизациями для конкурентного доступа:
-    - timeout=30.0 (терпеливое ожидание при блокировке)
+    - timeout=3.0 (ограниченное ожидание при блокировке)
     - synchronous=NORMAL (ускорение записи без потери целостности в WAL)
     - cache_size=-64000 (64 МБ кэш страниц)
     - BEGIN IMMEDIATE для всех транзакций записи (защита от upgrade deadlock)
@@ -92,8 +92,29 @@ class TelegramVideoCache:
             db_path = data_dir / "telegram_cache.db"
 
         self.db_path = db_path
+        self._backup_before_migration()
         self._init_db()
+        from utils.artifact_cache import ArtifactCache
+
+        self.artifacts = ArtifactCache(self.db_path)
         logger.info(f"Telegram video cache инициализирован: {self.db_path}")
+
+    def _backup_before_migration(self):
+        """Копирует согласованный снимок SQLite до изменения прежней схемы."""
+        if not self.db_path.exists():
+            return
+        from contextlib import closing
+        import uuid
+
+        with closing(sqlite3.connect(self.db_path, timeout=3)) as source:
+            indexes = source.execute("PRAGMA index_list(video_cache)").fetchall()
+            old = any(row[2] and [item[2] for item in source.execute(f'PRAGMA index_info("{row[1]}")')] == ["file_unique_id"] for row in indexes)
+            if not old:
+                return
+            backup = self.db_path.with_name(f"{self.db_path.name}.before-artifacts-{uuid.uuid4().hex[:8]}.bak")
+            with closing(sqlite3.connect(backup)) as destination:
+                source.backup(destination)
+            logger.info("Создан согласованный снимок кеша перед миграцией")
 
     def _configure_connection(self, conn: sqlite3.Connection) -> None:
         """Применяет оптимальные PRAGMA к свежему соединению."""
@@ -104,7 +125,7 @@ class TelegramVideoCache:
     @contextmanager
     def _get_connection(self):
         """Context manager для безопасного чтения из БД."""
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn = sqlite3.connect(str(self.db_path), timeout=3.0)
         try:
             self._configure_connection(conn)
             yield conn
@@ -119,7 +140,7 @@ class TelegramVideoCache:
         Использует isolation_level=None и BEGIN IMMEDIATE для защиты
         от upgrade deadlock при конкурентной записи.
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
+        conn = sqlite3.connect(str(self.db_path), timeout=3.0, isolation_level=None)
         started = False
         try:
             self._configure_connection(conn)
@@ -141,7 +162,7 @@ class TelegramVideoCache:
                 CREATE TABLE IF NOT EXISTS video_cache (
                     url TEXT NOT NULL,
                     file_id TEXT NOT NULL,
-                    file_unique_id TEXT NOT NULL UNIQUE,
+                    file_unique_id TEXT NOT NULL,
                     platform TEXT NOT NULL,
                     format_id TEXT NOT NULL,
                     cached_at TEXT NOT NULL,
@@ -151,6 +172,30 @@ class TelegramVideoCache:
                     PRIMARY KEY (url, format_id)
                 )
             """)
+
+            # Один файл может иметь несколько ссылок. REPLACE по UNIQUE терял их.
+            unique_file = any(
+                row[2] and [column[2] for column in conn.execute(f'PRAGMA index_info("{row[1]}")')] == ["file_unique_id"]
+                for row in conn.execute("PRAGMA index_list(video_cache)")
+            )
+            if unique_file:
+                legacy_name = "video_cache_legacy"
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (legacy_name,)).fetchone():
+                    import uuid
+
+                    legacy_name += "_" + uuid.uuid4().hex[:8]
+                conn.execute(f"ALTER TABLE video_cache RENAME TO {legacy_name}")
+                conn.execute("""CREATE TABLE video_cache (
+                    url TEXT NOT NULL, file_id TEXT NOT NULL,
+                    file_unique_id TEXT NOT NULL, platform TEXT NOT NULL,
+                    format_id TEXT NOT NULL, cached_at TEXT NOT NULL,
+                    file_size INTEGER, duration INTEGER, title TEXT,
+                    PRIMARY KEY (url, format_id))""")
+                conn.execute(f"INSERT INTO video_cache SELECT * FROM {legacy_name}")
+                # Копия остается для восстановления и просмотра мигрированных данных.
+                conn.execute("DROP INDEX IF EXISTS idx_file_id")
+                conn.execute("DROP INDEX IF EXISTS idx_platform")
+                conn.execute("DROP INDEX IF EXISTS idx_cached_at")
 
             # Индексы для быстрого поиска
             # Первичный ключ (url, format_id) уже покрывает поиск по url.
@@ -267,8 +312,13 @@ class TelegramVideoCache:
             try:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO video_cache 
+                    INSERT INTO video_cache
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(url, format_id) DO UPDATE SET
+                    file_id=excluded.file_id, file_unique_id=excluded.file_unique_id,
+                    platform=excluded.platform, cached_at=excluded.cached_at,
+                    file_size=excluded.file_size, duration=excluded.duration,
+                    title=excluded.title
                 """,
                     (
                         cached.url,
@@ -413,4 +463,26 @@ class TelegramVideoCache:
 
 
 # Глобальный экземпляр кэша
-telegram_cache = TelegramVideoCache()
+class _UnavailableCache:
+    """Сбой ускоряющего хранилища разрешает обычную подготовку медиа."""
+
+    def __init__(self):
+        self.artifacts = self
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def put(self, *args, **kwargs):
+        return None
+
+    store = touch = invalidate = invalidate_manifest = delete_by_file_id = put
+
+    def get_stats(self):
+        return {"total_videos": 0, "by_platform": {}, "oldest_entry": None, "newest_entry": None}
+
+
+try:
+    telegram_cache = TelegramVideoCache()
+except (sqlite3.Error, OSError):
+    logger.exception("Кеш недоступен при запуске; загрузки продолжатся без него")
+    telegram_cache = _UnavailableCache()

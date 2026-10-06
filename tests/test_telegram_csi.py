@@ -30,6 +30,8 @@ class MockQuery:
         self.answer = AsyncMock()
         self.edit_message_text = AsyncMock()
         self.from_user = MagicMock(id=123)
+        self.message = MagicMock(message_id=77)
+        self.message.chat.id = 123
 
 
 class MockUpdate:
@@ -51,6 +53,7 @@ async def test_send_csi_request_builds_keyboard(monkeypatch):
     """Проверяет что send_csi_request создаёт inline keyboard с оценками 0–10."""
     ctx = MockContext()
     monkeypatch.setattr(telegram_utils, "update_last_csi_sent", lambda uid: None)
+    monkeypatch.setattr(telegram_utils, "create_csi_poll", lambda uid: "a" * 12)
     await send_csi_request(123, ctx)
     assert ctx.bot.send_message.called
     args = ctx.bot.send_message.call_args.kwargs
@@ -58,9 +61,9 @@ async def test_send_csi_request_builds_keyboard(monkeypatch):
     markup = args["reply_markup"]
     buttons = [btn for row in markup.inline_keyboard for btn in row]
     assert len(buttons) == 11
-    assert buttons[0].callback_data == "csi|0"
-    assert buttons[5].callback_data == "csi|5"
-    assert buttons[10].callback_data == "csi|10"
+    assert buttons[0].callback_data == "csi|aaaaaaaaaaaa|0"
+    assert buttons[5].callback_data == "csi|aaaaaaaaaaaa|5"
+    assert buttons[10].callback_data == "csi|aaaaaaaaaaaa|10"
 
 
 @pytest.fixture
@@ -77,12 +80,12 @@ async def test_button_callback_csi_high_rating(mock_csi_deps, monkeypatch):
     """При высокой оценке (≥7) сохраняется rating, feedback state не создаётся."""
     saved = {}
 
-    def mock_save(uid, rating):
+    def mock_save(uid, rating, *_args):
         saved["rating"] = rating
-        return 42
+        return 42, True
 
-    monkeypatch.setattr(telegram_utils, "save_csi_rating", mock_save)
-    update = MockUpdate(query_data="csi|9")
+    monkeypatch.setattr(telegram_utils, "save_csi_vote", mock_save)
+    update = MockUpdate(query_data="csi|aaaaaaaaaaaa|9")
     ctx = MockContext()
     await button_callback(update, ctx)
     assert saved["rating"] == 9
@@ -96,12 +99,12 @@ async def test_button_callback_csi_low_rating(mock_csi_deps, monkeypatch):
     """При низкой оценке (<7) сохраняется rating и запрашивается отзыв."""
     saved = {}
 
-    def mock_save(uid, rating):
+    def mock_save(uid, rating, *_args):
         saved["rating"] = rating
-        return 42
+        return 42, True
 
-    monkeypatch.setattr(telegram_utils, "save_csi_rating", mock_save)
-    update = MockUpdate(query_data="csi|5")
+    monkeypatch.setattr(telegram_utils, "save_csi_vote", mock_save)
+    update = MockUpdate(query_data="csi|aaaaaaaaaaaa|5")
     ctx = MockContext()
     await button_callback(update, ctx)
     assert saved["rating"] == 5

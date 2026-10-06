@@ -46,6 +46,48 @@
 </div>
 
 <!-- Activity Stats -->
+<section class="moderation-section" aria-labelledby="access-heading">
+    <h2 id="access-heading">{{ t('Bot access') }}</h2>
+    {% if saved %}<p class="alert" role="status">{{ t('Access updated. New requests use this setting immediately.') }}</p>{% endif %}
+    {% if is_protected %}
+    <p>{{ t('Administrator accounts cannot be blocked') }}</p>
+    {% elif user.is_blocked %}
+    <p><span class="badge badge-danger">{{ t('Blocked') }}</span> {{ t('New requests, feedback and surveys are disabled.') }}</p>
+    {% if user.block_reason %}<p class="feedback-text">{{ user.block_reason }}</p>{% endif %}
+    <form action="/users/{{ user.user_id }}/access" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="unblock">
+        <button class="btn" type="submit">{{ t('Unblock user') }}</button>
+    </form>
+    {% else %}
+    <p>{{ t('Allowed') }}. {{ t('Blocking keeps the profile and history. A Telegram request already in flight may still finish.') }}</p>
+    <form action="/users/{{ user.user_id }}/access" method="post" class="moderation-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="block">
+        <div class="form-group">
+            <label for="block-reason">{{ t('Internal reason (optional)') }}</label>
+            <textarea id="block-reason" name="reason" maxlength="500" rows="2" aria-describedby="block-reason-hint"></textarea>
+            <p class="subtitle" id="block-reason-hint">{{ t('Only administrators see this reason.') }}</p>
+        </div>
+        <button class="btn btn-danger" type="submit">{{ t('Block user') }}</button>
+    </form>
+    {% endif %}
+</section>
+
+{% if feedback %}
+<section class="moderation-section" aria-labelledby="user-feedback-heading">
+    <h2 id="user-feedback-heading">{{ t('Recent feedback') }}</h2>
+    {% for entry in feedback %}
+    <article class="feedback-entry">
+        <p class="subtitle">#{{ entry.id }} · {{ entry.created_at[:19] }} · {{ t('Open') if entry.status == 'open' else t('Closed') }}</p>
+        {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
+        <p class="feedback-text">{{ entry.text }}</p>
+    </article>
+    {% endfor %}
+    <a href="/feedback" class="btn">{{ t('View all feedback') }}</a>
+</section>
+{% endif %}
+
 <div class="stats-divider">
     <span class="label">{{ t('Activity stats') }}</span>
     <div class="line"></div>

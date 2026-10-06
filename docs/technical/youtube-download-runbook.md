@@ -31,7 +31,7 @@ This matched a broader YouTube/yt-dlp issue: [yt-dlp#17456](https://github.com/y
 ## 2. Three false-negative traps
 
 1. **`--test` changes the request chunk to 10 KB.** That small request always worked during the incident, even though full downloads were broken. Manual probes therefore looked green and led to a diagnosis that had to be withdrawn. Make a full download with `--http-chunk-size 10M`; do not use `--test`.
-2. **The `file_id` cache bypasses YouTube.** Reusing a URL the bot downloaded before tests SQLite and Telegram delivery, not the platform. The log line `Видео доставлено из кэша (key=...)` identifies such a hit. `/cleanup_cache` only removes entries older than 90 days; use an uncached URL.
+2. **The `file_id` cache bypasses YouTube.** Reusing a URL the bot downloaded before tests SQLite and Telegram delivery, not the platform. The log line `Видео доставлено из кэша (key=...)` identifies such a hit. `/cleanup_cache` uses the optional WebUI retention policy and does nothing by default; use an uncached URL or the canary.
 3. **A video shorter than a minute could still download.** Shorts and other short samples gave a false green result. Use a video about ten minutes long.
 
 ---

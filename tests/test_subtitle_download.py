@@ -121,3 +121,16 @@ def test_missing_track_reports_nothing(tmp_path, monkeypatch):
         )
         is None
     )
+
+
+def test_missing_downloaded_file_is_a_technical_failure(tmp_path, monkeypatch):
+    class MissingFile(FakeYDL):
+        def download(self, urls):
+            return None
+
+    monkeypatch.setattr(youtube_utils.yt_dlp, "YoutubeDL", MissingFile)
+    with pytest.raises(FileNotFoundError):
+        youtube_utils.download_subtitles(
+            "https://example.test/video", "missing-subtitle-test", language="en",
+            subtitle_format="srt", output_dir=tmp_path,
+        )

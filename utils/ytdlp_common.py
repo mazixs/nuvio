@@ -2,17 +2,16 @@
 Shared utilities and configuration for yt-dlp downloaders.
 """
 
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 from config import MAX_FILE_SIZE
-from utils import download_report
+from utils import download_report, work_budget
 from utils.cancellation import cancellation_hook
 from utils.logger import setup_logger
-from utils.public_errors import is_media_forbidden_error
+from utils.public_errors import youtube_error_code
 
 logger = setup_logger(__name__)
 
@@ -21,8 +20,8 @@ DEFAULT_YTDLP_NETWORK_OPTS: dict[str, Any] = {
     "socket_timeout": 40,
     "http_chunk_size": 10_485_760,  # 10 MB
     "fragment_retries": 5,
-    "skip_unavailable_fragments": True,
-    "abort_on_unavailable_fragments": False,
+    "skip_unavailable_fragments": False,
+    "abort_on_unavailable_fragments": True,
     "concurrent_fragment_downloads": 4,
     "continuedl": False,
     "noplaylist": True,
@@ -37,6 +36,8 @@ _PROGRESS_LINE_PREFIX = "[download]"
 def is_progress_line(line: str) -> bool:
     """Определяет, что строка вывода — это счётчик прогресса, а не сообщение."""
     text = line.strip()
+    if any(marker in text.lower() for marker in ("skipping fragment", "fragment not found")):
+        return False
     number, separator, rest = text.partition(": ")
     if separator and number.isdigit():
         text = rest.lstrip()
@@ -93,54 +94,10 @@ def output_capture_opts(session_id: str | None = None) -> dict[str, Any]:
     return {"logger": YtdlpOutputLogger(session_id), "no_warnings": False}
 
 
-_NETWORK_TIMEOUT_SIGNATURES = (
-    "Read timed out",
-    "Connection timed out",
-    "Timed out",
-    "Connection reset by peer",
-    "UNEXPECTED_EOF_WHILE_READING",
-    "EOF occurred in violation of protocol",
-    "fragment not found",
-    "Network is unreachable",
-)
-
-
 def classify_download_error_kind(message: str) -> str:
-    """Classifies the type of DownloadError for correct logging level and flow control."""
-    msg_lower = message.lower()
-    if "requested format is not available" in msg_lower:
-        return "FORMAT_UNAVAILABLE"
-    if "http error 429" in msg_lower or "too many requests" in msg_lower:
-        return "RATE_LIMIT"
-    # Проверяется до ACCESS_RESTRICTED: 403 на самом медиафайле — протухшая или
-    # подписанная на другой исходящий IP ссылка, а не запрет доступа к видео.
-    if is_media_forbidden_error(message):
-        return "MEDIA_FORBIDDEN"
-    if any(
-        signature in msg_lower
-        for signature in (
-            "http error 403",
-            "forbidden",
-            "login required",
-            "private video",
-            "sign in to confirm you",
-        )
-    ):
-        return "ACCESS_RESTRICTED"
-    if any(
-        signature in msg_lower
-        for signature in (
-            "requires a javascript runtime",
-            "nsig extraction failed",
-            "signature extraction failed",
-            "unable to extract initial player response",
-            "remote components",
-        )
-    ):
-        return "EXTRACTOR_RUNTIME"
-    if any(signature.lower() in msg_lower for signature in _NETWORK_TIMEOUT_SIGNATURES):
-        return "NETWORK_TIMEOUT"
-    return "DOWNLOAD"
+    """Использует общую классификацию YouTube для ответов, логов и повторов."""
+    category = youtube_error_code(message)
+    return "DOWNLOAD" if category == "UNEXPECT" else category
 
 
 def apply_network_opts(options: dict[str, Any], session_id: str | None = None) -> None:
@@ -152,7 +109,9 @@ def apply_network_opts(options: dict[str, Any], session_id: str | None = None) -
             разбор информации о видео идёт до появления сессии и отменять там
             нечего, а вывод копится под общим ключом.
     """
+    work_budget.check()
     options.update(DEFAULT_YTDLP_NETWORK_OPTS)
+    options["socket_timeout"] = work_budget.remaining(options["socket_timeout"])
     options.update(output_capture_opts(session_id))
     if session_id:
         hooks = list(options.get("progress_hooks") or [])
@@ -166,6 +125,7 @@ def execute_with_backoff(
     """Executes a downloader function with exponential backoff on network timeouts."""
     for attempt in range(1, max_attempts + 1):
         try:
+            work_budget.check()
             return func()
         except yt_dlp.utils.DownloadError as e:
             message = str(e)
@@ -173,7 +133,7 @@ def execute_with_backoff(
             # MEDIA_FORBIDDEN повторяется наравне с таймаутом: каждая попытка
             # заново разбирает ссылку и получает свежую подпись, а именно этого
             # 403 на медиафайле и требует.
-            if error_kind in {"NETWORK_TIMEOUT", "MEDIA_FORBIDDEN"}:
+            if error_kind in {"NETWORK", "NETWORK_TIMEOUT", "MEDIA_FORBIDDEN"}:
                 if attempt == max_attempts:
                     logger.error(
                         "%s failed after %s attempts (%s): %s",
@@ -193,9 +153,11 @@ def execute_with_backoff(
                     max_attempts,
                     delay,
                 )
-                time.sleep(delay)
+                work_budget.pause(delay)
                 continue
-            if error_kind in {"FORMAT_UNAVAILABLE", "ACCESS_RESTRICTED", "RATE_LIMIT"}:
+            if error_kind in {
+                "FORMAT_UNAVAILABLE", "ACCESS_RESTRICTED", "RATE_LIMIT", "UNAVAILABLE",
+            }:
                 logger.warning(
                     "%s: expected yt-dlp error (%s): %s",
                     description,

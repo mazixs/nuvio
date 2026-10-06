@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from config import MAX_FILE_SIZE, BLOCKING_TASK_TIMEOUT
 from utils.logger import setup_logger
+from utils import work_budget
 from utils.temp_file_manager import get_temp_file_path
 
 logger = setup_logger(__name__)
@@ -58,6 +59,7 @@ def check_ffmpeg_installed() -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=work_budget.remaining(15),
         )
     except FileNotFoundError as e:
         logger.error(f"FFmpeg не найден в системе: {e}", exc_info=True)
@@ -105,7 +107,7 @@ def _probe_codec(file_path: Path, stream_selector: str) -> str | None:
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         try:
-            stdout, stderr = process.communicate(timeout=15)
+            stdout, stderr = work_budget.communicate(process, timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()
@@ -180,7 +182,7 @@ def _probe_video_stream(file_path: Path) -> tuple[dict, dict | None, dict] | Non
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         try:
-            stdout, stderr = process.communicate(timeout=15)
+            stdout, stderr = work_budget.communicate(process, timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
@@ -351,7 +353,7 @@ def has_audio_stream(file_path: Path) -> bool:
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         try:
-            stdout, stderr = process.communicate(timeout=15)
+            stdout, stderr = work_budget.communicate(process, timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()
@@ -471,7 +473,7 @@ def convert_to_format(
         )
 
         try:
-            stdout, stderr = process.communicate(timeout=BLOCKING_TASK_TIMEOUT)
+            stdout, stderr = work_budget.communicate(process, timeout=BLOCKING_TASK_TIMEOUT)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()
@@ -555,7 +557,7 @@ def extract_audio_copy(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         try:
-            _, stderr = process.communicate(timeout=BLOCKING_TASK_TIMEOUT)
+            _, stderr = work_budget.communicate(process, timeout=BLOCKING_TASK_TIMEOUT)
         except subprocess.TimeoutExpired:
             process.kill()
             _, stderr = process.communicate()
@@ -678,7 +680,7 @@ def compress_file(
         )
 
         try:
-            probe_stdout, probe_stderr = probe_process.communicate(timeout=15)
+            probe_stdout, probe_stderr = work_budget.communicate(probe_process, timeout=15)
         except subprocess.TimeoutExpired:
             probe_process.kill()
             probe_stdout, probe_stderr = probe_process.communicate()
@@ -745,7 +747,7 @@ def compress_file(
         )
 
         try:
-            stdout, stderr = process.communicate(timeout=BLOCKING_TASK_TIMEOUT)
+            stdout, stderr = work_budget.communicate(process, timeout=BLOCKING_TASK_TIMEOUT)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()
