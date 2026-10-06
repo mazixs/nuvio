@@ -10,7 +10,10 @@ import main
 
 def test_cache_maintenance_runs_all_cleanup_steps(monkeypatch, tmp_path):
     calls = []
-    cache = SimpleNamespace(cleanup_expired=lambda **kwargs: calls.append(kwargs) or 3)
+    cache = SimpleNamespace()
+    from utils import cache_policy
+
+    monkeypatch.setattr(cache_policy, "cleanup_cache", lambda current: calls.append(current) or 3)
     monkeypatch.setattr(main, "telegram_cache", cache)
     monkeypatch.setattr(main, "cleanup_old_workfiles", lambda: (2, 0))
     monkeypatch.setattr(main, "cleanup_stale_temp_files", lambda **kwargs: (1, 0))
@@ -21,7 +24,9 @@ def test_cache_maintenance_runs_all_cleanup_steps(monkeypatch, tmp_path):
 
     asyncio.run(main.scheduled_cache_cleanup(None))
 
-    assert calls == [{"ttl_days": 90}]
+    assert calls == [cache]
+    asyncio.run(main.scheduled_housekeeping(None))
+    assert calls == [cache]
 
 
 def test_cache_maintenance_failure_does_not_escape_job(monkeypatch):

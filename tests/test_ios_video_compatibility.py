@@ -247,21 +247,17 @@ def test_stream_copy_does_not_force_pixel_format():
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "message",
+    ("message", "category"),
     [
-        "ERROR: [Instagram] X: Instagram sent an empty media response.",
-        "ERROR: [Instagram] X: Video info extraction failed: HTTP Error 400: Bad Request",
-        "ERROR: [Instagram] X: Instagram API is not granting access",
-        '{"message":"Media not found or unavailable","status":"fail"}',
+        ("ERROR: [Instagram] X: Instagram sent an empty media response.", "DATA"),
+        ("ERROR: [Instagram] X: Video info extraction failed: HTTP Error 400: Bad Request", "API"),
+        ("ERROR: [Instagram] X: Instagram API is not granting access", "ACCESS"),
+        ('{"message":"Media not found or unavailable","status":"fail"}', "ACCESS"),
     ],
 )
-def test_unavailable_instagram_post_is_not_a_crash(message):
-    """Удалённый или закрытый пост — обычный отказ, а не повод будить админов.
-
-    Замерено на проде: пять отчётов `IG-UNKNOWN` и ни одного `IG-ACCESS`, то
-    есть верно не классифицировалась ни одна недоступность Instagram.
-    """
-    assert classify_internal_error_category("instagram", message) == "ACCESS"
+def test_instagram_failure_requires_evidence_for_access_category(message, category):
+    """HTTP 400 и пустой ответ сами по себе не подтверждают ограничение доступа."""
+    assert classify_internal_error_category("instagram", message) == category
 
 
 # --- Общая защита и её подключение ко всем платформам ------------------------

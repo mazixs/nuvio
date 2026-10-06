@@ -7,6 +7,9 @@ from telegram.ext import ContextTypes
 
 from config import ADMIN_IDS
 from utils.video_cache import telegram_cache
+from utils.db_worker import run_db
+from utils.cache_policy import cleanup_cache, get_cache_policy
+from messages import CACHE_CLEANUP_DISABLED, CACHE_CLEANUP_RESULT
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -64,7 +67,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        stats = telegram_cache.get_stats()
+        stats = await run_db(telegram_cache.get_stats)
 
         # Форматируем статистику по платформам
         by_platform_str = "\n".join(
@@ -90,7 +93,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
   • Новейшая запись: {stats["newest_entry"] or "N/A"}
 
 💡 *Что это значит:*
-Кэшированные видео доставляются мгновенно (0 сек) при повторном запросе того же URL.
+Кеш повторно использует сохраненные идентификаторы файлов без скачивания и загрузки.
 """
 
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -117,20 +120,12 @@ async def cleanup_cache_command(
         return
 
     try:
-        await update.message.reply_text("🔄 Очищаю устаревший кэш...")
-
-        deleted = telegram_cache.cleanup_expired(ttl_days=90)
-
-        if deleted > 0:
-            await update.message.reply_text(
-                f"✅ Очистка завершена!\n\n"
-                f"🗑️ Удалено записей: {deleted}\n"
-                f"💡 Удалены записи старше 90 дней"
-            )
-        else:
-            await update.message.reply_text(
-                "✅ Кэш в порядке!\n\nНет устаревших записей для удаления."
-            )
+        policy = await run_db(get_cache_policy)
+        if not policy["enabled"]:
+            await update.message.reply_text(CACHE_CLEANUP_DISABLED)
+            return
+        deleted = await run_db(cleanup_cache, telegram_cache)
+        await update.message.reply_text(CACHE_CLEANUP_RESULT.format(count=deleted))
 
         logger.info(f"Очищено {deleted} устаревших записей из кэша")
 
@@ -165,7 +160,7 @@ async def search_cache_command(
     logger.info(f"Поиск в кэше от user {user_id}: '{query}'")
 
     try:
-        results = telegram_cache.search_by_title(query, limit=10)
+        results = await run_db(telegram_cache.search_by_title, query, limit=10)
         safe_query = _escape_markdown(query)
 
         if not results:

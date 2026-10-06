@@ -56,7 +56,7 @@ Requirements retained from the original decision:
 Tradeoffs to account for:
 
 - The default delivers 576×1024 instead of 1080p.
-- Changing the flag does not alter previously cached URLs. The `file_id` cache is checked before downloading and has a 90-day TTL; see `.env.example`.
+- Historical behavior: changing the flag did not alter previously cached URLs, and the cache used a 90-day TTL. Since the artifact-recipe migration, the flag is part of the cache recipe; valid references have no expiration unless WebUI cleanup is enabled. See [cache operation](../guides/cache-and-delivery.md).
 
 ## Consequences of the original decision
 

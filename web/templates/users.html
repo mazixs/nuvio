@@ -22,12 +22,13 @@
                 <th>{{ t('Last visit') }}</th>
                 <th>{{ t('Requests') }}</th>
                 <th>{{ t('Events') }}</th>
+                <th>{{ t('Access') }}</th>
             </tr>
         </thead>
         <tbody>
             {% for u in users %}
             <tr class="clickable-row" onclick="location.href='/users/{{ u.user_id }}'">
-                <td class="rank-cell">{{ u.user_id }}</td>
+                <td class="rank-cell"><a href="/users/{{ u.user_id }}">{{ u.user_id }}</a></td>
                 <td>{{ u.username or '-' }}</td>
                 <td>{{ u.first_name or '' }} {{ u.last_name or '' }}</td>
                 <td>{{ u.language_code or '-' }}</td>
@@ -35,10 +36,11 @@
                 <td>{{ u.last_seen[:10] }}</td>
                 <td><strong>{{ u.total_downloads }}</strong></td>
                 <td>{{ u.total_events }}</td>
+                <td>{% if u.is_blocked %}<span class="badge badge-danger">{{ t('Blocked') }}</span>{% else %}{{ t('Allowed') }}{% endif %}</td>
             </tr>
             {% endfor %}
             {% if not users %}
-            <tr><td colspan="8" class="empty">{{ t('No users') }}</td></tr>
+            <tr><td colspan="9" class="empty">{{ t('No users') }}</td></tr>
             {% endif %}
         </tbody>
     </table>

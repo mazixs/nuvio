@@ -26,7 +26,7 @@ from utils.ytdlp_common import FileSizeLimitError, classify_download_error_kind
 @pytest.mark.parametrize(
     ("platform", "error", "expected"),
     [
-        ("instagram", "HTTP Error 400", "ACCESS"),
+        ("instagram", "HTTP Error 400", "API"),
         ("instagram", "Instagram story не поддерживается", "STORY_UNSUPPORTED"),
         ("tiktok", "HTTP Error 429: Too Many Requests", "RATE_LIMIT"),
         ("tiktok", "FFmpeg is not installed", "FFMPEG_MISSING"),
@@ -44,12 +44,12 @@ def test_known_platform_failures_have_stable_categories(platform, error, expecte
     [
         (telegram.error.RetryAfter(timedelta(seconds=5)), "RATE_LIMIT"),
         (telegram.error.TimedOut(), "TIMEOUT"),
-        (telegram.error.Forbidden("chat blocked"), "ACCESS"),
+        (telegram.error.Forbidden("chat blocked"), "TELEGRAM_ACCESS"),
         (telegram.error.BadRequest("Chat not found"), "API"),
         (telegram.error.BadRequest("Can't parse entities"), "RENDER"),
         (telegram.error.NetworkError("connection failed"), "NETWORK"),
         (FileNotFoundError("missing asset"), "FILE"),
-        (PermissionError("access denied"), "ACCESS"),
+        (PermissionError("access denied"), "FILE_ACCESS"),
         (OSError(errno.ENOSPC, "disk full"), "STORAGE"),
         (ValueError("malformed metadata"), "DATA"),
         (FileSizeLimitError("oversize"), "LARGE"),

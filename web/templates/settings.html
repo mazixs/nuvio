@@ -17,6 +17,32 @@
 <div class="alert alert-error">{{ error }}</div>
 {% endif %}
 
+<section class="cache-settings" aria-labelledby="cache-title">
+    <h2 id="cache-title">{{ t('Media cache') }}</h2>
+    <p>{{ t('Videos, photos, albums and audio are stored as Telegram file references. Media files are not kept here.') }}</p>
+    {% if cache_saved %}<p class="alert alert-success" role="status">{{ t('Cache settings saved. No restart is needed.') }}</p>{% endif %}
+    {% if cache_error %}<p class="alert alert-error" role="alert">{{ cache_error }}</p>{% endif %}
+    <form method="POST" action="/settings/cache">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="cache-toggle"><input type="checkbox" name="cache_auto_cleanup_enabled" id="cache-cleanup-toggle" value="true" {% if cache_policy.enabled %}checked{% endif %}> {{ t('Automatically remove unused cache entries') }}</label>
+        <p id="cache-retention-hint">{{ t('When switched off, valid references and source links have no expiration. Temporary media cleanup continues separately.') }}</p>
+        <label for="cache_retention_days">{{ t('Days since last successful reuse') }}</label>
+        <input type="number" id="cache_retention_days" name="cache_retention_days" min="1" max="36500" value="{{ cache_policy.days }}" required {% if not cache_policy.enabled %}disabled{% endif %} aria-describedby="cache-retention-hint cache-schedule">
+        <p id="cache-schedule">{{ t('Enabled cleanup is checked daily. Changing the period does not delete entries immediately.') }}</p>
+        <button type="submit" class="btn btn-primary">{{ t('Save cache settings') }}</button>
+    </form>
+    {% if cache_available %}
+    <dl class="cache-summary">
+        <div><dt>{{ t('Files') }}</dt><dd>{{ cache_stats.artifacts }}</dd></div>
+        <div><dt>{{ t('Complete publications') }}</dt><dd>{{ cache_stats.manifests }}</dd></div>
+        <div><dt>{{ t('Source links') }}</dt><dd>{{ cache_stats.artifact_aliases }}</dd></div>
+        <div><dt>{{ t('Database and WAL') }}</dt><dd>{{ '%.2f'|format(cache_stats.bytes / 1048576) }} MiB</dd></div>
+    </dl>
+    {% else %}<p>{{ t('Cache statistics are currently unavailable.') }}</p>{% endif %}
+    <p>{{ t('Next cleanup check') }}: {{ t('Within a day while the bot is running') if cache_policy.enabled else t('Disabled') }}.</p>
+    <p>{{ t('Last cleanup') }}: {{ cache_policy.last_cleanup or t('Never') }}. {{ t('Automatic cleanup') }}: {{ t('Enabled') if cache_policy.enabled else t('Disabled') }}.</p>
+</section>
+
 <form method="POST" action="/settings" class="tuner" id="csi-tuner"
       data-zone="{{ csi_zone }}"
       data-horizon="{{ csi_track_horizon }}">
@@ -112,6 +138,9 @@
 
 <script>
 (function () {
+    var cleanup = document.getElementById('cache-cleanup-toggle');
+    var retention = document.getElementById('cache_retention_days');
+    cleanup.addEventListener('change', function () { retention.disabled = !cleanup.checked; });
     var form = document.getElementById('csi-tuner');
     var field = document.getElementById('csi_interval_days');
     var slider = document.getElementById('csi_interval_slider');

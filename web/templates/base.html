@@ -17,6 +17,7 @@
         <div class="nav-links">
             <a href="/" class="nav-link {% block nav_dashboard %}{% endblock %}">{{ t('Dashboard') }}</a>
             <a href="/users" class="nav-link {% block nav_users %}{% endblock %}">{{ t('Users') }}</a>
+            <a href="/feedback" class="nav-link {% block nav_feedback %}{% endblock %}">{{ t('Feedback') }}</a>
             <a href="/settings" class="nav-link {% block nav_settings %}{% endblock %}">{{ t('Settings') }}</a>
             <div class="language-switch" role="group" aria-label="{{ t('Language') }}">
                 <a href="/language/en?next={{ request.url.path | urlencode }}" lang="en" hreflang="en" aria-label="English" {% if language == 'en' %}aria-current="true"{% endif %}>EN</a>

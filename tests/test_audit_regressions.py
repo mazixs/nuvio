@@ -259,7 +259,7 @@ def test_navigation_callbacks_are_not_rate_limited():
     assert not telegram_utils._should_rate_limit_callback("s|sess1234|main|more")
     assert not telegram_utils._should_rate_limit_callback("s|sess1234|main|back")
     assert telegram_utils._should_rate_limit_callback("s|sess1234|main|tg_video")
-    assert telegram_utils._should_rate_limit_callback("s|sess1234|format|best|best")
+    assert telegram_utils._should_rate_limit_callback("s|sess1234|format|combined|22")
 
 
 def test_validate_config_accepts_required_bot_token(monkeypatch):
@@ -302,17 +302,13 @@ def test_classify_tiktok_russian_access_error():
 
     assert (
         telegram_utils._classify_internal_error_category("tiktok", error)
-        == "RATE_LIMIT"
+        == "ACCESS"
     )
 
 
 def test_tiktok_rate_limit_failure_notifies_admins(monkeypatch):
     bot = _DummyBot()
-    exc = Exception(
-        "TikTok ограничил доступ даже с авторизацией.\n\n"
-        "Возможные причины:\n"
-        "• Превышен лимит запросов"
-    )
+    exc = Exception("HTTP Error 429: Too Many Requests")
 
     monkeypatch.setattr(telegram_utils, "_bot_instance", bot)
     monkeypatch.setattr(telegram_utils, "ADMIN_IDS", [1])

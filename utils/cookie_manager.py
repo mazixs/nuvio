@@ -7,14 +7,17 @@ import logging
 import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from messages import BROADCAST_RESTRICTED
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from config import ADMIN_IDS, SECRETS_DIR
-from utils.analytics_db import get_all_user_ids, track_event
+from utils.analytics_db import get_all_user_ids, is_user_blocked, track_event
+from utils.db_worker import run_db
 from utils.cookie_health import CookieHealthResult, check_all_cookie_health
 from utils.cookie_workfile import working_cookie_file
 from utils.runtime_status import format_runtime_status
+from utils.telegram_callbacks import answer_callback
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +172,7 @@ def _build_broadcast_instruction() -> str:
             "Режим рассылки включён.",
             "",
             "Отправьте следующим сообщением текст объявления.",
-            "Бот перешлёт его всем пользователям из базы аналитики.",
+            "Бот перешлет его пользователям из базы, которым разрешен доступ.",
             "",
             "Чтобы отменить, нажмите «Отменить рассылку» или отправьте /admin.",
         ]
@@ -272,11 +275,11 @@ async def handle_admin_callback(
         return
 
     if not is_admin(user_id):
-        await query.answer(ADMIN_ONLY_MESSAGE, show_alert=True)
+        await answer_callback(query, ADMIN_ONLY_MESSAGE, show_alert=True)
         return
 
     data = query.data or ""
-    await query.answer()
+    await answer_callback(query)
 
     if data in {"admin|cookies|panel", "admin|cookies|refresh"}:
         expected_file_name = context.user_data.get(ADMIN_UPLOAD_TARGET_KEY)
@@ -474,7 +477,7 @@ async def handle_admin_text_input(
         return True
 
     context.user_data.pop(ADMIN_BROADCAST_MODE_KEY, None)
-    user_ids = [target_id for target_id in get_all_user_ids() if target_id != user_id]
+    user_ids = [target_id for target_id in await run_db(get_all_user_ids) if target_id != user_id]
     if not user_ids:
         await message.reply_text(
             "Некому отправлять рассылку: в базе пока нет пользователей."
@@ -487,19 +490,26 @@ async def handle_admin_text_input(
     sent = 0
     failed = 0
     blocked = 0
+    restricted = 0
 
     for target_id in user_ids:
+        if await run_db(is_user_blocked, target_id):
+            restricted += 1
+            continue
         try:
             await context.bot.send_message(chat_id=target_id, text=text)
             sent += 1
-            track_event(target_id, "admin_broadcast", metadata=f"sent_by={user_id}")
+            await run_db(track_event, target_id, "admin_broadcast", metadata=f"sent_by={user_id}")
             await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)
         except RetryAfter as exc:
             await asyncio.sleep(float(exc.retry_after))
+            if await run_db(is_user_blocked, target_id):
+                restricted += 1
+                continue
             try:
                 await context.bot.send_message(chat_id=target_id, text=text)
                 sent += 1
-                track_event(target_id, "admin_broadcast", metadata=f"sent_by={user_id}")
+                await run_db(track_event, target_id, "admin_broadcast", metadata=f"sent_by={user_id}")
             except Forbidden:
                 blocked += 1
                 failed += 1
@@ -523,6 +533,7 @@ async def handle_admin_text_input(
                 "Рассылка завершена.",
                 f"✅ Отправлено: {sent}",
                 f"🚫 Бот заблокирован: {blocked}",
+                BROADCAST_RESTRICTED.format(count=restricted),
                 f"❌ Ошибок: {failed - blocked}",
             ]
         )

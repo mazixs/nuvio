@@ -7,11 +7,14 @@ import contextlib
 import functools
 import io
 import re
+import sqlite3
 import threading
+import time
 import traceback
 import uuid
 from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 
 import telegram
 from telegram import (
@@ -33,6 +36,7 @@ from config import (
     TEMP_DIR,
 )
 from utils import download_report
+from messages import CSI_INVALID_RATING, CSI_RATING_OUT_OF_RANGE, CSI_SURVEY_EXPIRED
 from utils.logger import setup_logger
 from utils.cancellation import CancelledByUser, is_cancelled, request_cancellation
 from utils.subtitles import (
@@ -51,7 +55,9 @@ from utils.analytics_db import (
     track_user,
     track_event,
     update_last_csi_sent,
-    save_csi_rating,
+    create_csi_poll,
+    bind_csi_poll,
+    save_csi_vote,
     update_csi_feedback,
 )
 from utils.youtube_utils import (
@@ -65,6 +71,7 @@ from utils.youtube_utils import (
 )
 from utils.temp_file_manager import create_temp_dir, cleanup_temp_files
 from utils.callback_fsm import CallbackEvent, SessionStore
+from utils.telegram_callbacks import answer_callback
 from utils.file_delivery import media_kind_for_suffix
 from utils.social_delivery import (
     DeliveryOutcome,
@@ -75,6 +82,8 @@ from utils.social_delivery import (
     normalize_description,
 )
 from utils.media_processor import get_video_geometry
+from utils.feedback import feedback_markup, FORM_KEY as FEEDBACK_FORM_KEY
+from utils.user_access import active_user_id, assert_user_allowed
 from utils.platform_actions import (
     DIRECT_VIDEO_CACHE_KEY,
     cache_key_for_format_selection,
@@ -95,6 +104,11 @@ from utils.url_delivery import (
     plan_url_handoff,
 )
 import yt_dlp
+import httpx
+from utils.db_worker import run_db
+from utils.cache_access import cache_call
+from utils.artifact_cache import artifact_from_message, recipe_for
+from utils.delivery_journal import journal
 from messages import (
     WELCOME_MESSAGE,
     HELP_MESSAGE,
@@ -107,13 +121,11 @@ from messages import (
     VK_NO_SUITABLE_FORMAT_MESSAGE,
     VK_LIVE_ACTIVE_MESSAGE,
     ERROR_MESSAGE,
-    TOO_LONG_VIDEO_MESSAGE,
     NO_URL_AFTER_COMMAND,
     SESSION_EXPIRED,
     FILE_PREPARING,
     FILE_SENT,
     DOWNLOAD_FORMAT_PROMPT,
-    CHOOSE_ANOTHER_FORMAT,
     NO_SUBTITLES_AVAILABLE,
     NO_TG_VIDEO,
     NO_FILESIZE,
@@ -153,14 +165,9 @@ from messages import (
     CHOOSE_SUBTITLE_FORMAT_MESSAGE,
     NO_SUBTITLE_LANGUAGES_MESSAGE,
     ERROR_FALLBACK,
-    ERROR_NETWORK,
-    YOUTUBE_RATE_LIMIT_MESSAGE,
     SUBTITLE_CAPTION,
     SPAM_WARNING,
-    USER_ERROR_WITH_CODE,
-    USER_NETWORK_ERROR_WITH_CODE,
     USER_FILE_ERROR_WITH_CODE,
-    USER_TELEGRAM_ERROR_WITH_CODE,
     CSI_REQUEST_MESSAGE,
     CSI_THANKS_MESSAGE,
     CSI_FEEDBACK_REQUEST,
@@ -212,20 +219,24 @@ def set_bot_instance(bot: telegram.Bot) -> None:
 
 async def send_csi_request(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправляет пользователю inline-клавиатуру с оценками 0–10 для CSI."""
+    await assert_user_allowed(user_id)
+    poll_token = await run_db(create_csi_poll, user_id)
     keyboard = []
     row = []
     for i in range(11):
-        row.append(InlineKeyboardButton(str(i), callback_data=f"csi|{i}"))
+        row.append(InlineKeyboardButton(str(i), callback_data=f"csi|{poll_token}|{i}"))
         if len(row) == 6:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(
+    prompt = await context.bot.send_message(
         chat_id=user_id, text=CSI_REQUEST_MESSAGE, reply_markup=reply_markup
     )
-    update_last_csi_sent(user_id)
+    if isinstance(prompt.message_id, int):
+        await run_db(bind_csi_poll, poll_token, prompt.message_id)
+    await run_db(update_last_csi_sent, user_id)
 
 
 def _format_exception_traceback(exc: BaseException) -> str:
@@ -445,6 +456,9 @@ _MAX_ACTIVE_SESSIONS = 5
 _ANTISPAM_STATE_KEYS = ("recent_requests", "spam_blocked_until")
 _SESSION_STORE_KEY = "sessions"
 _DIRECT_VIDEO_CACHE_KEY = DIRECT_VIDEO_CACHE_KEY
+_active_delivery_session: ContextVar[dict | None] = ContextVar(
+    "telegram_delivery_session", default=None
+)
 
 
 async def _track_tg_user(update: Update) -> None:
@@ -453,7 +467,7 @@ async def _track_tg_user(update: Update) -> None:
     if not user:
         return
     try:
-        await asyncio.to_thread(
+        await run_db(
             track_user,
             user_id=user.id,
             username=user.username,
@@ -467,8 +481,10 @@ async def _track_tg_user(update: Update) -> None:
 
 async def _record_delivery(user_id: int, session_data: dict) -> None:
     """Отмечает подтвержденную отправку после ответа Telegram."""
+    if session_data.get("_cached_manifest_id"):
+        await cache_call(telegram_cache.artifacts.touch, session_data["_cached_manifest_id"])
     try:
-        await asyncio.to_thread(
+        await run_db(
             track_event,
             user_id,
             "delivery",
@@ -501,17 +517,25 @@ async def run_blocking(
     loop = asyncio.get_running_loop()
     effective_timeout = BLOCKING_TASK_TIMEOUT if timeout is None else timeout
     try:
-        future = executor.submit(func, *args)
+        from utils import work_budget
+
+        future = executor.submit(work_budget.execute, func, args, time.monotonic() + effective_timeout, session_id)
         if session_id:
             with _worker_lock:
                 _active_workers.setdefault(session_id, set()).add(future)
             future.add_done_callback(
                 lambda done: _worker_finished(session_id, done)
             )
+        wrapped = asyncio.wrap_future(future, loop=loop)
+        wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return await asyncio.wait_for(
-            asyncio.shield(asyncio.wrap_future(future, loop=loop)),
+            asyncio.shield(wrapped),
             effective_timeout,
         )
+    except asyncio.CancelledError:
+        if session_id:
+            request_cancellation(session_id)
+        raise
     except asyncio.TimeoutError as exc:
         logger.error(
             "%s превысил таймаут %sс", description, effective_timeout, exc_info=True
@@ -1097,20 +1121,67 @@ async def _pulsing_chat_action(chat, action: str, enabled: bool = True):
             await task
 
 
+_MAIN_DOWNLOAD_ACTIONS = {
+    "youtube": {"tg_video", "audio_m4a"},
+    "tiktok": {"tiktok_download", "tiktok_download_desc", "tiktok_audio"},
+    "instagram": {"instagram_download", "instagram_download_desc", "instagram_audio"},
+    "rutube": {"rutube_download", "rutube_audio"},
+    "vk": {"vk_download", "vk_audio"},
+}
+_YOUTUBE_MENU_ACTIONS = {"more", "video_menu", "audio_menu", "subtitles"}
+_FORMAT_DOWNLOAD_ACTIONS = {"combined", "audio_only", "subs"}
+
+
 def _should_rate_limit_callback(callback_data: str | None) -> bool:
     """Ограничивает только дорогие callback-действия, а не навигацию по меню."""
     if not callback_data:
         return False
 
-    parts = callback_data.split("|")
-    if len(parts) < 4 or parts[0] != "s":
+    event = CallbackEvent.parse(callback_data)
+    if not event:
         return False
+    if event.scope == "format":
+        return event.action in _FORMAT_DOWNLOAD_ACTIONS
+    return event.scope == "main" and any(
+        event.action in actions for actions in _MAIN_DOWNLOAD_ACTIONS.values()
+    )
 
-    _, _, scope, action, *_ = parts
-    if scope == "format":
-        return True
-    if scope == "main" and action not in {"more", "back"}:
-        return True
+
+def _is_main_action_allowed(session_data: dict, action: str) -> bool:
+    """Проверяет действие по платформе сессии, а не по присланному названию."""
+    if session_data.get("_metadata_pending"):
+        return action == "cancel"
+    platform = session_data.get("platform", "youtube")
+    return (
+        action in {"back", "cancel"}
+        or action in _MAIN_DOWNLOAD_ACTIONS.get(platform, set())
+        or (platform == "youtube" and action in _YOUTUBE_MENU_ACTIONS)
+    )
+
+
+def _is_format_selection_allowed(session_data: dict, action: str, value: str) -> bool:
+    """Разрешает только варианты, предложенные меню этой сессии."""
+    if session_data.get("_metadata_pending") or session_data.get("platform", "youtube") != "youtube":
+        return False
+    formats = session_data.get("formats") or {}
+    if action == "combined":
+        options = list_video_options(
+            formats.get("video_only", []), formats.get("audio_only", []),
+            formats.get("combined", []), MAX_FILE_SIZE,
+        )
+        return any(str(option.format_id) == value for option in options)
+    if action == "audio_only":
+        options = list_audio_options(formats.get("audio_only", []), MAX_FILE_SIZE)
+        return any(str(option.format_id) == value for option in options)
+    languages = {
+        language.code for language in available_subtitle_languages(
+            session_data.get("video_info") or {}
+        )
+    }
+    if action == "subs_lang":
+        return value in languages
+    if action == "subs" and (choice := parse_subtitle_choice(value)):
+        return choice[0] in languages
     return False
 
 
@@ -1151,42 +1222,6 @@ async def _edit_delivery_status(query: telegram.CallbackQuery, text: str, **kwar
     except telegram.error.TelegramError as error:
         logger.warning("Не удалось обновить статус доставки: %s", type(error).__name__)
         return False
-
-
-def _classify_youtube_error(error_msg: str) -> str | None:
-    """Классифицирует частые YouTube/yt-dlp ошибки для понятного ответа пользователю."""
-    error_code = _youtube_error_code(error_msg)
-
-    if error_code == "FORMAT_UNAVAILABLE":
-        return CHOOSE_ANOTHER_FORMAT.format(
-            error="Выбранный формат недоступен для этого видео."
-        )
-
-    if error_code == "ACCESS_RESTRICTED":
-        return (
-            "🚫 **Ограниченный доступ к YouTube видео**\n\n"
-            "YouTube отклонил доступ к этому ролику (ограничения/авторизация).\n"
-            "Попробуйте другую ссылку или повторите попытку позже."
-        )
-
-    if error_code == "RATE_LIMIT":
-        return YOUTUBE_RATE_LIMIT_MESSAGE
-
-    if error_code in {"NETWORK_TIMEOUT", "MEDIA_FORBIDDEN"}:
-        return ERROR_NETWORK
-
-    if error_code == "EXTRACTOR_RUNTIME":
-        return (
-            "⚠️ **Проблема совместимости YouTube extractor**\n\n"
-            "YouTube изменил схему отдачи видео или потребовался JS runtime. "
-            "Сервис уже использует локальные fallback-сценарии, но этот ролик сейчас не удалось обработать.\n"
-            "Попробуйте повторить запрос позже."
-        )
-
-    if error_code == "FFMPEG_MISSING":
-        return "❌ FFmpeg не найден в системе. Установите FFmpeg и добавьте его в PATH."
-
-    return None
 
 
 def _youtube_error_code(error_msg: str | BaseException) -> str:
@@ -1241,7 +1276,9 @@ def _should_notify_admins_platform_failure(
     краш-репорт дошёл до админа. Замолчать эту категорию значит согласиться, что
     бот будет стоять сломанным, пока кто-нибудь не пожалуется.
     """
-    if stage.endswith("_timeout") or category in {"NETWORK", "NETWORK_TIMEOUT", "TIMEOUT"}:
+    if category in {
+        "DURATION", "LARGE", "STORY_UNSUPPORTED", "NETWORK", "NETWORK_TIMEOUT", "TIMEOUT", "BLOCKED",
+    }:
         return False
     return True
 
@@ -1257,9 +1294,12 @@ async def _log_platform_failure(
     output_tail: list[str] | None = None,
 ) -> None:
     category = _classify_internal_error_category(platform, exc)
+    should_notify_admins = _should_notify_admins_platform_failure(
+        platform, category, stage
+    )
     cookie_status = "not_checked"
     cookie_summary = "not_checked"
-    if platform in {"youtube", "instagram", "tiktok"}:
+    if should_notify_admins and platform in {"youtube", "instagram", "tiktok"}:
         try:
             health = await asyncio.to_thread(check_cookie_health, platform)
             cookie_status = health.status
@@ -1268,9 +1308,6 @@ async def _log_platform_failure(
             cookie_status = "health_failed"
             cookie_summary = str(health_exc)
 
-    should_notify_admins = _should_notify_admins_platform_failure(
-        platform, category, stage
-    )
     log_method = logger.error if should_notify_admins else logger.warning
     log_method(
         "USER_FLOW_FAIL code=%s platform=%s stage=%s category=%s exception=%s session_id=%s url=%s cookie_status=%s cookie_summary=%s error=%s",
@@ -1348,21 +1385,70 @@ async def _deliver_cached_audio(
     Returns:
         bool: True, если файл доставлен; False, если записи нет или file_id устарел.
     """
-    cached = telegram_cache.get(url, format_id=cache_key)
+    cached = await _cache_get(url, format_id=cache_key)
     if not cached:
         return False
 
     try:
         await _call_telegram_with_retry_after(
-            lambda: query.message.reply_audio(audio=cached.file_id)
+            lambda: _reply_cached(query, cached, default_kind="audio")
         )
     except telegram.error.BadRequest as e:
+        if not _is_stale_file_id(e):
+            raise
         logger.warning("file_id аудио устарел (key=%s): %s", cache_key, e)
-        telegram_cache.delete_by_file_id(cached.file_id)
+        await _cache_invalidate(cached.file_id)
         return False
 
     logger.info("Аудио доставлено из кэша (key=%s)", cache_key)
     return True
+
+
+async def _cache_get(url: str, format_id: str):
+    """Старые строки без принадлежности боту не подмешиваются в новый кеш."""
+    session = _active_delivery_session.get() or {}
+    if session.get("_bot_id"):
+        manifest = await cache_call(
+            telegram_cache.artifacts.get, session["_bot_id"], url,
+            recipe_for(session.get("platform", "youtube"), format_id),
+        )
+        if manifest and len(manifest["items"]) == 1:
+            session["_cached_manifest_id"] = manifest["id"]
+            return manifest["items"][0][0]
+        return None
+    return await cache_call(telegram_cache.get, url, format_id=format_id)
+
+
+async def _cache_invalidate(file_id: str):
+    session = _active_delivery_session.get() or {}
+    if session.get("_bot_id"):
+        await cache_call(telegram_cache.artifacts.invalidate, session["_bot_id"], file_id)
+        session.pop("_cached_manifest_id", None)
+    else:
+        await cache_call(telegram_cache.delete_by_file_id, file_id)
+
+
+def _record_confirmed_send(session: dict, result):
+    """Подтверждение сохраняется до аналитики, кеша и следующего await."""
+    messages = list(result) if isinstance(result, (tuple, list)) else [result]
+    recorded = session.setdefault("_media_messages", [])
+    recorded.extend(message for message in messages if message is not None)
+    session["_delivery_progress"] = len(recorded)
+    if recorded:
+        session.setdefault("_first_media_message", recorded[0])
+
+
+def _is_proven_not_sent(error: BaseException) -> bool:
+    """Проверяет причину backend, не угадывая по тексту таймаута."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, httpx.PoolTimeout):
+            return True
+        seen.add(id(error))
+        if isinstance(error, httpx.RequestError):
+            return False
+        error = error.__cause__
+    return False
 
 
 def _description_for_delivery(session_data: dict) -> str | None:
@@ -1406,6 +1492,7 @@ async def _send_description_chunks(
                     do_quote=False,
                 ),
                 session_data,
+                track_delivery_outcome=False,
             )
         except telegram.error.BadRequest as error:
             if first_id is None or not _is_missing_reply_target(error):
@@ -1420,6 +1507,7 @@ async def _send_description_chunks(
                 await _call_telegram_with_retry_after(
                     lambda: query.message.reply_text(chunk, parse_mode=None, do_quote=False),
                     session_data,
+                    track_delivery_outcome=False,
                 )
             except telegram.error.TelegramError as retry_error:
                 session_data["_description_delivery_failed"] = True
@@ -1455,21 +1543,72 @@ async def _call_telegram_with_retry_after(
     *,
     reset_files=None,
     max_attempts: int = 2,
+    track_delivery_outcome: bool = True,
 ) -> object:
     """Повторяет только явный RetryAfter с коротким бюджетом и отменой."""
+    if session_data is None and track_delivery_outcome:
+        session_data = _active_delivery_session.get()
     attempt = 1
+    part = 0
+    operation = None
+    if session_data is not None:
+        part = int(session_data.get("_journal_part", 0)) + 1
+        session_data["_journal_part"] = part
+        operation = session_data.get("_operation_id")
     while True:
+        if (user_id := active_user_id.get()) is not None:
+            await assert_user_allowed(user_id)
         if session_data and is_cancelled(str(session_data.get("session_id") or "")):
             raise CancelledByUser("отправка отменена до запроса Telegram")
         try:
+            if operation:
+                await run_db(journal.begin, operation, part, attempt,
+                             session_data["_recipient_id"])
+                if is_cancelled(str(session_data.get("session_id") or "")):
+                    await run_db(journal.finish, operation, part, attempt, "not_sent")
+                    raise CancelledByUser("отмена до передачи запроса Telegram")
+                if (user_id := active_user_id.get()) is not None:
+                    try:
+                        await assert_user_allowed(user_id)
+                    except BaseException:
+                        await run_db(journal.finish, operation, part, attempt, "not_sent")
+                        raise
+            if operation and is_cancelled(str(session_data.get("session_id") or "")):
+                await run_db(journal.finish, operation, part, attempt, "not_sent")
+                raise CancelledByUser("отмена после проверки доступа до запроса Telegram")
             if session_data is not None:
                 session_data["_delivery_request_in_flight"] = True
             try:
-                return await call()
+                try:
+                    result = await call()
+                except BaseException as error:
+                    # Отмена ожидания и локальная ошибка не доказывают отказ Telegram.
+                    if session_data is not None and track_delivery_outcome and not isinstance(error, telegram.error.TelegramError):
+                        session_data["_delivery_outcome_unknown"] = True
+                    raise
+                if session_data is not None:
+                    session_data["_delivery_request_in_flight"] = False
+                if session_data is not None and track_delivery_outcome:
+                    _record_confirmed_send(session_data, result)
+                if operation:
+                    ids = [getattr(message, "message_id", None) for message in
+                           (result if isinstance(result, (list, tuple)) else [result])]
+                    try:
+                        await run_db(journal.finish, operation, part, attempt, "sent", ids)
+                    except Exception:
+                        logger.exception("Ответ Telegram подтвержден, запись журнала не обновлена")
+                if session_data is not None and track_delivery_outcome and session_data.get("_bot_id"):
+                    messages = result if isinstance(result, (list, tuple)) else [result]
+                    items = [item for message in messages if (item := artifact_from_message(message)) is not None]
+                    if items:
+                        await cache_call(telegram_cache.artifacts.store, session_data["_bot_id"], items)
+                return result
             finally:
                 if session_data is not None:
                     session_data["_delivery_request_in_flight"] = False
         except telegram.error.RetryAfter as error:
+            if operation:
+                await run_db(journal.finish, operation, part, attempt, "refused")
             if attempt >= max_attempts:
                 raise
             delay = error.retry_after
@@ -1491,6 +1630,28 @@ async def _call_telegram_with_retry_after(
             if reset_files:
                 reset_files()
             attempt += 1
+        except telegram.error.BadRequest:
+            # BadRequest наследует NetworkError, но подтверждает отказ сервера.
+            if operation:
+                await run_db(journal.finish, operation, part, attempt, "refused")
+            raise
+        except telegram.error.NetworkError as error:
+            not_sent = _is_proven_not_sent(error)
+            if session_data is not None and track_delivery_outcome:
+                session_data["_delivery_outcome_unknown"] = not not_sent
+            if operation:
+                await run_db(journal.finish, operation, part, attempt, "not_sent" if not_sent else "unknown")
+            if not_sent and attempt < max_attempts:
+                if reset_files:
+                    reset_files()
+                attempt += 1
+                await asyncio.sleep(0.25)
+                continue
+            raise
+        except telegram.error.TelegramError:
+            if operation:
+                await run_db(journal.finish, operation, part, attempt, "refused")
+            raise
 
 
 async def _deliver_cached_video(
@@ -1506,21 +1667,19 @@ async def _deliver_cached_video(
     Returns:
         bool: True, если файл доставлен; False, если записи нет или file_id устарел.
     """
-    cached = telegram_cache.get(url, format_id=cache_key)
+    cached = await _cache_get(url, format_id=cache_key)
     if not cached:
         return False
 
     try:
         await _call_telegram_with_retry_after(
-            lambda: query.message.reply_video(
-                video=cached.file_id,
-                caption=None,
-                supports_streaming=True,
-            )
+            lambda: _reply_cached(query, cached)
         )
     except telegram.error.BadRequest as e:
+        if not _is_stale_file_id(e):
+            raise
         logger.warning("file_id видео устарел (key=%s): %s", cache_key, e)
-        telegram_cache.delete_by_file_id(cached.file_id)
+        await _cache_invalidate(cached.file_id)
         return False
 
     logger.info("Видео доставлено из кэша (key=%s)", cache_key)
@@ -1532,26 +1691,20 @@ def _is_stale_file_id(error: telegram.error.BadRequest) -> bool:
     text = str(error).lower()
     return any(marker in text for marker in (
         "wrong file_id", "wrong file identifier", "file_id not found",
+        "wrong remote file identifier",
         "file reference expired", "file_reference_expired",
     ))
 
 
 async def _deliver_social_cached_video(
     query: telegram.CallbackQuery,
-    file_id: str,
+    file_id,
     session_data: dict,
 ) -> telegram.Message:
     """Отправляет социальное видео из кэша с выбранным описанием."""
     message = await _call_telegram_with_retry_after(
-        lambda: query.message.reply_video(
-            do_quote=False,
-            video=file_id,
-            caption=description_delivery_plan(
-                _description_for_delivery(session_data)
-            )[0],
-            parse_mode=None,
-            supports_streaming=True,
-        ),
+        lambda: _reply_cached(query, file_id, social=True,
+            caption=description_delivery_plan(_description_for_delivery(session_data))[0]),
         session_data,
     )
     session_data["_first_media_message"] = message
@@ -1565,6 +1718,20 @@ async def _deliver_social_cached_video(
         session_data,
     )
     return message
+
+
+async def _reply_cached(query, cached, *, default_kind="video", social=False, caption=None):
+    """Метод отправки определяется фактическим типом сохраненного файла."""
+    kind = getattr(cached, "kind", default_kind)
+    if kind not in {"video", "audio", "photo", "document"}:
+        kind = default_kind
+    file_id = cached if isinstance(cached, str) else cached.file_id
+    arguments = {kind: file_id}
+    if kind == "video":
+        arguments.update(caption=caption, supports_streaming=True)
+    if social:
+        arguments.update(do_quote=False, caption=caption, parse_mode=None)
+    return await getattr(query.message, f"reply_{kind}")(**arguments)
 
 
 def _cache_key_with_delivered_format(
@@ -1617,6 +1784,18 @@ def _cache_sent_media(
     Доставка уже состоялась, поэтому сбой кэша только логируется: ронять из-за
     него ответ пользователю нельзя.
     """
+    session = _active_delivery_session.get() or {}
+    artifact = artifact_from_message(message)
+    if session.get("_bot_id"):
+        if artifact:
+            delivered = download_report.delivered_format(session_id) if session_id else None
+            key = _cache_key_with_delivered_format(cache_format_id, delivered, url)
+            try:
+                telegram_cache.artifacts.put(session["_bot_id"], url,
+                    recipe_for(platform, key), [(artifact, "media")], {})
+            except (OSError, ValueError, sqlite3.Error):
+                logger.warning("Не удалось сохранить подтвержденный файл в кеш", exc_info=True)
+        return
     media = message.video or message.audio or message.document
     file_id = getattr(media, "file_id", None) if media else None
     if not file_id:
@@ -1726,13 +1905,9 @@ async def _deliver_by_url(
         )
         return DeliveryOutcome("refused", error=e)
     except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
-        if platform in {"tiktok", "instagram"}:
-            if session_data is not None:
-                session_data["_delivery_outcome_unknown"] = True
-            return DeliveryOutcome("unknown", error=e)
-        _HANDOFF_REFUSALS.remember(plan.url, plan.kind, now)
-        logger.warning("Telegram не принял ссылку (%s): %s", plan.kind, e)
-        return DeliveryOutcome("refused", error=e)
+        if session_data is not None:
+            session_data["_delivery_outcome_unknown"] = not _is_proven_not_sent(e)
+        return DeliveryOutcome("refused" if _is_proven_not_sent(e) else "unknown", error=e)
     except telegram.error.TelegramError as e:
         if platform in {"tiktok", "instagram"}:
             raise
@@ -1758,7 +1933,7 @@ async def _deliver_by_url(
     # запрошенный формат, загрузчик в этом пути не участвует, а запись в регистре
     # могла остаться от предыдущей неудачной попытки той же сессии.
     if cache_format_id and plan.kind != "photo":
-        _cache_sent_media(message, url, platform, cache_format_id, video_info)
+        await cache_call(_cache_sent_media, message, url, platform, cache_format_id, video_info)
     return DeliveryOutcome("delivered", (message,), confirmed_items=1)
 
 
@@ -1843,9 +2018,9 @@ async def _deliver_photo_post_by_url(
                 error=error,
             )
         except telegram.error.NetworkError as error:
-            delivery_state["_delivery_outcome_unknown"] = True
+            delivery_state["_delivery_outcome_unknown"] = not _is_proven_not_sent(error)
             return DeliveryOutcome(
-                "unknown",
+                "refused" if _is_proven_not_sent(error) else "unknown",
                 tuple(sent_messages),
                 confirmed_items=offset,
                 error=error,
@@ -1896,9 +2071,9 @@ async def _deliver_photo_post_by_url(
                 error=error,
             )
         except telegram.error.NetworkError as error:
-            delivery_state["_delivery_outcome_unknown"] = True
+            delivery_state["_delivery_outcome_unknown"] = not _is_proven_not_sent(error)
             return DeliveryOutcome(
-                "unknown", tuple(sent_messages), confirmed_items=offset,
+                "refused" if _is_proven_not_sent(error) else "unknown", tuple(sent_messages), confirmed_items=offset,
                 audio_delivered=None, error=error,
             )
         delivery_state["_audio_delivered"] = True
@@ -2297,6 +2472,7 @@ async def _begin_processing(
         platform=platform,
         formats={},
     )
+    _get_session(context, session_token)["_metadata_pending"] = True
     message = await update.message.reply_text(
         PROCESSING_MESSAGE, reply_markup=_build_cancel_markup(session_token)
     )
@@ -2320,6 +2496,7 @@ def _finish_processing(
         return False
     session["video_info"] = video_info
     session["formats"] = formats
+    session.pop("_metadata_pending", None)
     return True
 
 
@@ -2373,20 +2550,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update (Update): Объект обновления Telegram.
         context (ContextTypes.DEFAULT_TYPE): Контекст.
     """
+    context.user_data.pop(FEEDBACK_FORM_KEY, None)
     logger.info(f"Получена команда /start от пользователя {update.effective_user.id}")
     await _track_tg_user(update)
-    await asyncio.to_thread(track_event, update.effective_user.id, "start")
+    await run_db(track_event, update.effective_user.id, "start")
     from utils.cookie_manager import build_admin_entry_markup, is_admin
 
     user_id = update.effective_user.id if update.effective_user else None
     if is_admin(user_id):
         await update.message.reply_text(
             f"{WELCOME_MESSAGE}\n\n🔐 Доступна админ-панель: /admin",
-            reply_markup=build_admin_entry_markup(),
+            reply_markup=feedback_markup(context, existing=build_admin_entry_markup()),
         )
         return
 
-    await update.message.reply_text(WELCOME_MESSAGE)
+    await update.message.reply_text(WELCOME_MESSAGE, reply_markup=feedback_markup(context))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2431,6 +2609,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         update (Update): Объект обновления Telegram.
         context (ContextTypes.DEFAULT_TYPE): Контекст.
     """
+    context.user_data.pop(FEEDBACK_FORM_KEY, None)
     user_id = update.effective_user.id
     logger.info(f"Получена команда /download от пользователя {user_id}")
     url = await _get_url_from_context(update, context)
@@ -2462,7 +2641,7 @@ async def process_url(
                 context.user_data.pop("awaiting_csi_feedback_id", None)
             else:
                 try:
-                    update_csi_feedback(awaiting_id, text)
+                    await run_db(update_csi_feedback, awaiting_id, text)
                     await update.message.reply_text(CSI_FEEDBACK_THANKS)
                 except Exception as e:
                     logger.error(f"Ошибка сохранения CSI отзыва: {e}")
@@ -2503,7 +2682,7 @@ async def process_url(
         _analytics_platform = "vk"
     if _analytics_platform:
         try:
-            await asyncio.to_thread(
+            await run_db(
                 track_event, user_id, "download", platform=_analytics_platform, url=url
             )
         except Exception as exc:  # noqa: BLE001
@@ -2555,26 +2734,9 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("youtube", error_code, e_cookie)
+                _build_public_error_message("youtube", error_code, e_cookie),
+                reply_markup=feedback_markup(context, error_code, url),
             )
-            if session_id:
-                _cleanup_session_when_idle(session_id)
-        except (ValueError, KeyError) as e:
-            if "слишком длинное" in str(e):
-                await processing_message.edit_text(TOO_LONG_VIDEO_MESSAGE)
-            else:
-                error_code = _make_error_code_for_exception("youtube", e)
-                _schedule_platform_failure_log(
-                    platform="youtube",
-                    stage="process_url_data",
-                    url=url,
-                    error_code=error_code,
-                    exc=e,
-                    session_id=session_id,
-                )
-                await processing_message.edit_text(
-                    USER_ERROR_WITH_CODE.format(error_code=error_code)
-                )
             if session_id:
                 _cleanup_session_when_idle(session_id)
         except asyncio.CancelledError:
@@ -2592,7 +2754,8 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code)
+                _build_public_error_message("youtube", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2600,14 +2763,15 @@ async def process_url(
             error_code = _make_error_code("youtube", _classify_internal_error_category("youtube", e))
             _schedule_platform_failure_log(
                 platform="youtube",
-                stage="process_url_unexpected",
+                stage="process_url",
                 url=url,
                 error_code=error_code,
                 exc=e,
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                USER_ERROR_WITH_CODE.format(error_code=error_code)
+                _build_public_error_message("youtube", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2643,7 +2807,8 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("tiktok", error_code, e)
+                _build_public_error_message("tiktok", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2694,7 +2859,8 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("instagram", error_code, e)
+                _build_public_error_message("instagram", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2729,7 +2895,8 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("rutube", error_code, e)
+                _build_public_error_message("rutube", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2774,7 +2941,8 @@ async def process_url(
                 session_id=session_id,
             )
             await processing_message.edit_text(
-                _build_public_error_message("vk", error_code, e)
+                _build_public_error_message("vk", error_code, e),
+                reply_markup=feedback_markup(context, error_code, url),
             )
             if session_id:
                 _cleanup_session_when_idle(session_id)
@@ -2800,6 +2968,9 @@ async def _handle_main_callback(
     url = session_data["url"]
     session_id = session_data["session_id"]
     platform = session_data.get("platform", "youtube")
+    if not _is_main_action_allowed(session_data, action):
+        await safe_edit_message_text(query, SESSION_EXPIRED)
+        return
     back_markup = _build_back_markup(session_token)
     # Пока идёт скачивание, отмена — единственное осмысленное действие.
     cancel_markup = _build_cancel_markup(session_token)
@@ -2815,11 +2986,11 @@ async def _handle_main_callback(
             # Проверяем кэш перед скачиванием
             cache_key = _cache_format_id_for_main_action("tiktok", action)
             if cache_key:
-                cached = telegram_cache.get(url, format_id=cache_key)
+                cached = await _cache_get(url, format_id=cache_key)
                 if cached:
                     try:
                         await _deliver_social_cached_video(
-                            query, cached.file_id, session_data
+                            query, cached, session_data
                         )
                         logger.info(
                             "TikTok видео доставлено из кэша (key=%s)", cache_key
@@ -2837,9 +3008,9 @@ async def _handle_main_callback(
                         if not _is_stale_file_id(e):
                             raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
-                        telegram_cache.delete_by_file_id(cached.file_id)
-                    except (telegram.error.NetworkError, telegram.error.TimedOut):
-                        session_data["_delivery_outcome_unknown"] = True
+                        await _cache_invalidate(cached.file_id)
+                    except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
+                        session_data["_delivery_outcome_unknown"] = not _is_proven_not_sent(e)
                         raise
 
             await _edit_delivery_status(
@@ -2903,7 +3074,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("tiktok", error_code, e)
+                    _build_public_error_message("tiktok", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -2976,7 +3148,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("tiktok", error_code, e)
+                    _build_public_error_message("tiktok", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3002,11 +3175,11 @@ async def _handle_main_callback(
             # Проверяем кэш перед скачиванием
             cache_key = _cache_format_id_for_main_action("instagram", action)
             if cache_key:
-                cached = telegram_cache.get(url, format_id=cache_key)
+                cached = await _cache_get(url, format_id=cache_key)
                 if cached:
                     try:
                         await _deliver_social_cached_video(
-                            query, cached.file_id, session_data
+                            query, cached, session_data
                         )
                         logger.info(
                             "Instagram видео доставлено из кэша (key=%s)", cache_key
@@ -3024,9 +3197,9 @@ async def _handle_main_callback(
                         if not _is_stale_file_id(e):
                             raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
-                        telegram_cache.delete_by_file_id(cached.file_id)
-                    except (telegram.error.NetworkError, telegram.error.TimedOut):
-                        session_data["_delivery_outcome_unknown"] = True
+                        await _cache_invalidate(cached.file_id)
+                    except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
+                        session_data["_delivery_outcome_unknown"] = not _is_proven_not_sent(e)
                         raise
 
             await _edit_delivery_status(
@@ -3091,7 +3264,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("instagram", error_code, e)
+                    _build_public_error_message("instagram", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3152,7 +3326,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("instagram", error_code, e)
+                    _build_public_error_message("instagram", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3160,13 +3335,12 @@ async def _handle_main_callback(
         case "rutube_download":
             cache_key = _cache_format_id_for_main_action("rutube", "rutube_download")
             if cache_key:
-                cached = telegram_cache.get(url, format_id=cache_key)
+                cached = await _cache_get(url, format_id=cache_key)
                 if cached:
                     try:
-                        await query.message.reply_video(
-                            video=cached.file_id,
-                            caption=None,
-                            supports_streaming=True,
+                        await _call_telegram_with_retry_after(
+                            lambda: _reply_cached(query, cached),
+                            session_data,
                         )
                         logger.info(
                             "Rutube видео доставлено из кэша (key=%s)", cache_key
@@ -3176,8 +3350,10 @@ async def _handle_main_callback(
                         await _cleanup_user_session(user_id, context, session_token)
                         return
                     except telegram.error.BadRequest as e:
+                        if not _is_stale_file_id(e):
+                            raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
-                        telegram_cache.delete_by_file_id(cached.file_id)
+                        await _cache_invalidate(cached.file_id)
 
             await safe_edit_message_text(
                 query, DOWNLOADING_MESSAGE, reply_markup=cancel_markup
@@ -3217,7 +3393,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("rutube", error_code, e)
+                    _build_public_error_message("rutube", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3266,7 +3443,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("rutube", error_code, e)
+                    _build_public_error_message("rutube", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3279,13 +3457,12 @@ async def _handle_main_callback(
             if cache_key and selected_format:
                 cache_key = f"{cache_key}:{selected_format}"
             if cache_key:
-                cached = telegram_cache.get(url, format_id=cache_key)
+                cached = await _cache_get(url, format_id=cache_key)
                 if cached:
                     try:
-                        await query.message.reply_video(
-                            video=cached.file_id,
-                            caption=None,
-                            supports_streaming=True,
+                        await _call_telegram_with_retry_after(
+                            lambda: _reply_cached(query, cached),
+                            session_data,
                         )
                         logger.info("VK видео доставлено из кэша (key=%s)", cache_key)
                         await _record_delivery(query.from_user.id, session_data)
@@ -3293,8 +3470,10 @@ async def _handle_main_callback(
                         await _cleanup_user_session(user_id, context, session_token)
                         return
                     except telegram.error.BadRequest as e:
+                        if not _is_stale_file_id(e):
+                            raise
                         logger.warning("file_id устарел (key=%s): %s", cache_key, e)
-                        telegram_cache.delete_by_file_id(cached.file_id)
+                        await _cache_invalidate(cached.file_id)
 
             await safe_edit_message_text(
                 query, DOWNLOADING_MESSAGE, reply_markup=cancel_markup
@@ -3339,7 +3518,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("vk", error_code, e)
+                    _build_public_error_message("vk", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3388,7 +3568,8 @@ async def _handle_main_callback(
                     session_id=session_id,
                 )
                 await query.edit_message_text(
-                    _build_public_error_message("vk", error_code, e)
+                    _build_public_error_message("vk", error_code, e),
+                    reply_markup=feedback_markup(context, error_code, url),
                 )
                 await _cleanup_user_session(user_id, context, session_token)
             return
@@ -3748,13 +3929,21 @@ async def _download_and_send_subtitles(
             session_id=session_data["session_id"],
         )
     except Exception as e:
-        logger.error(f"Ошибка скачивания субтитров: {e}", exc_info=True)
+        e.add_note(f"url={session_data['url']}, session_id={session_data['session_id']}")
+        error_code = _make_error_code_for_exception("youtube", e)
+        _schedule_platform_failure_log(
+            platform="youtube", stage="download_subtitles", url=session_data["url"],
+            error_code=error_code, exc=e, session_id=session_data["session_id"],
+        )
         await safe_edit_message_text(
-            query, NO_SUBTITLES_AVAILABLE, reply_markup=back_markup
+            query, _build_public_error_message("youtube", error_code, e),
+            reply_markup=feedback_markup(context, error_code, session_data["url"], back_markup),
         )
         return
 
     if not (subtitle_file and subtitle_file.exists()):
+        if subtitle_file:
+            raise FileNotFoundError("Скачанный файл субтитров отсутствует")
         await safe_edit_message_text(
             query, NO_SUBTITLES_AVAILABLE, reply_markup=back_markup
         )
@@ -3762,9 +3951,13 @@ async def _download_and_send_subtitles(
 
     await safe_edit_message_text(query, FILE_PREPARING)
     with open(subtitle_file, "rb") as handle:
-        await query.message.reply_document(
-            document=handle,
-            caption=f"{SUBTITLE_CAPTION} · {language.upper()} · {subtitle_format.upper()}",
+        await _call_telegram_with_retry_after(
+            lambda: query.message.reply_document(
+                document=handle,
+                caption=f"{SUBTITLE_CAPTION} · {language.upper()} · {subtitle_format.upper()}",
+            ),
+            session_data,
+            reset_files=lambda: handle.seek(0),
         )
     await safe_edit_message_text(query, FILE_SENT)
     subtitle_file.unlink(missing_ok=True)
@@ -3789,6 +3982,10 @@ async def _handle_format_callback(
     session_id = session_data["session_id"]
     formats = session_data.get("formats", {})
     cancel_markup = _build_cancel_markup(session_token)
+
+    if not _is_format_selection_allowed(session_data, content_type, format_id):
+        await safe_edit_message_text(query, SESSION_EXPIRED)
+        return
 
     if content_type == "subs_lang":
         await safe_edit_message_text(
@@ -3882,9 +4079,95 @@ async def _handle_format_callback(
             session_id=session_id,
         )
         await query.edit_message_text(
-            _build_public_error_message("youtube", error_code, e)
+            DELIVERY_OUTCOME_UNKNOWN
+            if session_data.get("_delivery_outcome_unknown")
+            else _build_public_error_message("youtube", error_code, e),
+            reply_markup=feedback_markup(context, error_code, url),
         )
         await _cleanup_user_session(user_id, context, session_token)
+
+
+async def _dispatch_session_callback(
+    query, context, user_id: int, event: CallbackEvent,
+    session_data: dict | None, expensive: bool,
+) -> None:
+    """Захватывает сессию для всех загрузок, сохраняя доступность отмены."""
+    if session_data is None:
+        await safe_edit_message_text(query, SESSION_EXPIRED)
+        return
+    allowed = (
+        _is_main_action_allowed(session_data, event.action)
+        if event.scope == "main"
+        else bool(event.value) and _is_format_selection_allowed(
+            session_data, event.action, event.value
+        )
+    )
+    if not allowed:
+        await safe_edit_message_text(query, SESSION_EXPIRED)
+        return
+    if session_data.get("_delivery_active") and event.action != "cancel":
+        return
+    action_key = (
+        event.action if event.scope == "main"
+        else f"format|{event.action}|{event.value}"
+    )
+    if expensive and session_data.get("_delivery_outcome_unknown"):
+        await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
+        return
+    if session_data.get("_delivered_items") and action_key not in {
+        "cancel", "back", session_data.get("_delivery_action")
+    }:
+        await safe_edit_message_text(query, PHOTO_POST_PARTIAL)
+        return
+    delivery_session_id = None
+    if expensive:
+        session_data["_delivery_active"] = True
+        session_data["_delivery_action"] = action_key
+        session_data["_include_description"] = event.action.endswith("_desc")
+        if not session_data.get("_delivered_items"):
+            session_data.pop("_description_delivery_failed", None)
+            session_data.pop("_description_attempted", None)
+        session_data["_delivery_progress"] = int(session_data.get("_delivered_items") or 0)
+        session_data["_delivery_request_in_flight"] = False
+        delivery_session_id = session_data.get("session_id")
+        bot = getattr(context, "bot", None)
+        try:
+            bot_id = getattr(bot, "id", None)
+        except RuntimeError:
+            bot_id = None
+        if isinstance(bot_id, int):
+            session_data["_bot_id"] = bot_id
+            session_data["_recipient_id"] = user_id
+            session_data["_operation_id"] = f"{delivery_session_id}:{action_key}"
+            if await run_db(journal.uncertain, session_data["_operation_id"]):
+                session_data["_delivery_outcome_unknown"] = True
+                session_data.pop("_delivery_active", None)
+                await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
+                return
+        if delivery_session_id:
+            _delivery_started(delivery_session_id)
+    delivery_context_token = _active_delivery_session.set(
+        session_data if expensive else None
+    )
+    try:
+        async with _pulsing_chat_action(
+            query.message.chat, _chat_action_for(event.action), expensive
+        ):
+            if event.scope == "main":
+                await _handle_main_callback(
+                    query, context, user_id, event.session_token, event.action
+                )
+            else:
+                await _handle_format_callback(
+                    query, context, user_id, event.session_token, event.action, event.value
+                )
+    finally:
+        _active_delivery_session.reset(delivery_context_token)
+        if expensive:
+            session_data.pop("_delivery_active", None)
+            session_data.pop("_include_description", None)
+            if delivery_session_id:
+                _delivery_finished(delivery_session_id)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3899,107 +4182,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     expensive = _should_rate_limit_callback(query.data)
     if expensive and _check_spam(user_id, context, now):
-        await query.answer(text=SPAM_WARNING, show_alert=False)
+        await answer_callback(query, text=SPAM_WARNING, show_alert=False)
         return
 
-    try:
-        await query.answer()
-    except telegram.error.TelegramError:
-        logger.debug("Не удалось подтвердить callback, продолжаем обработку")
+    await answer_callback(query)
 
     logger.info(f"Получен колбэк от пользователя {user_id}: {query.data}")
 
     active_session: dict | None = None
     try:
         event = CallbackEvent.parse(query.data)
-        if event and event.scope == "main" and event.session_token:
+        if event and event.scope in {"main", "format"} and event.session_token:
             session_token = event.session_token
-            locked_download = event.action in {
-                "tiktok_download",
-                "tiktok_download_desc",
-                "instagram_download",
-                "instagram_download_desc",
-            }
             active_session = _get_session(context, session_token)
-            if (
-                active_session
-                and active_session.get("_delivery_active")
-                and event.action != "cancel"
-            ):
-                return
-            if (
-                active_session
-                and active_session.get("_delivered_items")
-                and event.action not in {
-                    "cancel", "back", active_session.get("_delivery_action")
-                }
-            ):
-                await safe_edit_message_text(query, PHOTO_POST_PARTIAL)
-                return
-            delivery_session_id = None
-            if locked_download and active_session:
-                platform = active_session.get("platform")
-                if not event.action.startswith(f"{platform}_"):
-                    await safe_edit_message_text(query, SESSION_EXPIRED)
-                    return
-                if active_session.get("_delivery_outcome_unknown"):
-                    await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
-                    return
-                has_progress = bool(active_session.get("_delivered_items"))
-                active_session["_delivery_active"] = True
-                active_session["_delivery_action"] = event.action
-                active_session["_include_description"] = event.action.endswith("_desc")
-                if not has_progress:
-                    active_session.pop("_description_delivery_failed", None)
-                    active_session.pop("_description_attempted", None)
-                active_session["_delivery_progress"] = int(
-                    active_session.get("_delivered_items") or 0
-                )
-                active_session["_delivery_request_in_flight"] = False
-                delivery_session_id = active_session.get("session_id")
-                if delivery_session_id:
-                    _delivery_started(delivery_session_id)
-            # Скачивание и отправка идут секунды: пока они идут, в шапке чата
-            # держится отметка активности — иначе пользователь смотрит в
-            # неподвижный текст и не понимает, жив ли бот.
-            try:
-                async with _pulsing_chat_action(
-                    query.message.chat, _chat_action_for(event.action), expensive
-                ):
-                    await _handle_main_callback(
-                        query,
-                        context,
-                        user_id,
-                        session_token,
-                        event.action,
-                    )
-            finally:
-                if locked_download and active_session:
-                    active_session.pop("_delivery_active", None)
-                    active_session.pop("_include_description", None)
-                    if delivery_session_id:
-                        _delivery_finished(delivery_session_id)
-        elif (
-            event
-            and event.scope == "format"
-            and event.session_token
-            and event.value
-        ):
-            session_token = event.session_token
-            async with _pulsing_chat_action(
-                query.message.chat, _chat_action_for(event.action), expensive
-            ):
-                await _handle_format_callback(
-                    query,
-                    context,
-                    user_id,
-                    session_token,
-                    event.action,
-                    event.value,
-                )
+            await _dispatch_session_callback(
+                query, context, user_id, event, active_session, expensive
+            )
         elif event and event.scope == "csi" and event.value:
             rating = int(event.value)
-            csi_id = save_csi_rating(user_id, rating)
+            chat_id = query.message.chat.id
+            message_id = query.message.message_id
+            if not event.session_token:
+                await safe_edit_message_text(query, CSI_SURVEY_EXPIRED)
+                return
+            poll_id = event.session_token
+            try:
+                csi_id, created = await run_db(save_csi_vote, user_id, rating, poll_id, chat_id, message_id)
+            except ValueError:
+                await answer_callback(query, CSI_SURVEY_EXPIRED)
+                return
+            if not created:
+                await safe_edit_message_text(query, CSI_THANKS_MESSAGE)
+                return
             await safe_edit_message_text(query, CSI_THANKS_MESSAGE)
             if rating < 7:
                 context.user_data["awaiting_csi_feedback_id"] = csi_id
@@ -4010,13 +4224,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif query.data.startswith("csi|"):
             try:
                 rating = int(query.data.split("|", maxsplit=1)[1])
-                await query.answer(
-                    "Оценка должна быть от 0 до 10"
+                await answer_callback(
+                    query,
+                    CSI_RATING_OUT_OF_RANGE
                     if not 0 <= rating <= 10
-                    else "Некорректная оценка"
+                    else CSI_INVALID_RATING
                 )
             except ValueError:
-                await query.answer("Некорректная оценка")
+                await answer_callback(query, CSI_INVALID_RATING)
         else:
             await safe_edit_message_text(query, SESSION_EXPIRED)
     except CancelledByUser:
@@ -4027,43 +4242,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await _cleanup_user_session(user_id, context, session_token)
         return
     except Exception as e:
-        logger.error(f"Ошибка в button_callback: {e}", exc_info=True)
-        error_msg = str(e)
-
-        if active_session and active_session.get("_delivery_outcome_unknown"):
-            await safe_edit_message_text(query, DELIVERY_OUTCOME_UNKNOWN)
-        elif "Can't parse entities" in error_msg:
-            try:
-                await safe_edit_message_text(
-                    query,
-                    "❌ Ошибка отображения информации о видео.\n"
-                    "Попробуйте другую ссылку или повторите попытку.",
-                    parse_mode=None,
-                )
-            except Exception:
-                await safe_edit_message_text(query, ERROR_FALLBACK)
-        elif classified := _classify_youtube_error(error_msg):
-            try:
-                await safe_edit_message_text(query, classified, parse_mode="Markdown")
-            except Exception:
-                await safe_edit_message_text(query, ERROR_FALLBACK)
-        else:
-            error_code = _make_error_code_for_exception("bot", e)
-            _schedule_platform_failure_log(
-                platform="bot",
-                stage="button_callback",
-                url=None,
-                error_code=error_code,
-                exc=e,
-                session_id=_session_id_of(context, session_token),
-            )
-            try:
-                await safe_edit_message_text(
-                    query,
-                    USER_ERROR_WITH_CODE.format(error_code=error_code)
-                )
-            except Exception:
-                await safe_edit_message_text(query, ERROR_FALLBACK)
+        failure_session = active_session or _get_session(context, session_token) or {}
+        platform = failure_session.get("platform", "bot")
+        error_code = _make_error_code_for_exception(platform, e)
+        _schedule_platform_failure_log(
+            platform=platform,
+            stage="button_callback",
+            url=failure_session.get("url"),
+            error_code=error_code,
+            exc=e,
+            session_id=_session_id_of(context, session_token),
+        )
+        text = (
+            DELIVERY_OUTCOME_UNKNOWN
+            if failure_session.get("_delivery_outcome_unknown")
+            else _build_public_error_message(platform, error_code, e)
+        )
+        try:
+            await safe_edit_message_text(query, text, parse_mode=None, reply_markup=feedback_markup(context, error_code, failure_session.get("url")))
+        except Exception:
+            await safe_edit_message_text(query, ERROR_FALLBACK)
 
         if session_token:
             await _cleanup_user_session(user_id, context, session_token)
@@ -4145,6 +4343,7 @@ async def send_file(
             session_token,
             session_data,
             cache_format_id=cache_format_id,
+            feedback_context=context,
         )
         if success:
             await _record_delivery(user_id, session_data)
@@ -4167,22 +4366,7 @@ async def send_file(
         await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
-        )
-    except telegram.error.NetworkError as e:
-        error_code = _make_error_code_for_exception(platform, e, prefix_platform="telegram")
-        _schedule_platform_failure_log(
-            platform=platform,
-            stage="send_file_network",
-            url=url,
-            error_code=error_code,
-            exc=e,
-            session_id=session_data.get("session_id"),
-        )
-        await _edit_delivery_status(
-            query,
-            USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+            reply_markup=feedback_markup(context, error_code, url, existing=back_markup),
         )
     except telegram.error.TelegramError as e:
         error_code = _make_error_code_for_exception(platform, e, prefix_platform="telegram")
@@ -4196,8 +4380,8 @@ async def send_file(
         )
         await _edit_delivery_status(
             query,
-            USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+            _build_public_error_message(platform, error_code, e),
+            reply_markup=feedback_markup(context, error_code, url, existing=back_markup),
         )
     except Exception as e:
         error_code = _make_error_code_for_exception(platform, e, prefix_platform="bot")
@@ -4211,14 +4395,85 @@ async def send_file(
         )
         await _edit_delivery_status(
             query,
-            USER_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+            _build_public_error_message(platform, error_code, e),
+            reply_markup=feedback_markup(context, error_code, url, existing=back_markup),
         )
     finally:
         if success or session_data.get("_delivery_outcome_unknown"):
             await _cleanup_user_session(user_id, context, session_token)
         elif session_id := session_data.get("session_id"):
             _cleanup_session_when_idle(session_id)
+
+
+async def _cache_complete_post(session_data: dict) -> None:
+    """Полная публикация появляется в кеше только после всех подтверждений."""
+    bot_id = session_data.get("_bot_id")
+    if not bot_id or session_data.get("_cached_manifest_id"):
+        return
+    info = session_data.get("video_info") or {}
+    platform = session_data["platform"]
+    key = "_nuvio_instagram_carousel_items" if info.get("_nuvio_instagram_mixed_post") else f"_nuvio_{platform}_images"
+    expected = int(session_data.get("_post_expected_count") or len(info.get(key) or []))
+    audio_expected = bool(info.get(f"_nuvio_{platform}_audio_url"))
+    messages = session_data.get("_media_messages", [])
+    artifacts = [artifact_from_message(message) for message in messages]
+    if not expected or any(item is None for item in artifacts):
+        return
+    if len(artifacts) != expected + int(audio_expected) or (audio_expected and not session_data.get("_audio_delivered")):
+        return
+    items = [(item, "audio" if audio_expected and index == expected else "media")
+             for index, item in enumerate(artifacts)]
+    await cache_call(telegram_cache.artifacts.put, bot_id, session_data["url"],
+                     recipe_for(platform, "photo_post"), items, {"count": expected})
+
+
+async def _deliver_cached_post(query, session_data: dict) -> bool:
+    """Отправляет полный состав с сохраненными типами и порядком блоками до десяти."""
+    if not session_data.get("_bot_id") or session_data.get("_delivered_items"):
+        return False
+    manifest = await cache_call(telegram_cache.artifacts.get, session_data["_bot_id"],
+                                session_data["url"], recipe_for(session_data["platform"], "photo_post"))
+    if not manifest:
+        return False
+    caption, chunks = description_delivery_plan(_description_for_delivery(session_data))
+    items = manifest["items"]
+    offset = 0
+    while offset < len(items):
+        artifact, role = items[offset]
+        family = "visual" if artifact.kind in {"photo", "video"} else artifact.kind
+        group = []
+        while offset + len(group) < len(items) and len(group) < 10:
+            candidate, candidate_role = items[offset + len(group)]
+            candidate_family = "visual" if candidate.kind in {"photo", "video"} else candidate.kind
+            if candidate_role != role or candidate_family != family:
+                break
+            group.append(candidate)
+        try:
+            if len(group) == 1:
+                await _call_telegram_with_retry_after(
+                    lambda: _reply_cached(query, group[0], social=True, caption=caption if offset == 0 else None), session_data)
+            else:
+                classes = {"photo": InputMediaPhoto, "video": InputMediaVideo,
+                           "audio": telegram.InputMediaAudio, "document": telegram.InputMediaDocument}
+                media = [classes[item.kind](media=item.file_id, caption=caption if offset == 0 and index == 0 else None)
+                         for index, item in enumerate(group)]
+                await _call_telegram_with_retry_after(lambda: query.message.reply_media_group(media=media, do_quote=False), session_data)
+        except telegram.error.BadRequest as error:
+            if not _is_stale_file_id(error):
+                raise
+            await cache_call(telegram_cache.artifacts.invalidate_manifest, manifest["id"])
+            if offset:
+                raise
+            return False
+        offset += len(group)
+        if role == "audio":
+            session_data["_audio_delivered"] = True
+        else:
+            session_data["_delivered_items"] = offset
+    session_data["_cached_manifest_id"] = manifest["id"]
+    await cache_call(telegram_cache.artifacts.touch, manifest["id"])
+    await _send_description_chunks(query, chunks, session_data.get("_first_media_message"), session_data)
+    return True
 
 
 async def _send_photo_post_assets(
@@ -4258,6 +4513,7 @@ async def _send_photo_post_assets(
         referer = "https://www.tiktok.com/"
 
     async def finish_delivery() -> None:
+        await _cache_complete_post(session_data)
         await _record_delivery(user_id, session_data)
         await _edit_delivery_status(
             query,
@@ -4277,11 +4533,11 @@ async def _send_photo_post_assets(
             session_id=session_id,
         )
 
-    async def report_failure(text: str) -> None:
+    async def report_failure(text: str, reply_markup=None) -> None:
         await _edit_delivery_status(
             query,
             PHOTO_POST_PARTIAL if session_data.get("_delivery_progress") else text,
-            reply_markup=back_markup,
+            reply_markup=reply_markup or back_markup,
         )
         _cleanup_session_when_idle(session_id)
 
@@ -4290,7 +4546,7 @@ async def _send_photo_post_assets(
             platform, error, prefix_platform="telegram"
         )
         log_failure("send_photo_post_telegram", error_code, error)
-        await report_failure(USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code))
+        await report_failure(_build_public_error_message(platform, error_code, error), reply_markup=feedback_markup(context, error_code, url))
 
     try:
         await _edit_delivery_status(
@@ -4302,6 +4558,9 @@ async def _send_photo_post_assets(
         # весь набор, но пользователю отправляется только неподтвержденный остаток.
         video_info = session_data.get("video_info") or {}
         is_mixed = bool(video_info.get("_nuvio_instagram_mixed_post"))
+        if await _deliver_cached_post(query, session_data):
+            await finish_delivery()
+            return
         if is_mixed and not video_info.get("_nuvio_instagram_carousel_complete"):
             await _edit_delivery_status(query, INSTAGRAM_CAROUSEL_INCOMPLETE)
             await _cleanup_user_session(user_id, context, session_token)
@@ -4320,7 +4579,7 @@ async def _send_photo_post_assets(
                     query, photo_plan, session_data
                 )
                 session_data["_delivered_items"] = outcome.confirmed_items
-                session_data["_delivery_progress"] = outcome.confirmed_items
+                session_data["_delivery_progress"] = max(int(session_data.get("_delivery_progress") or 0), outcome.confirmed_items)
                 if outcome.messages:
                     session_data["_confirmed_delivery_messages"] = outcome.messages
                     session_data.setdefault(
@@ -4368,10 +4627,8 @@ async def _send_photo_post_assets(
             )
             or []
         )
-        if delivered_items and (
-            delivered_items > len(media_items)
-            or (expected_count and expected_count != len(media_items))
-        ):
+        session_data["_post_expected_count"] = expected_count or len(media_items)
+        if delivered_items > len(media_items) or (expected_count and expected_count != len(media_items)):
             raise RuntimeError("Состав публикации изменился после частичной отправки")
         if delivered_items and not session_data.get("_first_media_message"):
             raise RuntimeError("Нет подтверждения первого сообщения альбома")
@@ -4445,18 +4702,18 @@ async def _send_photo_post_assets(
         await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+            reply_markup=feedback_markup(context, error_code, url, existing=back_markup),
         )
         _cleanup_session_when_idle(session_id)
     except telegram.error.BadRequest as e:
         await report_telegram_failure(e)
     except telegram.error.NetworkError as e:
-        session_data["_delivery_outcome_unknown"] = True
+        session_data["_delivery_outcome_unknown"] = not _is_proven_not_sent(e)
         error_code = _make_error_code_for_exception(
             platform, e, prefix_platform="telegram"
         )
         log_failure("send_photo_post_network", error_code, e)
-        await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN)
+        await _edit_delivery_status(query, DELIVERY_OUTCOME_UNKNOWN if not _is_proven_not_sent(e) else PHOTO_POST_PARTIAL if session_data.get("_delivery_progress") else _build_public_error_message(platform, error_code, e))
         await _cleanup_user_session(user_id, context, session_token)
     except telegram.error.TelegramError as e:
         await report_telegram_failure(e)
@@ -4465,7 +4722,7 @@ async def _send_photo_post_assets(
             platform, _classify_internal_error_category(platform, e)
         )
         log_failure("send_photo_post_unexpected", error_code, e)
-        await report_failure(_build_public_error_message(platform, error_code, e))
+        await report_failure(_build_public_error_message(platform, error_code, e), reply_markup=feedback_markup(context, error_code, url))
 
 
 def _file_ready_to_send(file_path: Path) -> bool:
@@ -4493,12 +4750,19 @@ async def send_single_file(
     session_data: dict,
     max_retries: int = 3,
     cache_format_id: str | None = None,
+    feedback_context=None,
 ) -> bool:
     """Новая версия отправки одного файла с обратной кнопкой для текущей сессии."""
     last_error: Exception | None = None
     back_markup = _build_back_markup(session_token)
     platform = session_data.get("platform", "bot")
     url = session_data.get("url")
+
+    def failure_markup(error_code: str):
+        return (
+            feedback_markup(feedback_context, error_code, url, existing=back_markup)
+            if feedback_context is not None else back_markup
+        )
 
     # Повторять нечего: файла нет, и от третьей попытки он не появится.
     if not _file_ready_to_send(file_path):
@@ -4517,7 +4781,7 @@ async def send_single_file(
         await _edit_delivery_status(
             query,
             USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
-            reply_markup=back_markup,
+            reply_markup=failure_markup(error_code),
         )
         return False
 
@@ -4617,7 +4881,7 @@ async def send_single_file(
 
             # Кэширование file_id для видео, аудио и документов
             if message and url and cache_format_id:
-                _cache_sent_media(
+                await cache_call(_cache_sent_media,
                     message,
                     url,
                     platform,
@@ -4650,7 +4914,7 @@ async def send_single_file(
             await _edit_delivery_status(
                 query,
                 USER_FILE_ERROR_WITH_CODE.format(error_code=error_code),
-                reply_markup=back_markup,
+                reply_markup=failure_markup(error_code),
             )
             return False
         except telegram.error.BadRequest as e:
@@ -4665,23 +4929,14 @@ async def send_single_file(
                 exc=e,
                 session_id=session_data.get("session_id"),
             )
-            category = _classify_internal_error_category(platform, e)
-            message = (
-                _build_public_error_message(platform, error_code, e)
-                if category == "LARGE"
-                else USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code)
-            )
-            await _edit_delivery_status(query, message, reply_markup=back_markup)
+            message = _build_public_error_message(platform, error_code, e)
+            await _edit_delivery_status(query, message, reply_markup=failure_markup(error_code))
             return False
         except (telegram.error.NetworkError, telegram.error.TimedOut) as e:
             last_error = e
             logger.warning(f"Попытка {attempt}/{retry_limit} неудачна: {e}")
-            if platform in {"tiktok", "instagram"}:
-                session_data["_delivery_outcome_unknown"] = True
-                break
-            if attempt < retry_limit:
-                await asyncio.sleep(2**attempt)
-            continue
+            session_data["_delivery_outcome_unknown"] = not _is_proven_not_sent(e)
+            break
         except telegram.error.TelegramError as e:
             error_code = _make_error_code_for_exception(
                 platform, e, prefix_platform="telegram"
@@ -4696,8 +4951,8 @@ async def send_single_file(
             )
             await _edit_delivery_status(
                 query,
-                USER_TELEGRAM_ERROR_WITH_CODE.format(error_code=error_code),
-                reply_markup=back_markup,
+                _build_public_error_message(platform, error_code, e),
+                reply_markup=failure_markup(error_code),
             )
             return False
         except Exception as e:
@@ -4715,7 +4970,7 @@ async def send_single_file(
             await _edit_delivery_status(
                 query,
                 _build_public_error_message(platform, error_code, e),
-                reply_markup=back_markup,
+                reply_markup=failure_markup(error_code),
             )
             return False
 
@@ -4735,11 +4990,11 @@ async def send_single_file(
             query,
             DELIVERY_OUTCOME_UNKNOWN
             if session_data.get("_delivery_outcome_unknown")
-            else USER_NETWORK_ERROR_WITH_CODE.format(error_code=error_code),
+            else _build_public_error_message(platform, error_code, last_error),
             reply_markup=(
                 None
                 if session_data.get("_delivery_outcome_unknown")
-                else back_markup
+                else failure_markup(error_code)
             ),
         )
     return False

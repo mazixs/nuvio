@@ -2,7 +2,6 @@
 WebUI дашборд аналитики бота.
 """
 
-import asyncio
 import hmac
 import logging
 import os
@@ -39,7 +38,13 @@ from utils.analytics_db import (  # noqa: E402
     get_user_detail,
     get_users_for_csi,
     set_csi_interval_days,
+    get_feedback,
+    set_feedback_status,
+    set_user_blocked,
 )
+
+from utils.db_worker import run_db  # noqa: E402
+from utils.cache_policy import get_cache_policy, set_cache_policy  # noqa: E402
 
 logger = logging.getLogger("nuvio.web")
 
@@ -180,7 +185,7 @@ def _sanitize_input(value: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        init_db()
+        await run_db(init_db)
         yield
     finally:
         close_connection()
@@ -201,12 +206,14 @@ def _language(request: Request) -> str:
 
 def _render(request: Request, template: str, context: dict):
     language = _language(request)
+    csrf_token = request.session.setdefault("csrf_token", secrets.token_urlsafe(32))
     return templates.TemplateResponse(
         request,
         template,
         {
             **context,
             "language": language,
+            "csrf_token": csrf_token,
             "t": lambda message, **values: translate(language, message, **values),
         },
     )
@@ -262,7 +269,7 @@ async def set_language(request: Request, language: str, next: str = "/"):
     destination = (
         next
         if (
-            next in {"/", "/login", "/users", "/settings"}
+            next in {"/", "/login", "/users", "/settings", "/feedback"}
             or (next.startswith("/users/") and next.removeprefix("/users/").isdigit())
         )
         else "/"
@@ -340,7 +347,7 @@ async def logout(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, _=Depends(require_auth)):
-    data = await asyncio.to_thread(dashboard_summary)
+    data = await run_db(dashboard_summary)
     return _render(request, "dashboard.html", data)
 
 
@@ -349,7 +356,7 @@ async def users_list(request: Request, page: int = 1, _=Depends(require_auth)):
     page = max(1, page)
     per_page = 50
     offset = (page - 1) * per_page
-    users = await asyncio.to_thread(get_all_users, limit=per_page, offset=offset)
+    users = await run_db(get_all_users, limit=per_page, offset=offset)
     return _render(
         request,
         "users.html",
@@ -363,12 +370,66 @@ async def users_list(request: Request, page: int = 1, _=Depends(require_auth)):
 
 @app.get("/users/{user_id}", response_class=HTMLResponse)
 async def user_detail(request: Request, user_id: int, _=Depends(require_auth)):
-    user = await asyncio.to_thread(get_user_detail, user_id)
+    user = await run_db(get_user_detail, user_id)
     if not user:
         return HTMLResponse(
             translate(_language(request), "User not found"), status_code=404
         )
-    return _render(request, "user_detail.html", {"user": user})
+    feedback = await run_db(get_feedback, limit=10, status="all", user_id=user_id)
+    return _render(request, "user_detail.html", {
+        "user": user, "feedback": feedback, "is_protected": str(user_id) in ADMIN_IDS,
+        "saved": request.query_params.get("saved") == "1",
+    })
+
+
+def _require_csrf(request: Request, token: str) -> None:
+    """Проверяет подпись формы перед административным изменением."""
+    expected = request.session.get("csrf_token")
+    if not expected or not hmac.compare_digest(expected.encode("utf-8"), token.encode("utf-8")):
+        raise HTTPException(403, detail=translate(_language(request), "Form expired. Refresh the page and try again."))
+
+
+@app.post("/users/{user_id}/access")
+async def user_access_submit(
+    request: Request, user_id: int, action: str = Form(...), reason: str = Form(""),
+    csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    if action not in {"block", "unblock"}:
+        raise HTTPException(422, detail=translate(_language(request), "Invalid access action"))
+    try:
+        await run_db(set_user_blocked, user_id, action == "block", reason)
+    except ValueError as error:
+        raise HTTPException(422, detail=translate(_language(request), str(error))) from error
+    except LookupError as error:
+        raise HTTPException(404, detail=translate(_language(request), "User not found")) from error
+    return RedirectResponse(f"/users/{user_id}?saved=1", status_code=303)
+
+
+@app.get("/feedback", response_class=HTMLResponse)
+async def feedback_list(request: Request, status: str = "open", page: int = 1, _=Depends(require_auth)):
+    if status not in {"open", "closed", "all"}:
+        raise HTTPException(422, detail=translate(_language(request), "Invalid feedback status"))
+    page = max(page, 1)
+    entries = await run_db(get_feedback, limit=50, offset=(page - 1) * 50, status=status)
+    return _render(request, "feedback.html", {
+        "feedback": entries, "status": status, "page": page, "has_next": len(entries) == 50,
+    })
+
+
+@app.post("/feedback/{feedback_id}/status")
+async def feedback_status_submit(
+    request: Request, feedback_id: int, status: str = Form(...),
+    csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    try:
+        await run_db(set_feedback_status, feedback_id, status)
+    except ValueError as error:
+        raise HTTPException(422, detail=translate(_language(request), "Invalid feedback status")) from error
+    except LookupError as error:
+        raise HTTPException(404, detail=translate(_language(request), "Feedback not found")) from error
+    return RedirectResponse("/feedback", status_code=303)
 
 
 # ── Настройки ───────────────────────────────────────────────────
@@ -486,19 +547,61 @@ def _settings_context(
         "csi_avg_rating": csi.get("avg_rating", 0.0),
         "error": error,
         "saved": saved,
+        **_cache_settings_context(),
     }
+
+
+def _cache_settings_context() -> dict:
+    """Сводка включает только размер локальных указателей, а не файлов Telegram."""
+    from utils import analytics_db
+    from utils.artifact_cache import ArtifactCache
+
+    policy = get_cache_policy()
+    cache_path = analytics_db._DB_PATH.parent / "telegram_cache.db"
+    stats = {"artifacts": 0, "manifests": 0, "artifact_aliases": 0, "bytes": 0}
+    available = True
+    if cache_path.exists():
+        try:
+            stats = ArtifactCache(cache_path).stats()
+        except Exception:
+            logger.exception("Статистика кеша недоступна")
+            available = False
+    return {"cache_policy": policy, "cache_stats": stats, "cache_available": available,
+            "cache_saved": False, "cache_error": None}
+
+
+@app.post("/settings/cache", response_class=HTMLResponse)
+async def settings_cache(request: Request, cache_retention_days: str | None = Form(None),
+                         cache_auto_cleanup_enabled: str = Form(""),
+                         csrf_token: str = Form(""), _=Depends(require_auth)):
+    _require_csrf(request, csrf_token)
+    error = None
+    status = 422
+    try:
+        days = int(cache_retention_days) if cache_retention_days is not None else (await run_db(get_cache_policy))["days"]
+        await run_db(set_cache_policy, cache_auto_cleanup_enabled == "true", days)
+    except ValueError:
+        error = translate(_language(request), "Retention must be between 1 and 36500 days.")
+    except Exception:
+        logger.exception("Не удалось сохранить политику кеша")
+        error = translate(_language(request), "Cache settings could not be saved. Your changes were not applied.")
+        status = 503
+    if error:
+        data = await run_db(_settings_context, language=_language(request))
+        data["cache_error"] = error
+        data["cache_policy"] = {**data["cache_policy"], "enabled": cache_auto_cleanup_enabled == "true", "days": cache_retention_days}
+        response = _render(request, "settings.html", data)
+        response.status_code = status
+        return response
+    return RedirectResponse("/settings?cache_saved=1", status_code=303)
 
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, _=Depends(require_auth)):
     saved = request.query_params.get("saved") == "1"
-    return _render(
-        request,
-        "settings.html",
-        await asyncio.to_thread(
-            _settings_context, language=_language(request), saved=saved
-        ),
-    )
+    data = await run_db(_settings_context, language=_language(request), saved=saved)
+    data["cache_saved"] = request.query_params.get("cache_saved") == "1"
+    return _render(request, "settings.html", data)
 
 
 @app.get("/api/csi/preview")
@@ -514,7 +617,7 @@ async def api_csi_preview(request: Request, days: int, _=Depends(require_auth)):
             detail=translate(_language(request), "Interval is out of range"),
         )
     zone, zone_label = _csi_zone(days, _language(request))
-    queue_size = await asyncio.to_thread(_csi_queue_size, days)
+    queue_size = await run_db(_csi_queue_size, days)
     return {
         "days": days,
         "unit": day_unit(_language(request), days),
@@ -540,7 +643,7 @@ async def settings_submit(
     отправляет при межсайтовом POST.
     """
     try:
-        await asyncio.to_thread(
+        await run_db(
             set_csi_interval_days, int(_sanitize_input(csi_interval_days))
         )
     except ValueError:
@@ -553,7 +656,7 @@ async def settings_submit(
         return _render(
             request,
             "settings.html",
-            await asyncio.to_thread(
+            await run_db(
                 _settings_context, language=_language(request), error=message
             ),
         )
@@ -565,7 +668,7 @@ async def settings_submit(
 
 @app.get("/api/summary")
 async def api_summary(request: Request, _=Depends(require_auth)):
-    return await asyncio.to_thread(dashboard_summary)
+    return await run_db(dashboard_summary)
 
 
 def run():

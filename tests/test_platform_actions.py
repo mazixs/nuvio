@@ -16,6 +16,7 @@ TELEGRAM_UTILS_PATH = ROOT / "utils" / "telegram_utils.py"
 
 # Способы прочитать кэш file_id в обработчиках: прямой вызов и хелпер аудио.
 _CACHE_READER_NAMES = (
+    "_cache_get",
     "telegram_cache.get",
     "_deliver_cached_audio",
     "_deliver_cached_video",
@@ -197,5 +198,5 @@ def test_cache_reader_detection_is_not_vacuous():
     """Контроль инструмента: в ветвях с чтением кэша он читателей находит."""
     readers = _cache_readers_in_actions(("tiktok_download", "tiktok_audio"))
 
-    assert "tiktok_download: telegram_cache.get" in readers
+    assert "tiktok_download: _cache_get" in readers
     assert "tiktok_audio: _deliver_cached_audio" in readers

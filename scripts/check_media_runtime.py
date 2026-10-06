@@ -36,6 +36,8 @@ def main() -> None:
         raise RuntimeError("версия yt-dlp в образе не совпадает с pin")
     if parts["ejs"] == "отсутствует" or parts["deno"] == "отсутствует":
         raise RuntimeError("для YouTube нужны EJS и Deno")
+    if parts["sqlite"] != "3.53.4":
+        raise RuntimeError("образ должен использовать закрепленный SQLite 3.53.4 с исправленной гонкой WAL")
     if args.download:
         outcome = run_youtube_canary_check("image-smoke")
         if not outcome.ok:

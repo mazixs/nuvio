@@ -3,6 +3,8 @@
 ## Guides
 
 - [Deployment](guides/deployment.md) - installation, Docker, systemd, and the WebUI.
+- [Feedback and moderation](guides/feedback-and-moderation.md) - user reports, WebUI review, and access restrictions.
+- [Media cache and delivery](guides/cache-and-delivery.md) - retention settings, album reuse, delivery evidence, migration, and rollback.
 - [Configuration](guides/configuration.md) - environment variables, cookies, and limits.
 
 ## Technical reference
@@ -12,6 +14,13 @@
 - [FSM architecture](technical/fsm-architecture.md) - state machines, bottlenecks, and prioritized improvements.
 - [YouTube download runbook](technical/youtube-download-runbook.md) - incident analysis, reliable probes, diagnosis, and yt-dlp pin updates.
 - [Error codes](error-codes.md) - code format, platform prefixes, categories, and log lookup.
+- [Cache and delivery research](technical/cache-and-delivery-research-2026-10-06.md) - Telegram contracts, comparable projects, and evidence boundaries.
+
+## Current audits and plans
+
+- [Cache and delivery implementation acceptance](audits/cache-and-delivery-acceptance-2026-10-06.md) - local evidence, runtime verification, and pending external checks.
+- [Cache and delivery audit](audits/cache-and-delivery-audit-2026-10-06.md) - dated findings and reproducible local experiments.
+- [Cache and delivery change plan](plans/cache-and-delivery-changes-2026-10-06.md) - implementation phases, acceptance gates, and rollback.
 
 ## Development
 

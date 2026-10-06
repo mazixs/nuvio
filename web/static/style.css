@@ -666,7 +666,7 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
     letter-spacing: 0.08em;
 }
 
-.form-group input {
+.form-group input, .form-group textarea {
     width: 100%;
     padding: 0.75rem 1rem;
     background: var(--bg);
@@ -678,7 +678,7 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
     transition: all var(--transition);
 }
 
-.form-group input:focus {
+.form-group input:focus, .form-group textarea:focus {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px var(--primary-glow);
 }
@@ -686,6 +686,26 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
 .form-group input::placeholder {
     color: var(--text-muted);
 }
+
+/* Управление доступом и обращения в существующей административной панели. */
+.moderation-section { margin: 2rem 0; }
+.moderation-section h2, .feedback-header h2 { font-size: 1.15rem; margin-bottom: .75rem; }
+.moderation-form { max-width: 48rem; }
+.moderation-form label { color: var(--text-secondary); }
+.moderation-form textarea:focus { box-shadow: none; outline: 2px solid var(--primary-light); outline-offset: 2px; }
+.form-group textarea { resize: vertical; min-height: 5rem; font-family: inherit; }
+.feedback-filters, .feedback-actions, .feedback-meta { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+.feedback-filters { margin-bottom: 1.5rem; }
+.feedback-entry { padding: 1.5rem 0; border-bottom: 1px solid var(--border); }
+.moderation-section .subtitle { color: var(--text-secondary); }
+.moderation-section .alert[role="status"] { color: var(--accent); background: var(--surface); border-color: var(--accent); }
+.feedback-header h2 { overflow-wrap: anywhere; min-width: 0; }
+.feedback-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .5rem; }
+.feedback-text { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 75ch; margin: 1rem 0; }
+.feedback-source { overflow-wrap: anywhere; color: var(--text-secondary); font-size: .875rem; }
+.btn-danger { color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: var(--surface-hover); color: var(--text); }
+.btn:focus-visible, .nav-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 
 /* ── Alerts ──────────────────────────────────────────────── */
 
@@ -1255,3 +1275,19 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
     .charts-grid { gap: 1rem; }
     .chart-box { padding: 1rem; }
 }
+
+/* Настройки кеша используют существующие цвета и стандартную форму. */
+.cache-settings { margin-block: 0 2rem; padding-block: 0 1.5rem; border-bottom: 1px solid var(--border); }
+.cache-settings p { max-width: 72ch; }
+.cache-settings form { display: grid; gap: .75rem; justify-items: start; }
+.cache-toggle { display: flex; align-items: center; gap: .5rem; }
+.cache-settings input[type="number"] { font-size: 1rem; width: min(100%, 14rem); padding: .65rem; }
+.cache-summary { display: flex; flex-wrap: wrap; gap: 1rem 2rem; }
+.cache-summary dd { margin: .25rem 0 0; font-variant-numeric: tabular-nums; }
+.cache-settings h2 { margin-bottom: .75rem; }
+.cache-settings > p { margin-block: .5rem 1rem; }
+.cache-settings input[type="checkbox"] { accent-color: var(--primary); }
+.cache-settings input[type="number"] { background: var(--surface); color: var(--text); border: 1px solid var(--border-light); border-radius: var(--radius); }
+.cache-settings input[type="number"]:disabled { opacity: .55; }
+.cache-settings input:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 3px; }
+.cache-summary { margin-block: 1.25rem .75rem; }

@@ -230,3 +230,6 @@ docs/*.backup
 .python-version
 poetry.lock
 Pipfile.lock
+
+# Согласованные снимки миграции кеша содержат локальные ссылки и идентификаторы.
+*.db.before-artifacts-*.bak

@@ -11,6 +11,7 @@ import yt_dlp
 from config import MAX_FILE_SIZE, MAX_VIDEO_DURATION
 from utils.download_report import record_delivered_format
 from utils.logger import setup_logger
+from utils.media_errors import DurationLimitError
 from utils.media_processor import ensure_ios_compatible_video
 from utils.temp_file_manager import get_temp_file_path
 from utils.ytdlp_common import (
@@ -70,9 +71,7 @@ def _get_info(
         duration = info.get("duration")
         if enforce_duration and duration and duration > MAX_VIDEO_DURATION:
             logger.warning(f"Видео слишком длинное: {duration} секунд")
-            raise Exception(
-                f"Видео слишком длинное. Максимальная длительность: {MAX_VIDEO_DURATION // 60} минут."
-            )
+            raise DurationLimitError(duration, MAX_VIDEO_DURATION)
         logger.info(f"Информация о {platform} видео успешно получена.")
         return info
 

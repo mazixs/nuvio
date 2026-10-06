@@ -10,11 +10,13 @@ Nuvio is an asynchronous Telegram bot for downloading video, photo posts, and au
 - YouTube audio selection prefers a Russian track when one is available within the Telegram size limit. The audio menu identifies track languages.
 - Photo posts are delivered as images, with audio sent separately when available.
 - Audio extraction through FFmpeg, including MP3 192k for video sources.
-- A 90-day Telegram file ID cache makes repeated delivery fast.
+- A persistent Telegram file ID cache supports videos, photos, ordered albums, and audio; optional cleanup is controlled in the WebUI.
 - Files up to 2 GB can be sent through the local Telegram Bot API. Direct runs use the cloud API and its 50 MB limit.
 - Temporary downloaded media is removed after delivery or failure.
 - Spam protection and administrator commands for cache and cookie management.
 - CSI surveys with feedback and NPS/CSI metrics. Survey frequency is adjustable in the WebUI without restarting the bot.
+- General feedback through `/feedback` or an error-message button, with reports managed in the WebUI.
+- User blocking and unblocking from WebUI profiles, applied to new bot requests without a restart.
 - A FastAPI analytics WebUI. English is the default language; Russian is available from the language switch.
 
 ### Platform notes
@@ -82,7 +84,7 @@ The sole environment template is [`.env.example`](.env.example). Keep the workin
 
 The [configuration reference](docs/guides/configuration.md) lists all variables, including platform fast paths, cookies, size limits, fail2ban, and yt-dlp fallback settings. The [error code reference](docs/error-codes.md) explains user-visible error IDs.
 
-**TikTok cache note:** The file ID cache is read before downloading and lasts 90 days. Turning `TIKTOK_FAST_PATH` off does not change already cached deliveries. `/cleanup_cache` only removes expired records. To reset cached quality immediately, remove `telegram_cache.db` from `DATA_DIR` and restart the bot, or wait for the cache TTL.
+**Media cache:** Valid Telegram references and source links have no expiration by default. The WebUI settings let you enable cleanup and choose days since last successful reuse, without environment variables or a restart. `/cleanup_cache` applies that same policy and does nothing while cleanup is disabled. Temporary downloads are cleaned independently. The cache separates bots, processing recipes, and actual Telegram media types. Changing `TIKTOK_FAST_PATH` now uses a different recipe and does not reuse the former quality. Legacy references without verified bot/type/recipe identity remain inspectable but are not promoted automatically. See [cache operation and migration](docs/guides/cache-and-delivery.md).
 
 ## Bot commands
 
@@ -120,6 +122,7 @@ SQLite queries are parameterized. WebUI credential checks use timing-safe compar
 ## Documentation
 
 - [Documentation index](docs/index.md)
+- [Feedback and moderation](docs/guides/feedback-and-moderation.md)
 - [Architecture](docs/technical/architecture.md)
 - [YouTube incident runbook](docs/technical/youtube-download-runbook.md)
 - [Contributor guide](docs/development/contributing.md)
