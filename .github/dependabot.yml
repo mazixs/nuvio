@@ -6,8 +6,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     # yt-dlp обновляет workflow ytdlp-update через scripts/update_ytdlp.py: он же
-    # правит версию в документах, без которой падают тесты. Условие без versions
-    # не действует на обновления безопасности, они по-прежнему приходят.
+    # правит версию в документах, без которой падают тесты. GitHub применяет это
+    # правило и к обновлениям безопасности, поэтому при уязвимости yt-dlp нужно
+    # запустить ytdlp-update вручную (workflow_dispatch).
     ignore:
       - dependency-name: "yt-dlp"
     groups:
