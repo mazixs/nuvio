@@ -25,9 +25,10 @@ pytestmark = pytest.mark.unit
 
 URL = "https://www.youtube.com/watch?v=abc123def45"
 
-# Текст из лога прода; имя узла CDN заменено.
+# Текст из лога прода; имя узла CDN заменено. `\r` после префикса — как в
+# `str(DownloadError)` закреплённой версии: yt-dlp очищает строку прогресса.
 DNS_FAILURE = (
-    "ERROR: [download] Got error: HTTPSConnection(host='rr1---sn-test.googlevideo.com', "
+    "ERROR: \r[download] Got error: HTTPSConnection(host='rr1---sn-test.googlevideo.com', "
     "port=443): Failed to resolve 'rr1---sn-test.googlevideo.com' ([Errno -5] No address "
     "associated with hostname). Giving up after 5 retries"
 )
@@ -86,6 +87,7 @@ def test_dns_failure_is_found_in_exception_chain_not_only_in_text():
     [
         socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
         ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+        ConnectionRefusedError("Connection refused"),
         OSError(errno.ENETUNREACH, "Network is unreachable"),
         OSError(errno.EHOSTUNREACH, "No route to host"),
     ],
@@ -135,7 +137,21 @@ def test_cli_output_lines_do_not_count_only_error_lines_do():
     )
 
     assert not is_connectivity_failure(title_in_stdout)
+    assert youtube_error_code(title_in_stdout) != "NETWORK"
+    assert classify_internal_error_category("rutube", title_in_stdout) != "NETWORK"
     assert is_connectivity_failure(dns_in_stderr)
+
+
+def test_bare_error_prefix_is_joined_with_the_cause_on_the_next_line():
+    """Причина не должна зависеть от слов «Got error» в строке загрузки."""
+    reworded = (
+        "ERROR: \r[download] Unable to continue: HTTPSConnection(host='media.invalid', "
+        "port=443): Failed to resolve 'media.invalid' ([Errno -5] No address "
+        "associated with hostname)"
+    )
+
+    assert is_connectivity_failure(reworded)
+    assert youtube_error_code(reworded) == "NETWORK"
 
 
 def test_suppressed_context_does_not_turn_access_error_into_network():
