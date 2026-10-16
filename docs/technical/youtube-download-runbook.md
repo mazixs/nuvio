@@ -52,7 +52,8 @@ A line resembles `USER_FLOW_FAIL code=YT-… platform=youtube stage=format_downl
 | `YT-ACCESS_R-…` | `ACCESS_RESTRICTED` | Private, paid, age-restricted, or unavailable video |
 | `YT-FORMAT_U-…` | `FORMAT_UNAVAILABLE` | Requested format unavailable; investigate extraction rather than media delivery |
 | `YT-EXTRACTO-…` | `EXTRACTOR_RUNTIME` | Missing JS runtime, `nsig extraction failed`, or `remote components` issue |
-| `YT-NETWORK_-…` | `NETWORK_TIMEOUT` | Timeout or connection reset |
+| `YT-NETWORK_-…` | `NETWORK_TIMEOUT` | Timeout; retried with backoff and eligible for CLI fallback |
+| `YT-NETWORK-…` | `NETWORK` | Connection reset, DNS resolution failure, unreachable network or host, refused connection. A reset is retried; the other causes stop after yt-dlp's own retries, without cookies or CLI. Check the server's DNS and route before YouTube |
 
 A surge in `MEDIA_FORBIDDEN` points to section 4. Isolated cases can occur when a short-lived `googlevideo` URL expires; extracting again refreshes it. `is_media_forbidden_error()` in `utils/public_errors.py` separates this category. The final failure is reported to administrators, and the log shows the individual attempts.
 
@@ -144,8 +145,8 @@ Use a nightly build when stable yt-dlp cannot handle YouTube. When a fixed stabl
 
 | File | Relevant logic |
 |---|---|
-| `utils/ytdlp_common.py` | `DEFAULT_YTDLP_NETWORK_OPTS`, including `http_chunk_size`; `classify_download_error_kind()`; `execute_with_backoff()` for `NETWORK_TIMEOUT` and `MEDIA_FORBIDDEN` |
-| `utils/youtube_utils.py` | Without-cookies, with-cookies, then CLI attempts; non-HLS fallback after 403; `PO_TOKEN_ONLY_FORMAT_IDS`; CLI stderr tail |
+| `utils/ytdlp_common.py` | `DEFAULT_YTDLP_NETWORK_OPTS`, including `http_chunk_size`; `classify_download_error_kind()`; `execute_with_backoff()` with full jitter for `NETWORK`, `NETWORK_TIMEOUT`, and `MEDIA_FORBIDDEN`, except connectivity failures |
+| `utils/youtube_utils.py` | Without-cookies, with-cookies, then CLI attempts; non-HLS fallback after 403; `PO_TOKEN_ONLY_FORMAT_IDS`; CLI stderr tail; `_network_unavailable()` stops the sequence on connectivity failures |
 | `utils/public_errors.py` | `youtube_error_code()` and `is_media_forbidden_error()`, separating `MEDIA_FORBIDDEN` from `ACCESS_RESTRICTED` |
 | `utils/download_report.py` | yt-dlp output tail and actual downloaded format for crash reports and cache keys |
 | `utils/canary.py` | Scheduled YouTube probe using production options without the cache, with failure notification |

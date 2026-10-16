@@ -2,6 +2,7 @@
 Shared utilities and configuration for yt-dlp downloaders.
 """
 
+import random
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from config import MAX_FILE_SIZE
 from utils import download_report, work_budget
 from utils.cancellation import cancellation_hook
 from utils.logger import setup_logger
-from utils.public_errors import youtube_error_code
+from utils.public_errors import is_connectivity_failure, youtube_error_code
 
 logger = setup_logger(__name__)
 
@@ -122,13 +123,24 @@ def apply_network_opts(options: dict[str, Any], session_id: str | None = None) -
 def execute_with_backoff(
     description: str, func: Callable[[], Path | str], max_attempts: int = 3
 ) -> Path | str:
-    """Executes a downloader function with exponential backoff on network timeouts."""
+    """Executes a downloader function with exponential backoff on network timeouts.
+
+    Пауза — full jitter: случайная в пределах экспоненты. Одновременно упавшие
+    загрузки не возвращаются к площадке одной волной.
+    """
     for attempt in range(1, max_attempts + 1):
         try:
             work_budget.check()
             return func()
         except yt_dlp.utils.DownloadError as e:
             message = str(e)
+            if is_connectivity_failure(e):
+                # yt-dlp уже повторил запрос сам. DNS и маршрут за секунды
+                # паузы не вернутся, а внешний повтор лишь умножает ожидание.
+                logger.warning(
+                    "%s: network unavailable, not retrying: %s", description, message
+                )
+                raise
             error_kind = classify_download_error_kind(message)
             # MEDIA_FORBIDDEN повторяется наравне с таймаутом: каждая попытка
             # заново разбирает ссылку и получает свежую подпись, а именно этого
@@ -144,9 +156,9 @@ def execute_with_backoff(
                         exc_info=True,
                     )
                     raise
-                delay = min(2**attempt, 30)
+                delay = random.uniform(0, min(2**attempt, 30))
                 logger.warning(
-                    "%s: %s (attempt %s/%s). Retrying in %ss",
+                    "%s: %s (attempt %s/%s). Retrying in %.1fs",
                     description,
                     error_kind,
                     attempt,
