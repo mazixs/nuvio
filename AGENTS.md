@@ -132,7 +132,7 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 1. Blocking yt-dlp and FFmpeg work stays outside the event loop.
 2. Callback buttons use session tokens of the form `s|{token}|{scope}|{action}`, with at most five active sessions per user.
 3. Save the Telegram `file_id` after first delivery; subsequent equivalent requests can use the cached ID.
-4. Retry network timeouts with exponential backoff and full jitter. Use the `python -m yt_dlp` CLI fallback when the embedded API fails. A server connectivity failure (DNS resolution, unreachable network or host, refused connection) gets only yt-dlp's own retries: no backoff, cookie, or CLI attempt.
+4. Retry network timeouts with exponential backoff and full jitter. Use the `python -m yt_dlp` CLI fallback when the embedded API fails. A server connectivity failure (DNS resolution, unreachable network or host, refused connection) gets only yt-dlp's own retries. On YouTube that means no backoff, cookie, or CLI attempt; Rutube and VK skip backoff in `execute_with_backoff`; TikTok and Instagram change only the error category.
 5. YouTube attempts start **without cookies**, then try cookies. Authentication can remove the token-free `android_vr` client. Instagram follows the same order; TikTok tries cookies first.
 6. TikTok `/photo/` links and Instagram carousels produce image sets, with separate audio when available.
 7. Pin yt-dlp in `requirements.in` and the image. `scripts/update_ytdlp.py` and a new image release perform updates.

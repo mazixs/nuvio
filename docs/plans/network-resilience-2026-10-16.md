@@ -22,9 +22,9 @@ The outage of 2026-10-15 was on the provider's side. Hypotheses that the bot ove
 
 ## PR A: correct classification and one retry layer
 
-- [x] Classify by exception type first, with text markers as a fallback for CLI stderr. Walk `__cause__`, yt-dlp `.cause`, `DownloadError.exc_info`, and `__context__` unless suppressed. Implemented as `is_connectivity_failure()` in `utils/public_errors.py`.
+- [x] Classify by exception type first, with text markers as a fallback for download errors and CLI stderr. Walk `__cause__`, yt-dlp `.cause`, `DownloadError.exc_info`, and `__context__` unless suppressed. Markers are matched only in `error:` lines, and an `OSError` only by type, so a video title in a path or a `Destination` line cannot match. Implemented as `is_connectivity_failure()` in `utils/public_errors.py`.
 - [x] Classify `socket.gaierror` as `NETWORK`, not `IO`.
-- [x] For DNS, unreachable network or host, and refused connections, keep only yt-dlp's own retries: no `execute_with_backoff`, cookie attempt, non-HLS selector, or CLI. `NETWORK_TIMEOUT` keeps CLI, which recovered downloads during the 2026-08-18 incident.
+- [x] For DNS, unreachable network or host, and refused connections, keep only yt-dlp's own retries: no `execute_with_backoff`, cookie attempt, non-HLS selector, or CLI. The first failing YouTube CLI run raises its own error with the original as `__cause__`, so the user sees the network cause. `NETWORK_TIMEOUT` keeps CLI, which recovered downloads during the 2026-08-18 incident.
 - [x] Full jitter in `execute_with_backoff`.
 - [x] Run the canary through `work_budget.execute` with its `session_id`, so the deadline and cancellation reach CLI.
 - [x] Offline tests: chained `gaierror` → `NETWORK`; no CLI on DNS failure; CLI still used on timeout; canary timeout stops its CLI process.

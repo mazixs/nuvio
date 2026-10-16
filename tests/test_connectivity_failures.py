@@ -112,6 +112,32 @@ def test_platform_and_transient_failures_are_not_connectivity(message, category)
     assert youtube_error_code(message) == category
 
 
+def test_video_title_in_file_path_is_not_a_network_failure():
+    """Путь к файлу несёт название ролика; у `OSError` ответ даёт тип, а не текст."""
+    missing = FileNotFoundError(
+        "Скачивание завершилось, но итоговый файл не найден: "
+        "/app/media/session/Connection Refused - No Route to Host.mp4"
+    )
+
+    assert not is_connectivity_failure(missing)
+    assert youtube_error_code(missing) == "FILE"
+
+
+def test_cli_output_lines_do_not_count_only_error_lines_do():
+    title_in_stdout = RuntimeError(
+        "CLI fallback yt-dlp завершился ошибкой: "
+        "[download] Destination: /app/media/session/Connection refused.mp4\n"
+        "ERROR: Postprocessing: Conversion failed!"
+    )
+    dns_in_stderr = RuntimeError(
+        "CLI fallback yt-dlp завершился ошибкой: WARNING: [youtube] abc123def45: retrying\n"
+        f"{DNS_FAILURE}"
+    )
+
+    assert not is_connectivity_failure(title_in_stdout)
+    assert is_connectivity_failure(dns_in_stderr)
+
+
 def test_suppressed_context_does_not_turn_access_error_into_network():
     try:
         try:
@@ -126,6 +152,9 @@ def test_suppressed_context_does_not_turn_access_error_into_network():
 
 
 def test_backoff_does_not_retry_unreachable_network(monkeypatch):
+    """Страховка вместе с тестом категории выше: на `main` DNS-сбой был `DOWNLOAD`
+    и тоже не повторялся, но после переименования в `NETWORK` попал бы под
+    повторы `execute_with_backoff`, если бы не отдельная проверка."""
     pauses: list[float] = []
     monkeypatch.setattr("utils.ytdlp_common.work_budget.pause", pauses.append)
     attempts: list[int] = []
@@ -247,15 +276,23 @@ def test_subtitles_do_not_retry_with_cookies_when_offline(offline_youtube, tmp_p
     assert len(_FailingYDL.calls) == 1
 
 
-def test_cli_stops_after_first_network_failure(offline_youtube, tmp_path):
-    """Если сеть пропала посреди CLI-комбинаций, остальные не запускаются."""
+@pytest.mark.parametrize("download", ["download_video", "download_audio_native", "download_audio"])
+def test_cli_stops_after_first_network_failure(offline_youtube, tmp_path, download):
+    """Если сеть пропала посреди CLI-комбинаций, остальные не запускаются.
+
+    Пользователь видит сетевую причину, а прежняя ошибка встроенного API
+    остаётся в `__cause__` для диагностики.
+    """
     _FailingYDL.error = "ERROR: something unexpected happened"
 
-    with pytest.raises(yt_dlp.utils.DownloadError, match="unexpected"):
-        youtube_utils.download_video(
+    with pytest.raises(RuntimeError, match="Failed to resolve") as failure:
+        getattr(youtube_utils, download)(
             URL, "137+140", "offline-cli", output_dir=tmp_path, force_local=True
         )
 
+    assert isinstance(failure.value.__cause__, yt_dlp.utils.DownloadError)
+    assert "unexpected" in str(failure.value.__cause__)
+    assert youtube_error_code(failure.value) == "NETWORK"
     assert len(_FailingYDL.calls) == 2
     assert len(offline_youtube["calls"]) == 1
 

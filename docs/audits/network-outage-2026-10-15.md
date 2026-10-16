@@ -43,7 +43,7 @@ The `telegram-bot-api` logs for the window were lost: the `json-file` log driver
 
 2. **Four retry layers multiplied the wait:** yt-dlp's own retries, `execute_with_backoff` (three attempts, no jitter), the cookie attempt, and up to six CLI combinations. Renaming the category to `NETWORK` alone would have added backoff retries.
 
-3. **The exception chain carries the cause.** Measured inside the production container with the pinned yt-dlp: `DownloadError.exc_info[1]` → `TransportError.cause` → `urllib3.NameResolutionError.__cause__` → `socket.gaierror`. `DownloadError.__context__` also holds an `ExtractorError`.
+3. **The exception chain carries the cause only while parsing a link.** Measured inside the production container with the pinned yt-dlp: `DownloadError.exc_info[1]` → `TransportError.cause` → `urllib3.NameResolutionError.__cause__` → `socket.gaierror`. `DownloadError.__context__` also holds an `ExtractorError`. The failure on 2026-10-15 happened during a download, where yt-dlp's `RetryManager` raises a `DownloadError` with an empty `exc_info`. Only the text markers recognize that message.
 
 4. **The canary bypassed `work_budget`.** It ran through `asyncio.to_thread`, so `work_budget.check()` saw no deadline, CLI runs were bounded only by `YTDLP_CLI_TIMEOUT`, and cancellation reached only the progress hook. The canary on 2026-10-15 did not fail on DNS. It failed on `Read timed out` (40 s socket timeout) to `www.youtube.com`, retried three times per request across both cookie modes, and exceeded 600 s.
 
@@ -51,7 +51,7 @@ The `telegram-bot-api` logs for the window were lost: the `json-file` log driver
 
 6. **Nothing restarts a hung bot.** `bot` has no healthcheck, `telegram-bot-api` checks only its port, and `unless-stopped` acts only when the process exits.
 
-7. **Reclassification removes crash reports.** `_should_notify_admins_platform_failure()` already excludes `NETWORK`, `NETWORK_TIMEOUT`, and `TIMEOUT`. After the fix, DNS failures no longer reach administrators until outage summaries exist.
+7. **Reclassification removes crash reports.** `_should_notify_admins_platform_failure()` already excludes `NETWORK`, `NETWORK_TIMEOUT`, and `TIMEOUT`. After the fix, user-facing DNS failures no longer reach administrators until outage summaries exist. The canary reports any failure, so a long outage is still visible once per canary interval, but that report is itself sent during the outage and can end in `Timed out`, as at 14:28:26.
 
 ## Experiment 1: bot and Bot API without internet for 20 minutes
 
