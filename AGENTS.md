@@ -132,7 +132,7 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 1. Blocking yt-dlp and FFmpeg work stays outside the event loop.
 2. Callback buttons use session tokens of the form `s|{token}|{scope}|{action}`, with at most five active sessions per user.
 3. Save the Telegram `file_id` after first delivery; subsequent equivalent requests can use the cached ID.
-4. Retry network timeouts with exponential backoff. Use the `python -m yt_dlp` CLI fallback when the embedded API fails.
+4. Retry network timeouts with exponential backoff and full jitter. Use the `python -m yt_dlp` CLI fallback when the embedded API fails. A server connectivity failure (DNS resolution, unreachable network or host, refused connection) gets only yt-dlp's own retries: no backoff, cookie, or CLI attempt.
 5. YouTube attempts start **without cookies**, then try cookies. Authentication can remove the token-free `android_vr` client. Instagram follows the same order; TikTok tries cookies first.
 6. TikTok `/photo/` links and Instagram carousels produce image sets, with separate audio when available.
 7. Pin yt-dlp in `requirements.in` and the image. `scripts/update_ytdlp.py` and a new image release perform updates.
@@ -181,6 +181,6 @@ The `file_id` cache is checked before downloading and has a 90-day TTL. Changing
 - `messages.py`: Telegram messages must fit its limits, including 4,096 characters for ordinary messages.
 - `config.py`: Update `.env.example` and `README.md` when adding environment variables.
 - `utils/telegram_utils.py` and `utils/callback_fsm.py`: Accompany `callback_data` changes with event-parsing and session-transition tests.
-- `utils/youtube_utils.py`: Preserve the without-cookies, with-cookies, then CLI fallback sequence and its recovery behavior.
+- `utils/youtube_utils.py`: Preserve the without-cookies, with-cookies, then CLI fallback sequence and its recovery behavior. Connectivity failures end the sequence at the first stage that reports them.
 - `tests/conftest.py`: Its yt-dlp stub is shared across many tests.
 - SQLite schemas: Preserve WAL behavior and provide migrations for existing installations when changing `telegram_cache.db` or `analytics.db`.

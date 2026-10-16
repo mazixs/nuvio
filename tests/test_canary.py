@@ -9,11 +9,14 @@
 
 import asyncio
 import inspect
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from utils import canary, runtime_status, temp_file_manager, video_cache
+from utils import canary, runtime_status, temp_file_manager, video_cache, work_budget
+from utils.ytdlp_runtime import run_yt_dlp_cli
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +150,51 @@ def test_failure_reports_without_changing_running_package(canary_env, scripted_c
     assert len(calls) == 1
     assert "YT-MEDIA_FO-ABC123" in context.bot.messages[0][1]
     assert not hasattr(canary, "ensure_latest_yt_dlp")
+
+
+@pytest.mark.unit
+def test_check_runs_under_shared_work_budget(monkeypatch):
+    """Проверка получает тот же общий срок и сессию, что пользовательская загрузка."""
+    seen: dict = {}
+
+    def _fake_check(session_id: str) -> canary.CanaryOutcome:
+        seen["session_id"] = session_id
+        seen["budget_session"] = work_budget._session.get()
+        seen["left"] = work_budget._deadline.get() - time.monotonic()
+        return _success()
+
+    monkeypatch.setattr(canary, "run_youtube_canary_check", _fake_check)
+
+    assert asyncio.run(canary._check_in_thread()).ok is True
+    assert str(seen["session_id"]).startswith("canary-")
+    assert seen["budget_session"] == seen["session_id"]
+    assert 0 < seen["left"] <= canary.CANARY_TIMEOUT_SECONDS
+
+
+@pytest.mark.unit
+def test_timed_out_check_stops_its_cli_process(monkeypatch, tmp_path):
+    """15.10.2026 поток проверки пережил таймаут на 43 секунды.
+
+    `asyncio.run` дожидается потоков пула при закрытии, поэтому время его работы
+    показывает, когда остановился сам поток, а не только ожидание.
+    """
+    output = tmp_path / "should-not-exist"
+    code = f"import time; from pathlib import Path; time.sleep(3); Path({str(output)!r}).touch()"
+
+    def _hanging_check(_session_id: str) -> canary.CanaryOutcome:
+        run_yt_dlp_cli([sys.executable, "-c", code])
+        return _success()
+
+    monkeypatch.setattr(canary, "CANARY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(canary, "run_youtube_canary_check", _hanging_check)
+
+    start = time.monotonic()
+    outcome = asyncio.run(canary._check_in_thread())
+
+    assert outcome.stage == "timeout"
+    assert outcome.category == "NETWORK_TIMEOUT"
+    assert time.monotonic() - start < 2.5
+    assert not output.exists()
 
 
 @pytest.fixture

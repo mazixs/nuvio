@@ -1,6 +1,8 @@
 """Безопасная классификация ошибок без раскрытия внутреннего состояния."""
 
 import errno
+import socket
+from collections.abc import Iterator
 
 import httpx
 from telegram import error as telegram_error
@@ -38,6 +40,76 @@ _MEDIA_FORBIDDEN_MARKERS = (
     "fragment",
     "giving up after",
 )
+
+
+# Отказ сети до разговора с площадкой: имя не резолвится, нет маршрута, порт
+# закрыт. 15.10.2026 многочасовой сбой DNS у провайдера выглядел так:
+# `Failed to resolve '…googlevideo.com' ([Errno -5] No address associated with
+# hostname)`. Ни cookies, ни CLI, ни пауза в несколько секунд такое не лечат, а
+# каждый лишний слой повторов только удлиняет ожидание пользователя.
+_CONNECTIVITY_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH})
+_CONNECTIVITY_MARKERS = (
+    "failed to resolve",
+    "nameresolutionerror",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "no address associated with hostname",
+    "getaddrinfo failed",
+    "[errno -2]",
+    "[errno -3]",
+    "[errno -5]",
+    "network is unreachable",
+    "no route to host",
+    "connection refused",
+)
+
+
+def _error_chain(error: BaseException, limit: int = 16) -> Iterator[BaseException]:
+    """Обходит исключение и его причины, включая обёртки yt-dlp.
+
+    На закреплённой версии yt-dlp DNS-сбой приходит четырьмя слоями:
+    `DownloadError.exc_info[1]` → `TransportError.cause` →
+    `NameResolutionError.__cause__` → `socket.gaierror`. `__context__` берётся
+    только там, где его показал бы и traceback: без явной причины и без
+    `raise ... from None`.
+    """
+    pending = [error]
+    seen: set[int] = set()
+    while pending and len(seen) < limit:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        linked = [current.__cause__, getattr(current, "cause", None)]
+        if current.__cause__ is None and not current.__suppress_context__:
+            linked.append(current.__context__)
+        exc_info = getattr(current, "exc_info", None)
+        if isinstance(exc_info, tuple) and len(exc_info) > 1:
+            linked.append(exc_info[1])
+        pending.extend(item for item in linked if isinstance(item, BaseException))
+
+
+def _is_connectivity_exception(error: BaseException) -> bool:
+    return isinstance(error, socket.gaierror) or (
+        isinstance(error, OSError) and error.errno in _CONNECTIVITY_ERRNOS
+    )
+
+
+def is_connectivity_failure(error: str | BaseException | None) -> bool:
+    """Отличает недоступную сеть сервера от отказа площадки.
+
+    Тип важнее текста: исключение ищется по всей цепочке причин. Текст остаётся
+    запасным путём для CLI, от которого приходит только stderr.
+    """
+    if error is None:
+        return False
+    if isinstance(error, BaseException) and any(
+        _is_connectivity_exception(item) for item in _error_chain(error)
+    ):
+        return True
+    msg_lower = _confirmed_message(error)
+    return any(marker in msg_lower for marker in _CONNECTIVITY_MARKERS)
 
 
 def is_media_forbidden_error(error_msg: str) -> bool:
@@ -86,6 +158,8 @@ def youtube_error_code(error_msg: str | BaseException) -> str:
         return "NETWORK"
     if category := _speculative_wrapper_category("youtube", error_msg):
         return category
+    if is_connectivity_failure(error_msg):
+        return "NETWORK"
     msg_lower = _confirmed_message(error_msg)
     if "requested format is not available" in msg_lower:
         return "FORMAT_UNAVAILABLE"
@@ -164,16 +238,14 @@ def _category_from_message(msg_lower: str, *, youtube: bool = False) -> str:
         )
     ):
         return "RATE_LIMIT"
+    if any(marker in msg_lower for marker in _CONNECTIVITY_MARKERS):
+        return "NETWORK"
     if any(
         marker in msg_lower
         for marker in (
             "timed out",
-            "network is unreachable",
             "connection reset",
-            "connection refused",
             "connection aborted",
-            "temporary failure in name resolution",
-            "name or service not known",
             "ssl: certificate_verify_failed",
             "ssl: unexpected_eof_while_reading",
             "eof occurred in violation of protocol",
@@ -277,6 +349,10 @@ def _category_from_exception(error: BaseException, *, youtube: bool = False) -> 
     if isinstance(error, FileNotFoundError):
         return "FILE"
     if isinstance(error, OSError):
+        # `socket.gaierror` — тоже OSError, но с отрицательным `errno` из
+        # getaddrinfo, поэтому без явной проверки DNS-сбой уходил в `IO`.
+        if _is_connectivity_exception(error):
+            return "NETWORK"
         if error.errno in {errno.ENOSPC, errno.EDQUOT}:
             return "STORAGE"
         if error.errno in {errno.ECONNRESET, errno.ENETUNREACH, errno.ETIMEDOUT}:
@@ -341,6 +417,8 @@ def classify_internal_error_category(
         return "TELEGRAM_ACCESS"
     if category := _speculative_wrapper_category(platform, error_msg):
         return category
+    if is_connectivity_failure(error_msg):
+        return "NETWORK"
     msg_lower = _confirmed_message(error_msg)
     if (
         platform == "instagram"
