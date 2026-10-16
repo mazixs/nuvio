@@ -60,7 +60,7 @@ Keep bot-facing messages in `messages.py` rather than embedding them in handlers
 - Prefixes: `YT`, `TT`, `IG`, `RU`, `VK`, `TG`, `FILE`, and `BOT`.
 - Show users a safe platform-specific explanation and an error ID. Keep tracebacks and operational details in administrative logs.
 - Use `Exception.add_note()` to attach diagnostic context.
-- The [error code reference](../error-codes.md) defines current categories and their eight-character IDs.
+- The [error code reference](../reference/error-codes.md) defines current categories and their eight-character IDs.
 
 ### Async work
 

@@ -98,7 +98,7 @@ docker compose --env-file .secrets/.env up -d
 Дашборд будет доступен на `http://localhost:<WEB_PORT>` (по умолчанию 8080).
 Порт локального Bot API наружу не публикуется.
 
-Подробная настройка Docker (порты, пароли, volumes, cookies) - в [`docs/guides/deployment.md`](docs/guides/deployment.md#docker).
+Подробная настройка Docker (порты, пароли, volumes, cookies) - в [`docs/guides/deployment.md`](docs/guides/deployment.md).
 
 ---
 
@@ -355,13 +355,13 @@ Deno и последней проверки YouTube видно в `/admin`.
 
 ## Документация
 
-Подробная документация находится в директории [`docs/`](docs/):
+Подробная документация (на английском) находится в директории [`docs/`](docs/); начните с [оглавления](docs/index.md):
 
-- Архитектура проекта (включая FSM-анализ pipeline и ICE-приоритизацию)
-- Руководство по развертыванию
-- Справочник по конфигурации
-- Устранение неполадок
-- Коды ошибок
+- [Архитектура проекта](docs/reference/architecture.md) и [FSM-анализ](docs/reference/fsm-architecture.md)
+- [Руководство по развертыванию](docs/guides/deployment.md)
+- [Справочник по конфигурации](docs/guides/configuration.md)
+- [Устранение неполадок](docs/runbooks/common-issues.md)
+- [Коды ошибок](docs/reference/error-codes.md)
 
 ---
 

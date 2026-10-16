@@ -6,7 +6,7 @@ GraphQL-ответ Instagram уже содержит прямую ссылку �
 
 Замеры на реальных рилсах: прямая ссылка отдаёт **H.264 + AAC** (720x1280,
 4.61 МБ за 0.90 с анонимно), тогда как путь через yt-dlp занимал 7.54 с.
-Обоснование: docs/technical/latency-disk-network-research.md §5.7
+Обоснование: docs/research/latency-disk-network-research.md §5.7
 """
 
 from __future__ import annotations

@@ -82,7 +82,7 @@ The sole environment template is [`.env.example`](.env.example). Keep the workin
 | `DATA_DIR` | repository root | SQLite database directory |
 | `TEMP_DIR` | `./temp` | Temporary media directory |
 
-The [configuration reference](docs/guides/configuration.md) lists all variables, including platform fast paths, cookies, size limits, fail2ban, and yt-dlp fallback settings. The [error code reference](docs/error-codes.md) explains user-visible error IDs.
+The [configuration reference](docs/guides/configuration.md) lists all variables, including platform fast paths, cookies, size limits, fail2ban, and yt-dlp fallback settings. The [error code reference](docs/reference/error-codes.md) explains user-visible error IDs.
 
 **Media cache:** Valid Telegram references and source links have no expiration by default. The WebUI settings let you enable cleanup and choose days since last successful reuse, without environment variables or a restart. `/cleanup_cache` applies that same policy and does nothing while cleanup is disabled. Temporary downloads are cleaned independently. The cache separates bots, processing recipes, and actual Telegram media types. Changing `TIKTOK_FAST_PATH` now uses a different recipe and does not reuse the former quality. Legacy references without verified bot/type/recipe identity remain inspectable but are not promoted automatically. See [cache operation and migration](docs/guides/cache-and-delivery.md).
 
@@ -123,12 +123,12 @@ SQLite queries are parameterized. WebUI credential checks use timing-safe compar
 
 - [Documentation index](docs/index.md)
 - [Feedback and moderation](docs/guides/feedback-and-moderation.md)
-- [Architecture](docs/technical/architecture.md)
-- [YouTube incident runbook](docs/technical/youtube-download-runbook.md)
-- [Contributor guide](docs/development/contributing.md)
-- [Troubleshooting](docs/troubleshooting/common-issues.md)
+- [Architecture](docs/reference/architecture.md)
+- [YouTube incident runbook](docs/runbooks/youtube-download-runbook.md)
+- [Contributor guide](docs/guides/contributing.md)
+- [Troubleshooting](docs/runbooks/common-issues.md)
 
-The code is organized around `main.py` (bot lifecycle), `config.py` (settings), `messages.py` (bot text), `utils/` (media and delivery logic), `web/` (analytics WebUI), and `tests/`. The [architecture guide](docs/technical/architecture.md) describes the modules and their interactions.
+The code is organized around `main.py` (bot lifecycle), `config.py` (settings), `messages.py` (bot text), `utils/` (media and delivery logic), `web/` (analytics WebUI), and `tests/`. The [architecture guide](docs/reference/architecture.md) describes the modules and their interactions.
 
 ## License
 

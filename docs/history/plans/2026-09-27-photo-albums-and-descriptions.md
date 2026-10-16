@@ -345,7 +345,7 @@ After the review, the user allowed the code to be corrected and separately reque
 
 - `UNKNOWN` is no longer created as a new error category.
 - Known error types and messages are now assigned a root cause from the following categories:
-  `RATE_LIMIT`, `ACCESS`, `NETWORK`, `TIMEOUT`, `API`, `RENDER`, `LARGE`, `FILE`, `COOKIE`, `DOWNLOAD`, `DATA`, `FFMPEG`, `ROUTE`, and others (see [code directory](../../error-codes.md)).
+  `RATE_LIMIT`, `ACCESS`, `NETWORK`, `TIMEOUT`, `API`, `RENDER`, `LARGE`, `FILE`, `COOKIE`, `DOWNLOAD`, `DATA`, `FFMPEG`, `ROUTE`, and others (see [code directory](../../reference/error-codes.md)).
 - If neither the error text nor the exception type can be confirmed as a cause, `UNEXPECT` is used with the exception type, and this is logged in the administrative log.
 
 ### Updated Error Handling

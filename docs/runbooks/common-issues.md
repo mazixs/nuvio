@@ -40,10 +40,10 @@ FFmpeg is required for audio and video processing, including audio extraction, W
 
 The yt-dlp version may be outdated. On 18 August 2026, YouTube changed direct `videoplayback` delivery for clients used by stable yt-dlp 2026.7.4: format listing still worked, but the first CDN request returned 403. This was reproduced from two outgoing IP addresses.
 
-- Update yt-dlp by building or pulling a new image with the exact version pinned in `requirements.in` and `requirements.txt`. Follow the [YouTube runbook](../technical/youtube-download-runbook.md).
+- Update yt-dlp by building or pulling a new image with the exact version pinned in `requirements.in` and `requirements.txt`. Follow the [YouTube runbook](youtube-download-runbook.md).
 - A 403 from the media CDN is recorded as `MEDIA_FORBIDDEN` and may be retried; `ACCESS_RESTRICTED` indicates private, paid, or authorization-gated media.
 - For a manual probe, run `docker compose exec bot python -m yt_dlp -f 140 <URL>`. Do not use `--test`: its 10 KB range request can succeed while the full download fails.
-- The [runbook](../technical/youtube-download-runbook.md) records the incident, false-negative probe traps, commands, and pin-update procedure.
+- The [runbook](youtube-download-runbook.md) records the incident, false-negative probe traps, commands, and pin-update procedure.
 
 ### TikTok video does not download
 
@@ -71,7 +71,7 @@ The yt-dlp version may be outdated. On 18 August 2026, YouTube changed direct `v
 
 ## Error codes
 
-Users see a safe explanation and an ID in `PREFIX-CATEGORY-RANDOM` format. Internal diagnostics stay in the logs. See the [error code reference](../error-codes.md).
+Users see a safe explanation and an ID in `PREFIX-CATEGORY-RANDOM` format. Internal diagnostics stay in the logs. See the [error code reference](../reference/error-codes.md).
 
 | Prefix | Area |
 |---|---|

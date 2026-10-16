@@ -38,4 +38,4 @@ The image builds pinned SQLite 3.53.4 from the official source archive and verif
 
 ## Verification boundaries
 
-See the [implementation acceptance record](../audits/cache-and-delivery-acceptance-2026-10-06.md) for tested cases and remaining external checks. Shared preparation across recipients is not enabled: it requires measured duplicate work plus explicit temporary-file ownership and cancellation tests. Recipient delivery is never shared.
+See the [implementation acceptance record](../history/audits/cache-and-delivery-acceptance-2026-10-06.md) for tested cases and remaining external checks. Shared preparation across recipients is not enabled: it requires measured duplicate work plus explicit temporary-file ownership and cancellation tests. Recipient delivery is never shared.

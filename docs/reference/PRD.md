@@ -5,7 +5,7 @@
 **License:** Apache 2.0
 **Repository:** [github.com/mazixs/nuvio](https://github.com/mazixs/nuvio)
 
-This is a dated product snapshot. For current setup, versions, and operating behavior, use the [README](../README.md) and [architecture guide](technical/architecture.md).
+This is a dated product snapshot. For current setup, versions, and operating behavior, use the [README](../../README.md) and [architecture guide](architecture.md).
 
 ---
 

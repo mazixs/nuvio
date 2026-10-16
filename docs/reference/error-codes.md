@@ -25,7 +25,7 @@ Examples:
 - `FILE` - local filesystem, temporary files, permissions, or a missing file.
 - `BOT` - bot orchestration, callback handling, or general runtime flow.
 
-Error messages also offer a feedback button. The report contains the error code and source URL, while operational diagnostics remain in administrator logs. General reports can be sent with `/feedback`; see [Feedback and moderation](guides/feedback-and-moderation.md).
+Error messages also offer a feedback button. The report contains the error code and source URL, while operational diagnostics remain in administrator logs. General reports can be sent with `/feedback`; see [Feedback and moderation](../guides/feedback-and-moderation.md).
 
 ## Categories
 
@@ -47,7 +47,7 @@ The category segment is limited to eight characters. Logs and codes may therefor
 - `FORMAT_U` - the requested format is unavailable or obsolete.
 - `IO` - an I/O error that cannot be classified more precisely from `errno`.
 - `LARGE` - the file exceeds the limit for the selected delivery path.
-- `MEDIA_FO` - the CDN rejected an issued media URL. This does not establish that the video is private: an individual stream may have expired or platform delivery rules may have changed. A cluster of these codes for one platform suggests the latter; investigate with the [YouTube download runbook](technical/youtube-download-runbook.md).
+- `MEDIA_FO` - the CDN rejected an issued media URL. This does not establish that the video is private: an individual stream may have expired or platform delivery rules may have changed. A cluster of these codes for one platform suggests the latter; investigate with the [YouTube download runbook](../runbooks/youtube-download-runbook.md).
 - `NETWORK` - connection or transport failure, including DNS resolution failure, an unreachable network or host, and a refused connection; recovery is not guaranteed.
 - `NETWORK_` - timeout during a YouTube operation.
 - `RATE_LI` - platform rate limit.

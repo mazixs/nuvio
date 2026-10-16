@@ -2,7 +2,7 @@
 
 Date: 2026-10-06. Status: application implementation, local acceptance, and selected cloud Telegram delivery scenarios completed for the core contracts; the remaining external acceptance matrix, release, and measured shared-preparation optimization remain separate gates. See the [acceptance record](../audits/cache-and-delivery-acceptance-2026-10-06.md). The implementation sequence below retains its original acceptance requirements.
 
-Inputs: [research and external contracts](../technical/cache-and-delivery-research-2026-10-06.md), [dated code audit](../audits/cache-and-delivery-audit-2026-10-06.md). Finding identifiers below refer to that audit.
+Inputs: [research and external contracts](../../research/cache-and-delivery-research-2026-10-06.md), [dated code audit](../audits/cache-and-delivery-audit-2026-10-06.md). Finding identifiers below refer to that audit.
 
 ## Target behavior
 

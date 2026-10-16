@@ -1,7 +1,7 @@
 """Тесты решения о доставке медиа прямой ссылкой вместо файла.
 
 Все пороги здесь — не из документации, а из замеров на живом сервере
-(docs/technical/latency-disk-network-research.md §8).
+(docs/research/latency-disk-network-research.md §8).
 """
 
 import pytest

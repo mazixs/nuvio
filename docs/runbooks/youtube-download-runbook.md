@@ -153,4 +153,4 @@ Use a nightly build when stable yt-dlp cannot handle YouTube. When a fixed stabl
 | `utils/ytdlp_runtime.py` | Installed version, `run_yt_dlp_cli()`, `extract_cli_output_path()` |
 | `utils/telegram_utils.py` | `_log_platform_failure()` for `USER_FLOW_FAIL`; `_should_notify_admins_platform_failure()` and `_notify_admins_crash()` for administrator reports |
 
-For user-facing troubleshooting, see [common issues](../troubleshooting/common-issues.md). For code meanings, see [error codes](../error-codes.md).
+For user-facing troubleshooting, see [common issues](common-issues.md). For code meanings, see [error codes](../reference/error-codes.md).
