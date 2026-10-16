@@ -89,7 +89,7 @@ If formats appear but the full download returns 403, media delivery is broken; p
 
 ### Step 4: compare without and with cookies
 
-The YouTube downloader intentionally tries **without cookies first**. An authenticated session can make yt-dlp select `tv_downgraded` or `web_safari`, which need a PO token, while the token-free `android_vr` client is removed when auth cookies are present. In one measurement the cookie attempt returned an empty format list and the anonymous attempt returned all formats.
+The YouTube downloader intentionally tries **without cookies first**. Auth cookies change the set of player clients yt-dlp uses. In the nightly pinned on 2026-10-16, an anonymous request with Deno available uses `tv_samsung`, `visionos`, and `web`. With auth cookies yt-dlp uses `web_embedded`, `tv_samsung`, and `web`, and drops `visionos` because it does not support cookies. `visionos` is the only default client that needs neither the JavaScript player nor a PO token; `web` needs a GVS PO token. The defaults change between nightlies, so after an update check `_DEFAULT_CLIENTS` and `_DEFAULT_AUTHED_CLIENTS` in `yt_dlp/extractor/youtube/_video.py`. Earlier nightlies dropped the token-free `android_vr` client the same way, and in one measurement the cookie attempt returned an empty format list while the anonymous attempt returned all formats.
 
 ```bash
 # Anonymous attempt, matching the bot's first attempt

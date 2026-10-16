@@ -218,7 +218,7 @@ Retention table by weekly cohort (W0-W8), with color showing intensity.
 | **Timing-safe comparison** | `hmac.compare_digest` for credentials |
 | **Signed sessions** | `SessionMiddleware` uses `WEB_SECRET_KEY` |
 | **Jinja2 autoescape** | Escapes HTML by default |
-| **Swagger disabled** | `docs_url=None, redoc_url=None` |
+| **Swagger, ReDoc, and OpenAPI schema disabled** | `docs_url=None, redoc_url=None, openapi_url=None` |
 | **Input length** | Username and password are limited to 128 characters |
 
 ---

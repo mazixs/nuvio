@@ -264,3 +264,12 @@ def test_dependabot_groups_minor_and_patch_updates_per_ecosystem():
     assert config.count("applies-to: version-updates") == 3
     assert config.count('- "minor"') == 3
     assert config.count('- "patch"') == 3
+
+
+def test_dependabot_leaves_ytdlp_to_the_update_workflow():
+    """Dependabot поднимал yt-dlp без версии в документах, и тесты падали (#55)."""
+    config = DEPENDABOT_CONFIG.read_text(encoding="utf-8")
+    pip_block = config.split("- package-ecosystem: docker", 1)[0]
+
+    assert "- package-ecosystem: pip" in pip_block
+    assert 'ignore:\n      - dependency-name: "yt-dlp"' in pip_block

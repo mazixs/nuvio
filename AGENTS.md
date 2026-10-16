@@ -117,7 +117,7 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 - Block repeated WebUI sign-in attempts by IP using `FAIL2BAN_RETRIES` and `FAIL2BAN_TIME`.
 - Limit entered usernames and passwords to 128 characters.
 - Sign sessions through `SessionMiddleware` with `WEB_SECRET_KEY`.
-- Keep Swagger and ReDoc disabled; let Jinja2 escape HTML.
+- Keep Swagger, ReDoc, and the OpenAPI schema (`/openapi.json`) disabled; let Jinja2 escape HTML.
 - Do not expose database structure or tracebacks to users.
 - Save cookie files with owner-only `0o600` permissions.
 
@@ -133,7 +133,7 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 2. Callback buttons use session tokens of the form `s|{token}|{scope}|{action}`, with at most five active sessions per user.
 3. Save the Telegram `file_id` after first delivery; subsequent equivalent requests can use the cached ID.
 4. Retry network timeouts with exponential backoff and full jitter. Use the `python -m yt_dlp` CLI fallback when the embedded API fails. A server connectivity failure (DNS resolution, unreachable network or host, refused connection) gets only yt-dlp's own retries. On YouTube that means no backoff, cookie, or CLI attempt; Rutube and VK skip backoff in `execute_with_backoff`; TikTok and Instagram change only the error category.
-5. YouTube attempts start **without cookies**, then try cookies. Authentication can remove the token-free `android_vr` client. Instagram follows the same order; TikTok tries cookies first.
+5. YouTube attempts start **without cookies**, then try cookies. Authentication removes `visionos`, the only default YouTube client that needs neither the JavaScript player nor a PO token; client defaults change between yt-dlp nightlies (see the YouTube runbook, step 4). Instagram follows the same order; TikTok tries cookies first.
 6. TikTok `/photo/` links and Instagram carousels produce image sets, with separate audio when available.
 7. Pin yt-dlp in `requirements.in` and the image. `scripts/update_ytdlp.py` and a new image release perform updates.
 8. With `CANARY_ENABLED=true`, `utils/canary.py` periodically downloads a reference YouTube video through the real path and bypasses the `file_id` cache. It alerts administrators on failure.

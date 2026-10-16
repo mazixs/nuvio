@@ -191,7 +191,15 @@ async def lifespan(app: FastAPI):
         close_connection()
 
 
-app = FastAPI(title="Nuvio Analytics", docs_url=None, redoc_url=None, lifespan=lifespan)
+# Схема OpenAPI отключена вместе со Swagger и ReDoc: иначе `/openapi.json` без
+# входа перечисляет все маршруты админки.
+app = FastAPI(
+    title="Nuvio Analytics",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=lifespan,
+)
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 app.add_middleware(
     SessionMiddleware,

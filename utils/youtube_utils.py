@@ -126,12 +126,14 @@ def get_video_info(url: str, session_id: str | None = None) -> dict[str, Any]:
             logger.info("Информация о видео успешно получена.")
             return info
 
-    # Сначала без cookies. Авторизованная сессия переводит yt-dlp на клиентов
-    # `tv_downgraded` и `web_safari`, которым нужен PO-токен, — без токена и без
-    # JS-рантайма форматов не остаётся вовсе. Клиент `android_vr`, работающий без
-    # токена, yt-dlp вычёркивает при наличии auth-cookies, потому что тот cookies
-    # не поддерживает. Cookies нужны только на возрастные ограничения и приватные
-    # видео, поэтому уходят во вторую попытку — как в загрузчиках аудио.
+    # Сначала без cookies. С auth-cookies yt-dlp вычёркивает клиента `visionos`:
+    # тот cookies не поддерживает, а из клиентов по умолчанию только ему не нужны
+    # ни JS-плеер, ни PO-токен. Остаются `web_embedded` и `tv_samsung`, которые
+    # держатся на решении JS-задач через Deno, и `web`, которому нужен GVS
+    # PO-токен. Набор клиентов меняется от сборки к сборке yt-dlp (раньше так же
+    # выпадал `android_vr`), см. runbook YouTube, шаг 4. Cookies нужны только на
+    # возрастные ограничения и приватные видео, поэтому уходят во вторую
+    # попытку — как в загрузчиках аудио.
     have_cookies = bool(YOUTUBE_COOKIES_FILE and Path(YOUTUBE_COOKIES_FILE).is_file())
     try:
         return _get_info(False)
@@ -412,10 +414,11 @@ def _download_with_cli_fallback(
     )
     result = run_yt_dlp_cli(command)
     if result.returncode != 0:
-        raise RuntimeError(
-            "CLI fallback yt-dlp завершился ошибкой: "
-            f"{(result.stderr or result.stdout).strip()[:1000]}"
-        )
+        # Итоговую строку `ERROR:` yt-dlp печатает последней, а перед ней идут
+        # предупреждения о повторах. Начало вывода её отрезало бы и у
+        # администратора, и у классификатора ошибок, поэтому берётся хвост.
+        output = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"CLI fallback yt-dlp завершился ошибкой: {output[-1000:]}")
 
     downloaded_file = extract_cli_output_path(result.stdout)
     if not downloaded_file:
@@ -544,8 +547,8 @@ def download_video(
             raise
 
     # Порядок такой же, как в загрузчиках аудио: без cookies — первым, потому что
-    # только анонимный запрос получает клиента `android_vr`, которому не нужен
-    # PO-токен. Cookies остаются на видео с ограничениями.
+    # только анонимный запрос получает клиента `visionos`, которому не нужны ни
+    # JS-плеер, ни PO-токен. Cookies остаются на видео с ограничениями.
     final_error: Exception | None = None
     try:
         return execute_with_backoff(

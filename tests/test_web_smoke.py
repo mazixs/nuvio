@@ -43,6 +43,12 @@ def test_health_endpoint_is_public(client):
     assert response.json() == {"status": "ok"}
 
 
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+def test_api_schema_and_docs_are_not_published(client, path):
+    """Схема без входа перечисляла маршруты админки; Swagger и ReDoc уже были выключены."""
+    assert client.get(path).status_code == 404
+
+
 def test_dashboard_redirects_unauthenticated_user(client):
     response = client.get("/", follow_redirects=False)
 
