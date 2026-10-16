@@ -25,7 +25,7 @@ Examples:
 - `FILE` - local filesystem, temporary files, permissions, or a missing file.
 - `BOT` - bot orchestration, callback handling, or general runtime flow.
 
-Error messages also offer a feedback button. The report contains the error code and source URL, while operational diagnostics remain in administrator logs. General reports can be sent with `/feedback`; see [Feedback and moderation](guides/feedback-and-moderation.md).
+Error messages also offer a feedback button. The report contains the error code and source URL, while operational diagnostics remain in administrator logs. General reports can be sent with `/feedback`; see [Feedback and moderation](../guides/feedback-and-moderation.md).
 
 ## Categories
 
@@ -47,8 +47,8 @@ The category segment is limited to eight characters. Logs and codes may therefor
 - `FORMAT_U` - the requested format is unavailable or obsolete.
 - `IO` - an I/O error that cannot be classified more precisely from `errno`.
 - `LARGE` - the file exceeds the limit for the selected delivery path.
-- `MEDIA_FO` - the CDN rejected an issued media URL. This does not establish that the video is private: an individual stream may have expired or platform delivery rules may have changed. A cluster of these codes for one platform suggests the latter; investigate with the [YouTube download runbook](technical/youtube-download-runbook.md).
-- `NETWORK` - connection or transport failure; recovery is not guaranteed.
+- `MEDIA_FO` - the CDN rejected an issued media URL. This does not establish that the video is private: an individual stream may have expired or platform delivery rules may have changed. A cluster of these codes for one platform suggests the latter; investigate with the [YouTube download runbook](../runbooks/youtube-download-runbook.md).
+- `NETWORK` - connection or transport failure, including DNS resolution failure, an unreachable network or host, and a refused connection; recovery is not guaranteed.
 - `NETWORK_` - timeout during a YouTube operation.
 - `RATE_LI` - platform rate limit.
 - `RENDER` - Telegram rejected message markup.
@@ -82,6 +82,8 @@ New errors must not use the `UNKNOWN` category. Previously issued `UNKNOWN` code
 Exception types take precedence for local filesystem and HTTP transport/status failures. A bare Instagram HTTP 400 is an API refusal, not proof of private or removed media. Words such as `SSL`, `EOF`, or `network` alone do not establish a transport failure. A downloader's list of possible causes must not promote a speculative rate limit to a confirmed category; diagnostic wrappers use the original exception when available. The callback and metadata handlers use the same public classifier and matching diagnostic code.
 
 YouTube recovery uses the same category classifier as public responses. A missing fragment alone is a download failure, not evidence of a network timeout. Explicit transport failures retain bounded download retries.
+
+A connectivity failure on the server side is an exception to those retries. DNS resolution failures, unreachable networks or hosts, and refused connections are recognized by the exception chain (`__cause__`, yt-dlp's `.cause`, and `DownloadError.exc_info`) and by markers in the `error:` lines of the message. The chain is available only while a link is being parsed. During a download yt-dlp's `RetryManager` raises a `DownloadError` with an empty `exc_info`, so the markers are the only evidence, as on 2026-10-15. An `OSError` is judged by its type alone: its text can contain a file path with a video title such as "Connection Refused". Such a failure ends the download after yt-dlp's own retries, without backoff, a cookie attempt, a non-HLS selector, or CLI, because each of them would use the same resolver and route. On 2026-10-15 a DNS outage was classified as `DOWNLOAD` and every request went through the whole fallback path. Timeouts and connection resets keep bounded retries and CLI.
 
 All download callbacks share a per-session concurrency guard. Actions and formats must belong to the session's platform and offered menu. Cancellation and menu navigation do not consume the download rate limit. A failed callback acknowledgement does not prevent the authorized action from running.
 

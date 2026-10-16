@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ from config import (
     CANARY_VIDEO_ID,
     MAX_FILE_SIZE,
 )
+from utils import work_budget
 from utils.cancellation import (
     CancelledByUser,
     forget_cancellation,
@@ -179,17 +181,31 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
 
 
 async def _check_in_thread() -> CanaryOutcome:
-    """Гоняет блокирующую проверку в пуле потоков и не даёт ей висеть вечно."""
+    """Гоняет блокирующую проверку в пуле потоков и не даёт ей висеть вечно.
+
+    Поток живёт под общим сроком `work_budget`, как пользовательская загрузка в
+    `run_blocking`: по нему укорачиваются таймауты сокетов, паузы повторов и CLI.
+    Без него 15.10.2026 проверка «упала» по таймауту в 14:26:26 UTC, а её поток
+    ещё 43 секунды ждал ответа YouTube. На этапе скачивания он мог бы уйти и в
+    CLI, у которого собственный предел — `YTDLP_CLI_TIMEOUT`.
+    """
     session_id = f"canary-{uuid.uuid4().hex[:8]}"
+    deadline = time.monotonic() + CANARY_TIMEOUT_SECONDS
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(run_youtube_canary_check, session_id),
+            asyncio.to_thread(
+                work_budget.execute,
+                run_youtube_canary_check,
+                (session_id,),
+                deadline,
+                session_id,
+            ),
             timeout=CANARY_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        # `wait_for` снимает только ожидание, а поток продолжает качать — то же
-        # поведение, что у `run_blocking`. До yt-dlp отмена доходит хуком,
-        # который `download_video` ставит по этому же `session_id`.
+        # `wait_for` снимает только ожидание, а поток продолжает работать — то
+        # же поведение, что у `run_blocking`. Отмена сессии останавливает его на
+        # ближайшей проверке бюджета или в progress hook yt-dlp.
         request_cancellation(session_id)
         logger.error(
             "🐤 Канарейка YouTube: проверка не уложилась в %s с",

@@ -19,6 +19,7 @@ from utils.cancellation import CancelledByUser, is_cancelled
 from utils.download_report import record_delivered_format
 from utils.logger import setup_logger
 from utils.media_errors import DurationLimitError
+from utils.public_errors import is_connectivity_failure
 from utils.temp_file_manager import get_temp_file_path
 from utils.media_processor import ensure_ios_compatible_video
 from utils.ytdlp_runtime import extract_cli_output_path, run_yt_dlp_cli
@@ -59,6 +60,21 @@ class FormatInfoDict(TypedDict, total=False):
     language_preference: NotRequired[int]
     format_note: NotRequired[str]
     type: NotRequired[str]
+
+
+def _network_unavailable(stage: str, error: BaseException) -> bool:
+    """Пишет в лог и возвращает True, если отказ — недоступная сеть сервера.
+
+    Такой отказ не лечат ни cookies, ни CLI. 15.10.2026 при сбое DNS загрузка
+    прошла оба режима и CLI, и каждая попытка упиралась в тот же резолвер.
+    Собственные повторы yt-dlp при этом остаются.
+    """
+    if not is_connectivity_failure(error):
+        return False
+    logger.warning(
+        "%s: сеть сервера недоступна, остальные способы не пробуем: %s", stage, error
+    )
+    return True
 
 
 def is_valid_youtube_url(url: str) -> bool:
@@ -120,6 +136,8 @@ def get_video_info(url: str, session_id: str | None = None) -> dict[str, Any]:
     try:
         return _get_info(False)
     except (yt_dlp.utils.DownloadError, yt_dlp.cookies.CookieLoadError) as e:
+        if _network_unavailable("Получение информации о видео", e):
+            raise
         if not have_cookies:
             logger.error(
                 f"Ошибка при получении информации о видео без cookies: {e}",
@@ -508,6 +526,10 @@ def download_video(
             return _download(use_cookies)
         except yt_dlp.utils.DownloadError as e:
             message = str(e)
+            # DNS-сбой посреди фрагментов тоже упоминает «fragment», но другой
+            # селектор формата сеть не вернёт.
+            if is_connectivity_failure(e):
+                raise
             if "403" in message or "HTTP Error 403" in message or "fragment" in message:
                 logger.warning("Пробуем non-HLS фолбек после 403/fragment ошибки")
                 return _download(use_cookies, prefer_non_hls=True)
@@ -537,6 +559,8 @@ def download_video(
         PermissionError,
     ) as e:
         final_error = e
+        if _network_unavailable("Скачивание видео без cookies", e):
+            raise
         logger.warning(
             "Ошибка скачивания видео без cookies: %s. Пробуем с cookies...", e
         )
@@ -554,6 +578,8 @@ def download_video(
             PermissionError,
         ) as e:
             final_error = e
+            if _network_unavailable("Скачивание видео с cookies", e):
+                raise
             logger.error(
                 "Ошибка скачивания видео даже с cookies: %s", e, exc_info=True
             )
@@ -590,6 +616,10 @@ def download_video(
                         max_file_size=max_file_size,
                     )
                 except Exception as cli_error:
+                    if _network_unavailable("CLI fallback yt-dlp", cli_error):
+                        # Сейчас причина — сеть, и пользователь должен увидеть
+                        # её, а не прежнюю ошибку встроенного API.
+                        raise cli_error from final_error
                     logger.warning("CLI fallback не удался: %s", cli_error)
 
     if final_error:
@@ -699,6 +729,8 @@ def download_audio_native(
         PermissionError,
     ) as e:
         final_error = e
+        if _network_unavailable("Скачивание нативного аудио без cookies", e):
+            raise
         logger.warning(
             "Ошибка скачивания нативного аудио без cookies: %s. Пробуем с cookies...", e
         )
@@ -716,6 +748,8 @@ def download_audio_native(
             PermissionError,
         ) as e:
             final_error = e
+            if _network_unavailable("Скачивание нативного аудио с cookies", e):
+                raise
             logger.error(
                 "Ошибка при скачивании нативного аудио даже с cookies: %s",
                 e,
@@ -746,6 +780,8 @@ def download_audio_native(
                     force_local=force_local,
                 )
             except Exception as cli_error:
+                if _network_unavailable("CLI fallback нативного аудио", cli_error):
+                    raise cli_error from final_error
                 logger.warning("CLI fallback нативного аудио не удался: %s", cli_error)
 
     if final_error:
@@ -872,6 +908,8 @@ def download_audio(
         PermissionError,
     ) as e:
         final_error = e
+        if _network_unavailable("Скачивание аудио без cookies", e):
+            raise
         logger.warning(
             "Ошибка скачивания аудио без cookies: %s. Пробуем с cookies...", e
         )
@@ -889,6 +927,8 @@ def download_audio(
             PermissionError,
         ) as e:
             final_error = e
+            if _network_unavailable("Скачивание аудио с cookies", e):
+                raise
             logger.error(
                 "Ошибка при скачивании аудио даже с cookies: %s", e, exc_info=True
             )
@@ -918,6 +958,8 @@ def download_audio(
                     extract_audio_codec=preferred_codec,
                 )
             except Exception as cli_error:
+                if _network_unavailable(f"CLI fallback {preferred_codec}-аудио", cli_error):
+                    raise cli_error from final_error
                 logger.warning(
                     "CLI fallback %s-аудио не удался: %s", preferred_codec, cli_error
                 )
@@ -1003,6 +1045,8 @@ def download_subtitles(
     try:
         return _download_subs(False)
     except Exception as e:
+        if _network_unavailable("Скачивание субтитров без cookies", e):
+            raise
         logger.warning(
             f"Ошибка скачивания субтитров без cookies: {e}. Пробуем с cookies..."
         )

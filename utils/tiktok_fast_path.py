@@ -4,7 +4,7 @@
 обходится без yt-dlp и без перекодирования. Здесь только разбор ответа и
 проверки пригодности — без сети и без файловых операций.
 
-Обоснование и замеры: docs/technical/latency-disk-network-research.md
+Обоснование и замеры: docs/research/latency-disk-network-research.md
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ AUDIO_DURATION_TOLERANCE_SECONDS = 2
 
 # Домены, с которых разрешено скачивать медиа быстрого пути: собственный CDN
 # TikTok и хост самого резолвера (проверено на реальных ссылках, см.
-# docs/technical/latency-disk-network-research.md §4). Ответ резолвера — данные
+# docs/research/latency-disk-network-research.md §4). Ответ резолвера — данные
 # третьей стороны: без allowlist подменённый `play` вида
 # `http://telegram-bot-api:8081/...` заставил бы бота сходить во внутреннюю
 # сеть Docker и отдать тело запросившему пользователю.

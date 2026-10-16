@@ -115,7 +115,7 @@ INSTAGRAM_FAST_PATH_TIMEOUT_SECONDS = 6
 # Попыток к GraphQL до откатa на yt-dlp: 2 × 6 с = 12 с в худшем случае.
 INSTAGRAM_FAST_PATH_MAX_ATTEMPTS = 2
 # Скачивание самого медиафайла — здесь большой таймаут оправдан: холодный edge
-# CDN отдавал 19.5 МБ за 14.3 с (docs/technical/latency-disk-network-research.md).
+# CDN отдавал 19.5 МБ за 14.3 с (docs/research/latency-disk-network-research.md).
 REMOTE_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 # Замер размера — это один байт по сети, но он стоит на пути пользователя,

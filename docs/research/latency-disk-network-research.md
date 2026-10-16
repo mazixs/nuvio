@@ -14,7 +14,7 @@ The source was a 1080 x 1920 HEVC video representative of TikTok's `hdplay` form
 | MP3 audio: `-b:a 192k out.mp3` | 0.096 s | 0.36 MB |
 | Copy audio: `-vn -c:a copy out.m4a` | 0.036 s | 0.24 MB |
 
-The measured H.264 transcode took 2.46 s for a 15 s clip and 9.55 s for a 60 s clip, or about 0.16 times the clip duration. Remuxing was about 61 times faster than the original conversion, but it retains HEVC. The iOS compatibility issue in [ADR-001](adr-001-tiktok-audio-hevc-compatibility.md) rules out remuxing HEVC as the general delivery path.
+The measured H.264 transcode took 2.46 s for a 15 s clip and 9.55 s for a 60 s clip, or about 0.16 times the clip duration. Remuxing was about 61 times faster than the original conversion, but it retains HEVC. The iOS compatibility issue in [ADR-001](../decisions/adr-001-tiktok-audio-hevc-compatibility.md) rules out remuxing HEVC as the general delivery path.
 
 ## 2. Earlier TikTok path and its costs
 

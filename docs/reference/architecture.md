@@ -47,7 +47,7 @@ Parses and validates environment variables, resolves cookie paths, and prefers `
 - `utils/public_errors.py` - safe, platform-specific error classification.
 - `utils/cancellation.py` - cancellation of long-running work by session ID.
 
-The bot limits repeated requests: four requests in five seconds trigger a ten-second cooldown. Public error IDs use `<PREFIX>-<CATEGORY>-<RANDOM>`; see the [error code reference](../error-codes.md).
+The bot limits repeated requests: four requests in five seconds trigger a ten-second cooldown. Public error IDs use `<PREFIX>-<CATEGORY>-<RANDOM>`; see the [error code reference](error-codes.md).
 
 ### Platform downloaders
 

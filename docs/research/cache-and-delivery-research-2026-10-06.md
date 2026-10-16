@@ -4,7 +4,7 @@ Date: 2026-10-06. Status: research and proposed contracts, not implemented behav
 
 The `file_id` cache is a sound optimization. The main architectural problem is treating a cached artifact, a download attempt, a Telegram delivery, and a user's interaction as if they had the same identity and lifetime. They need separate contracts. SQLite can remain the storage backend; this investigation does not establish a need for Redis or PostgreSQL.
 
-Related documents: [code audit](../audits/cache-and-delivery-audit-2026-10-06.md), [change plan](../plans/cache-and-delivery-changes-2026-10-06.md).
+Related documents: [code audit](../history/audits/cache-and-delivery-audit-2026-10-06.md), [change plan](../history/plans/cache-and-delivery-changes-2026-10-06.md).
 
 ## Method and evidence boundaries
 
@@ -67,7 +67,7 @@ In-flight deduplication is a separate pattern: one preparation per artifact key,
 
 yt-dlp has distinct download, fragment, and extractor retries. An `ExtractorError` marked `expected` describes an anticipated extraction failure, not proof of permanence or a recovery deadline. Nested `DownloadError.exc_info` can retain the underlying exception. A classifier should inspect structured evidence and the stage before using narrow message signatures. [Embedding and options](https://github.com/yt-dlp/yt-dlp/blob/master/README.md#embedding-yt-dlp), [locally installed exception definitions](https://github.com/yt-dlp/yt-dlp/blob/c7fb478d21e9e59524befbe23f7801bb267fb880/yt_dlp/utils/_utils.py#L979).
 
-Nuvio currently permits skipping unavailable fragments. A synthetic local HLS experiment removed one of four segments: yt-dlp returned success, the result decoded 75 frames rather than the baseline's 100, and both containers still reported a 4-second duration. The skip notification starts with `[download]`, which Nuvio's progress filter excludes from the administrator report tail. File existence, a zero exit result, and duration are therefore insufficient completeness checks. The result was reproduced with both the existing local `2026.09.16.232951` and a temporary isolated installation of the pinned `2026.09.27.232945`. This proves the local preparation mechanism on the pin, not a production incident or live delivery. [Audit evidence and probe](../audits/cache-and-delivery-audit-2026-10-06.md#a14---p2-skipped-fragments-can-look-like-success).
+Nuvio currently permits skipping unavailable fragments. A synthetic local HLS experiment removed one of four segments: yt-dlp returned success, the result decoded 75 frames rather than the baseline's 100, and both containers still reported a 4-second duration. The skip notification starts with `[download]`, which Nuvio's progress filter excludes from the administrator report tail. File existence, a zero exit result, and duration are therefore insufficient completeness checks. The result was reproduced with both the existing local `2026.09.16.232951` and a temporary isolated installation of the pinned `2026.09.27.232945`. This proves the local preparation mechanism on the pin, not a production incident or live delivery. [Audit evidence and probe](../history/audits/cache-and-delivery-audit-2026-10-06.md#a14---p2-skipped-fragments-can-look-like-success).
 
 Recommended public behavior:
 
@@ -82,7 +82,7 @@ Recommended public behavior:
 | Unknown delivery result | State that confirmation was lost and ask the user to check the chat. | No automatic resend; retain an operation reference. |
 | Internal tooling, storage, cookies, unexpected failure | State that processing failed and provide the diagnostic code. | Technical context for administrators only; no promise that waiting fixes it. |
 
-This refines [the existing error policy](../error-codes.md), rather than replacing its categories. Cookie-health and canary success describe particular probes at particular times; neither establishes availability of every user link.
+This refines [the existing error policy](../reference/error-codes.md), rather than replacing its categories. Cookie-health and canary success describe particular probes at particular times; neither establishes availability of every user link.
 
 ## Proposed separation of state
 
@@ -112,7 +112,7 @@ A small synthetic sizing experiment used 10,000 distinct rows in a copy of the c
 | Compact fields | 100 / 150 / 160 | 8.90 MiB | 933 |
 | Larger fields | 512 / 512 / 1024 | 51.25 MiB | 5,374 |
 
-The other fields were fixed: 32-byte unique IDs, synthetic platform/selection/date, and numeric size/duration. At the same density, 3 GiB corresponds to roughly 0.60-3.45 million rows. This is arithmetic extrapolation from synthetic records, not an annual forecast or a bound. Album items, aliases, future manifests, longer metadata, and runtime WAL usage change density; request volume changes the annual count. There is no measured basis for automatic eviction at 3 GB. The appropriate approach is to expose actual size and record counts, retain valid mappings, and let the operator enable cleanup when needed. [Reproducible sizing probe](../audits/fixtures/run_cache_storage_size_2026_10_06.py).
+The other fields were fixed: 32-byte unique IDs, synthetic platform/selection/date, and numeric size/duration. At the same density, 3 GiB corresponds to roughly 0.60-3.45 million rows. This is arithmetic extrapolation from synthetic records, not an annual forecast or a bound. Album items, aliases, future manifests, longer metadata, and runtime WAL usage change density; request volume changes the annual count. There is no measured basis for automatic eviction at 3 GB. The appropriate approach is to expose actual size and record counts, retain valid mappings, and let the operator enable cleanup when needed. [Reproducible sizing probe](../history/audits/fixtures/run_cache_storage_size_2026_10_06.py).
 
 ## Remaining verification gates
 

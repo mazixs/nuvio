@@ -15,8 +15,8 @@ VERSION = re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+\.dev0)?$")
 DOCUMENTED_PIN_OCCURRENCES = {
     "AGENTS.md": 1,
     "README.ru.md": 1,
-    "docs/PRD.md": 1,
-    "docs/technical/youtube-download-runbook.md": 2,
+    "docs/reference/PRD.md": 1,
+    "docs/runbooks/youtube-download-runbook.md": 2,
 }
 
 

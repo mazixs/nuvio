@@ -12,7 +12,7 @@ If the extractor does not find a Russian track, the bot cannot create a Russian 
 
 ## FFmpeg and iOS
 
-[ADR-002](../technical/adr-002-ios-video-compatibility.md) records the iPhone checks. Incorrect dimensions recorded by Telegram as `320x320` and a black screen with some video codecs were confirmed. A separate frame-loss issue was not reproduced. The bot now sends explicit width, height, and duration and probes the finished file with ffprobe. Compatible H.264/AAC passes without transcoding; FFmpeg handles incompatible streams. A custom media engine would still need to select YouTube audio tracks and produce Telegram-compatible files.
+[ADR-002](../../decisions/adr-002-ios-video-compatibility.md) records the iPhone checks. Incorrect dimensions recorded by Telegram as `320x320` and a black screen with some video codecs were confirmed. A separate frame-loss issue was not reproduced. The bot now sends explicit width, height, and duration and probes the finished file with ffprobe. Compatible H.264/AAC passes without transcoding; FFmpeg handles incompatible streams. A custom media engine would still need to select YouTube audio tracks and produce Telegram-compatible files.
 
 Two related defects in the current code were found and fixed: the iOS check missed Opus inside MP4, and conversion of an already named `.mp4` file could pass the same path to FFmpeg as both input and output. The second issue prevented processing even when transcoding was required. The `-pix_fmt yuv420p` and `+faststart` settings and Telegram geometry metadata were preserved.
 
