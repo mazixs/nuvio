@@ -1,6 +1,6 @@
 # History
 
-Dated records of audits, plans, and specifications. They are kept so the project does not step on the same rakes twice: what was measured, what was planned, and why a design changed.
+Dated records of audits, plans, and specifications. They are kept so the project does not repeat the same mistakes: what was measured, what was planned, and why a design changed.
 
 These documents are snapshots. Each one states its date and, usually, its status near the top. Commands, versions, line numbers, and file paths inside them describe the repository at the time of writing, so they may no longer work. For current behavior use the [guides](../guides/), [reference](../reference/), and [runbooks](../runbooks/); [`../index.md`](../index.md) lists plans that are still open.
 
@@ -31,8 +31,8 @@ Paths in older documents point to the layout before the October 2026 reorganizat
 - 2026-07-25 - [Cache coverage and request deduplication](plans/2026-07-25-cache-coverage-and-request-dedup.md)
 - 2026-07-29 - [Concurrent update processing and live status](plans/2026-07-29-concurrent-updates-and-live-status.md)
 - 2026-09-27 - [Photo albums and post descriptions](plans/2026-09-27-photo-albums-and-descriptions.md)
-- 2026-10-06 - [Cache and delivery change plan](plans/cache-and-delivery-changes-2026-10-06.md)
-- 2026-10-16 - [Network resilience plan](plans/network-resilience-2026-10-16.md)
+- 2026-10-06 - [Cache and delivery change plan](plans/cache-and-delivery-changes-2026-10-06.md) (open)
+- 2026-10-16 - [Network resilience plan](plans/network-resilience-2026-10-16.md) (open)
 
 ## Specs
 

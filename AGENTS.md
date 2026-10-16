@@ -41,7 +41,7 @@ Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, 
 | `scripts/release_notes.py` | GitHub Release changelog generation |
 | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | CI and release pipelines |
 
-The documentation index is `docs/index.md`. The plans, specs, and audits in `docs/history/` describe past work and may contain historical commands, versions, and file paths.
+The documentation index is `docs/index.md`. The plans, specs, and audits in `docs/history/` describe past work and may contain historical commands, versions, and file paths. Put new dated audits, plans, and specs in `docs/history/<kind>/` with the date in the file name and list them in `docs/history/README.md`; new ADRs go in `docs/decisions/`. Do not create other top-level folders under `docs/`, including tool defaults such as `docs/superpowers/`.
 
 ## Setup and operation
 

@@ -1,6 +1,6 @@
 # Nuvio documentation
 
-Documents are grouped by purpose. The first five sections describe how Nuvio works and is operated today; [History](#history) holds dated records that are kept so past mistakes are not repeated. A new contributor should read the [README](../README.md), then [Deployment](guides/deployment.md) and [Contributing](guides/contributing.md), then [Architecture](reference/architecture.md).
+Documents are grouped by purpose. The first four sections describe how Nuvio works and is operated today; [Research](#research) holds the dated measurements behind those decisions; [History](#history) holds dated records that are kept so past mistakes are not repeated. A new contributor should read the [README](../README.md), then [Deployment](guides/deployment.md) and [Contributing](guides/contributing.md), then [Architecture](reference/architecture.md).
 
 | Folder | What it holds |
 |---|---|

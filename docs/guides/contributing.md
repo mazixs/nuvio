@@ -28,7 +28,7 @@ uv pip compile --python-version 3.14 --generate-hashes --output-file requirement
 - `utils/` - core application logic.
 - `web/` - FastAPI analytics WebUI.
 - `tests/` - pytest tests.
-- `docs/` - documentation.
+- `docs/` - documentation, indexed in `docs/index.md`. New ADRs go in `docs/decisions/`. Dated audits, plans, and specifications go in `docs/history/audits/`, `docs/history/plans/`, or `docs/history/specs/` with the date in the file name and a line in `docs/history/README.md`; do not create other top-level folders under `docs/`.
 
 ## Tests
 
