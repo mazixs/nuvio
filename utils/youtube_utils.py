@@ -617,7 +617,9 @@ def download_video(
                     )
                 except Exception as cli_error:
                     if _network_unavailable("CLI fallback yt-dlp", cli_error):
-                        break
+                        # Сейчас причина — сеть, и пользователь должен увидеть
+                        # её, а не прежнюю ошибку встроенного API.
+                        raise cli_error from final_error
                     logger.warning("CLI fallback не удался: %s", cli_error)
 
     if final_error:
@@ -779,7 +781,7 @@ def download_audio_native(
                 )
             except Exception as cli_error:
                 if _network_unavailable("CLI fallback нативного аудио", cli_error):
-                    break
+                    raise cli_error from final_error
                 logger.warning("CLI fallback нативного аудио не удался: %s", cli_error)
 
     if final_error:
@@ -957,7 +959,7 @@ def download_audio(
                 )
             except Exception as cli_error:
                 if _network_unavailable(f"CLI fallback {preferred_codec}-аудио", cli_error):
-                    break
+                    raise cli_error from final_error
                 logger.warning(
                     "CLI fallback %s-аудио не удался: %s", preferred_codec, cli_error
                 )

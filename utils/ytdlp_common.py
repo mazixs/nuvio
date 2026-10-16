@@ -134,17 +134,14 @@ def execute_with_backoff(
             return func()
         except yt_dlp.utils.DownloadError as e:
             message = str(e)
-            error_kind = classify_download_error_kind(message)
             if is_connectivity_failure(e):
                 # yt-dlp уже повторил запрос сам. DNS и маршрут за секунды
                 # паузы не вернутся, а внешний повтор лишь умножает ожидание.
                 logger.warning(
-                    "%s: network unavailable (%s), not retrying: %s",
-                    description,
-                    error_kind,
-                    message,
+                    "%s: network unavailable, not retrying: %s", description, message
                 )
                 raise
+            error_kind = classify_download_error_kind(message)
             # MEDIA_FORBIDDEN повторяется наравне с таймаутом: каждая попытка
             # заново разбирает ссылку и получает свежую подпись, а именно этого
             # 403 на медиафайле и требует.

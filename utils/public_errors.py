@@ -67,11 +67,16 @@ _CONNECTIVITY_MARKERS = (
 def _error_chain(error: BaseException, limit: int = 16) -> Iterator[BaseException]:
     """Обходит исключение и его причины, включая обёртки yt-dlp.
 
-    На закреплённой версии yt-dlp DNS-сбой приходит четырьмя слоями:
-    `DownloadError.exc_info[1]` → `TransportError.cause` →
+    На закреплённой версии yt-dlp DNS-сбой при разборе ссылки приходит четырьмя
+    слоями: `DownloadError.exc_info[1]` → `TransportError.cause` →
     `NameResolutionError.__cause__` → `socket.gaierror`. `__context__` берётся
     только там, где его показал бы и traceback: без явной причины и без
     `raise ... from None`.
+
+    При скачивании цепочки нет: `RetryManager` вызывает обработчик ошибки уже
+    после выхода из `except`, и `DownloadError` получает пустой `exc_info`.
+    Сообщение 15.10.2026 (`[download] Got error: … Failed to resolve …`)
+    распознают только текстовые маркеры, поэтому убирать их нельзя.
     """
     pending = [error]
     seen: set[int] = set()
@@ -96,20 +101,35 @@ def _is_connectivity_exception(error: BaseException) -> bool:
     )
 
 
+def _error_lines(msg_lower: str) -> list[str]:
+    """Оставляет строки с самой ошибкой, если они есть.
+
+    Вывод CLI несёт и строки вроде `[download] Destination: <путь>`, а в пути —
+    название ролика. Ролик «Connection Refused» не должен выглядеть отказом сети.
+    """
+    lines = [line for line in msg_lower.splitlines() if "error:" in line]
+    return lines or [msg_lower]
+
+
 def is_connectivity_failure(error: str | BaseException | None) -> bool:
     """Отличает недоступную сеть сервера от отказа площадки.
 
     Тип важнее текста: исключение ищется по всей цепочке причин. Текст остаётся
-    запасным путём для CLI, от которого приходит только stderr.
+    запасным путём для сообщений yt-dlp и stderr CLI. У `OSError` ответ даёт
+    тип: в его тексте путь к файлу, а не сетевая причина.
     """
     if error is None:
         return False
-    if isinstance(error, BaseException) and any(
-        _is_connectivity_exception(item) for item in _error_chain(error)
-    ):
-        return True
-    msg_lower = _confirmed_message(error)
-    return any(marker in msg_lower for marker in _CONNECTIVITY_MARKERS)
+    if isinstance(error, BaseException):
+        if any(_is_connectivity_exception(item) for item in _error_chain(error)):
+            return True
+        if isinstance(error, OSError):
+            return False
+    return any(
+        marker in line
+        for line in _error_lines(_confirmed_message(error))
+        for marker in _CONNECTIVITY_MARKERS
+    )
 
 
 def is_media_forbidden_error(error_msg: str) -> bool:
