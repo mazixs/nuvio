@@ -160,7 +160,9 @@ def test_check_runs_under_shared_work_budget(monkeypatch):
     def _fake_check(session_id: str) -> canary.CanaryOutcome:
         seen["session_id"] = session_id
         seen["budget_session"] = work_budget._session.get()
-        seen["left"] = work_budget._deadline.get() - time.monotonic()
+        deadline = work_budget._deadline.get()
+        assert deadline is not None
+        seen["left"] = deadline - time.monotonic()
         return _success()
 
     monkeypatch.setattr(canary, "run_youtube_canary_check", _fake_check)

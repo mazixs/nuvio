@@ -96,7 +96,7 @@ def _error_chain(error: BaseException, limit: int = 16) -> Iterator[BaseExceptio
 
 
 def _is_connectivity_exception(error: BaseException) -> bool:
-    return isinstance(error, socket.gaierror) or (
+    return isinstance(error, (socket.gaierror, ConnectionRefusedError)) or (
         isinstance(error, OSError) and error.errno in _CONNECTIVITY_ERRNOS
     )
 
@@ -106,9 +106,28 @@ def _error_lines(msg_lower: str) -> list[str]:
 
     Вывод CLI несёт и строки вроде `[download] Destination: <путь>`, а в пути —
     название ролика. Ролик «Connection Refused» не должен выглядеть отказом сети.
+
+    yt-dlp пишет `ERROR: \\r[download] Got error: …`, и после разбиения по `\\r`
+    префикс остаётся на строке один. Такая строка склеивается со следующей,
+    иначе причина держалась бы только на словах «Got error» в строке загрузки.
     """
-    lines = [line for line in msg_lower.splitlines() if "error:" in line]
-    return lines or [msg_lower]
+    lines = msg_lower.splitlines()
+    picked = []
+    for index, line in enumerate(lines):
+        if "error:" not in line:
+            continue
+        if line.strip().endswith("error:") and index + 1 < len(lines):
+            line = f"{line} {lines[index + 1]}"
+        picked.append(line)
+    return picked or [msg_lower]
+
+
+def _has_connectivity_marker(msg_lower: str) -> bool:
+    return any(
+        marker in line
+        for line in _error_lines(msg_lower)
+        for marker in _CONNECTIVITY_MARKERS
+    )
 
 
 def is_connectivity_failure(error: str | BaseException | None) -> bool:
@@ -125,11 +144,7 @@ def is_connectivity_failure(error: str | BaseException | None) -> bool:
             return True
         if isinstance(error, OSError):
             return False
-    return any(
-        marker in line
-        for line in _error_lines(_confirmed_message(error))
-        for marker in _CONNECTIVITY_MARKERS
-    )
+    return _has_connectivity_marker(_confirmed_message(error))
 
 
 def is_media_forbidden_error(error_msg: str) -> bool:
@@ -258,7 +273,7 @@ def _category_from_message(msg_lower: str, *, youtube: bool = False) -> str:
         )
     ):
         return "RATE_LIMIT"
-    if any(marker in msg_lower for marker in _CONNECTIVITY_MARKERS):
+    if _has_connectivity_marker(msg_lower):
         return "NETWORK"
     if any(
         marker in msg_lower
