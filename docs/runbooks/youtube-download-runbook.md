@@ -89,7 +89,7 @@ If formats appear but the full download returns 403, media delivery is broken; p
 
 ### Step 4: compare without and with cookies
 
-The YouTube downloader intentionally tries **without cookies first**. An authenticated session can make yt-dlp select `tv_downgraded` or `web_safari`, which need a PO token, while the token-free `android_vr` client is removed when auth cookies are present. In one measurement the cookie attempt returned an empty format list and the anonymous attempt returned all formats.
+The YouTube downloader intentionally tries **without cookies first**. Auth cookies change the set of player clients yt-dlp uses. In the nightly pinned on 2026-10-16, an anonymous request with Deno available uses `tv_samsung`, `visionos`, and `web`. With auth cookies yt-dlp uses `web_embedded`, `tv_samsung`, and `web` (`web_creator` instead of `web_embedded` for a Premium account), and drops `visionos` because it does not support cookies. `visionos` is the only default client that needs neither the JavaScript player nor a PO token; `web` needs a GVS PO token. The defaults change between nightlies, so after an update check `_DEFAULT_CLIENTS` and `_DEFAULT_AUTHED_CLIENTS` in `yt_dlp/extractor/youtube/_video.py`. Earlier nightlies dropped the token-free `android_vr` client the same way, and in one measurement the cookie attempt returned an empty format list while the anonymous attempt returned all formats.
 
 ```bash
 # Anonymous attempt, matching the bot's first attempt
@@ -110,7 +110,7 @@ yt-dlp rewrites a supplied `cookiefile` from its cookie jar and can remove valid
 | `/app/logs/bot.log` | Bot logger lines such as `USER_FLOW_FAIL`, CLI fallback, exceptions, and yt-dlp warnings through `utils.ytdlp_common` |
 | Administrator crash report | Exception, traceback, stage, and cookie state; final `MEDIA_FORBIDDEN` failures are included |
 
-`apply_network_opts` installs a logger adapter that writes yt-dlp warnings to `bot.log` under `utils.ytdlp_common` and to the session tail in `utils/download_report.py`. These warnings reveal the client used and platform response; the info dictionary does not. Progress lines are excluded from the 60-line diagnostic tail so they cannot displace warnings. The CLI fallback includes the first 1,000 stderr characters in the `RuntimeError` text (`utils/youtube_utils.py`).
+`apply_network_opts` installs a logger adapter that writes yt-dlp warnings to `bot.log` under `utils.ytdlp_common` and to the session tail in `utils/download_report.py`. These warnings reveal the client used and platform response; the info dictionary does not. Progress lines are excluded from the 60-line diagnostic tail so they cannot displace warnings. The CLI fallback puts stderr in the `RuntimeError` text: up to 1,000 characters whole, a longer output as its first 300 and last 700 characters (`_cli_output_excerpt()` in `utils/youtube_utils.py`). Runtime warnings such as `nsig extraction failed` come first, and the final `ERROR:` line comes last, after the retry warnings.
 
 For more detail, set `LOG_LEVEL=DEBUG` in `.secrets/.env` and restart the bot. The log will then include download progress and reasons for skipped formats.
 
@@ -146,7 +146,7 @@ Use a nightly build when stable yt-dlp cannot handle YouTube. When a fixed stabl
 | File | Relevant logic |
 |---|---|
 | `utils/ytdlp_common.py` | `DEFAULT_YTDLP_NETWORK_OPTS`, including `http_chunk_size`; `classify_download_error_kind()`; `execute_with_backoff()` with full jitter for `NETWORK`, `NETWORK_TIMEOUT`, and `MEDIA_FORBIDDEN`, except connectivity failures |
-| `utils/youtube_utils.py` | Without-cookies, with-cookies, then CLI attempts; non-HLS fallback after 403; `PO_TOKEN_ONLY_FORMAT_IDS`; CLI stderr tail; `_network_unavailable()` stops the sequence on connectivity failures |
+| `utils/youtube_utils.py` | Without-cookies, with-cookies, then CLI attempts; non-HLS fallback after 403; `PO_TOKEN_ONLY_FORMAT_IDS`; both ends of CLI stderr; `_network_unavailable()` stops the sequence on connectivity failures |
 | `utils/public_errors.py` | `youtube_error_code()` and `is_media_forbidden_error()`, separating `MEDIA_FORBIDDEN` from `ACCESS_RESTRICTED` |
 | `utils/download_report.py` | yt-dlp output tail and actual downloaded format for crash reports and cache keys |
 | `utils/canary.py` | Scheduled YouTube probe using production options without the cache, with failure notification |

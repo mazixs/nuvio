@@ -117,7 +117,7 @@ CI runs linting, tests, Docker smoke checks, and vulnerability scanning on pushe
 
 ## Security
 
-SQLite queries are parameterized. WebUI credential checks use timing-safe comparison, sign-in attempts are rate limited by IP, and sessions are signed with `WEB_SECRET_KEY`. The WebUI disables Swagger and ReDoc, and Jinja2 escapes HTML. Users receive safe error summaries; operational details stay in administrative logs. Cookie files are stored with owner-only permissions.
+SQLite queries are parameterized. WebUI credential checks use timing-safe comparison, sign-in attempts are rate limited by IP, and sessions are signed with `WEB_SECRET_KEY`. The WebUI disables Swagger, ReDoc, and the OpenAPI schema, and Jinja2 escapes HTML. Users receive safe error summaries; operational details stay in administrative logs. Cookie files are stored with owner-only permissions.
 
 ## Documentation
 

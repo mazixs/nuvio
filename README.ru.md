@@ -202,7 +202,7 @@ WEB_SECRET_KEY=a3f8b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1
 - **Brute-force** - fail2ban: `FAIL2BAN_RETRIES` попыток (по умолчанию 5) → блокировка IP на `FAIL2BAN_TIME` (по умолчанию 10 минут). Формат времени: `15m`, `1h`, `300`
 - **Длина ввода** - логин и пароль ограничены 128 символами, обрезаются на входе
 - **Сессии** - подписаны HMAC через `SessionMiddleware`, подделка без `WEB_SECRET_KEY` невозможна
-- **Swagger/ReDoc** - отключены (`docs_url=None, redoc_url=None`), API-схема не раскрывается
+- **Swagger/ReDoc и схема OpenAPI** - отключены (`docs_url=None, redoc_url=None, openapi_url=None`), `/openapi.json` отвечает 404
 - **Jinja2** - автоэкранирование HTML по умолчанию, защита от XSS
 - **Ошибки** - не раскрывают внутреннюю структуру БД или стектрейсы пользователю
 

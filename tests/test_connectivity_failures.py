@@ -9,6 +9,7 @@ CLI-комбинации, упираясь в тот же резолвер. Се
 
 import errno
 import socket
+import subprocess
 
 import pytest
 import yt_dlp
@@ -140,6 +141,44 @@ def test_cli_output_lines_do_not_count_only_error_lines_do():
     assert youtube_error_code(title_in_stdout) != "NETWORK"
     assert classify_internal_error_category("rutube", title_in_stdout) != "NETWORK"
     assert is_connectivity_failure(dns_in_stderr)
+
+
+def test_cli_error_keeps_both_ends_of_the_output(monkeypatch, tmp_path):
+    """`ERROR:` yt-dlp печатает последней, а признаки JS-рантайма — первыми."""
+    runtime = "WARNING: [youtube] abc123def45: nsig extraction failed: Some formats may be missing\n"
+    retries = "WARNING: [youtube] abc123def45: Unable to download API page, retrying\n" * 40
+    stderr = f"{runtime}{retries}{DNS_FAILURE}"
+    assert len(stderr) > 1000
+    monkeypatch.setattr(youtube_utils, "_cookiefile_if_available", lambda use: None)
+    monkeypatch.setattr(
+        youtube_utils,
+        "run_yt_dlp_cli",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 1, "", stderr),
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        youtube_utils._download_with_cli_fallback(
+            url=URL,
+            session_id="tail",
+            format_selector="18",
+            use_cookies=False,
+            output_dir=tmp_path,
+        )
+
+    message = str(caught.value)
+    assert "nsig extraction failed" in message
+    assert "Giving up after 5 retries" in message
+    assert len(message) < len(stderr)
+    assert is_connectivity_failure(caught.value)
+
+
+def test_cli_output_excerpt_cuts_only_the_middle():
+    short = "WARNING: retrying\nERROR: failed"
+    long = "a" * 300 + "b" * 500 + "c" * 700
+
+    assert youtube_utils._cli_output_excerpt(short) == short
+    assert youtube_utils._cli_output_excerpt("x" * 1000) == "x" * 1000
+    assert youtube_utils._cli_output_excerpt(long) == "a" * 300 + "\n…\n" + "c" * 700
 
 
 def test_bare_error_prefix_is_joined_with_the_cause_on_the_next_line():
