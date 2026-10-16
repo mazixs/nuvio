@@ -57,7 +57,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add requirements.in requirements.txt requirements-dev.txt AGENTS.md README.ru.md docs/PRD.md docs/technical/youtube-download-runbook.md
+          git add requirements.in requirements.txt requirements-dev.txt AGENTS.md README.ru.md docs/reference/PRD.md docs/runbooks/youtube-download-runbook.md
           git commit -m "chore: update yt-dlp to ${VERSION}"
           git push --set-upstream origin "$branch"
           gh pr create --base main --head "$branch" \

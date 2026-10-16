@@ -569,5 +569,5 @@ Expected: containers are `Up`, 0 errors. Repeat the cancellation check from Step
 
 ## What this release does not do
 
-Task queue, three-task limit, task list sent in a single message, download progress percentages, message about lost queue after restart - all of this is part of release 2 according to the spec `docs/superpowers/specs/2026-07-29-download-queue-and-progress-design.md`.
+Task queue, three-task limit, task list sent in a single message, download progress percentages, message about lost queue after restart - all of this is part of release 2 according to the [spec](../specs/2026-07-29-download-queue-and-progress-design.md).
 After this release, the second link is accepted, but downloads happen simultaneously rather than sequentially: users can start as many parallel downloads as desired within the `DOWNLOAD_WORKERS` limit. The three-task limit will appear in release 2. The risk during this period is acknowledged: anti-spam (4 requests every 5 seconds) remains the only constraint.

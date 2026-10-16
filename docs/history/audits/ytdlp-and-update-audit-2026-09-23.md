@@ -28,102 +28,102 @@ The conclusions about current behavior are based on code review and the provided
 ### P0 – Auto-update does not restart already-imported yt-dlp
 
 `main.py` imports `utils.canary` before calling `ensure_latest_yt_dlp`; `utils.canary` at the module level imports `utils.youtube_utils`, which immediately imports `yt_dlp`. Then, `pip install --upgrade` modifies files on disk, but Python continues to use already-loaded modules. The same occurs when updating from the canary in a running process. Logs may show a new version from package metadata, yet the loaded code remains unchanged. Additionally, pip may alter transitive dependencies already used by other handlers.
-Proof: [main.py](../../main.py#L43), [utils/canary.py](../../utils/canary.py#L50), [utils/youtube_utils.py](../../utils/youtube_utils.py#L10), [utils/ytdlp_runtime.py](../../utils/ytdlp_runtime.py#L86).
+Proof: [main.py](../../../main.py#L43), [utils/canary.py](../../../utils/canary.py#L50), [utils/youtube_utils.py](../../../utils/youtube_utils.py#L10), [utils/ytdlp_runtime.py](../../../utils/ytdlp_runtime.py#L86).
 
 ### P0 - The image does not contain a JavaScript runtime for YouTube
 
 The dependency `yt-dlp[default]` installs the `yt-dlp-ejs` package, but the Dockerfile does not install Deno, Node, or any other supported runtime. The crash report directly contains a warning about the missing runtime, and the solution to the challenge failed. According to the current yt-dlp documentation, Deno 2.3+ is recommended as the runtime, and the EJS component is required.
-Proof: [Dockerfile](../../Dockerfile#L1), [requirements.in](../../requirements.in#L3), attached crash report. Runtime requirements: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+Proof: [Dockerfile](../../../Dockerfile#L1), [requirements.in](../../../requirements.in#L3), attached crash report. Runtime requirements: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
 ### P0 - Telegram Markdown can break the menu before loading starts
 
 In the incident, the menu handler collected the menu and passed it to `edit_text(parse_mode="Markdown")`; Telegram returned `Can't parse entities`. The general `except Exception` classified the rendering error as `YT-UNKNOWN` and displayed the error instead of the buttons. As a result, the user could not start the download. In the working copy, the header escaping has already been replaced with a helper Telegram function; however, the change has not yet been verified or tested with a real menu.
-Proof: [utils/telegram_utils.py](../../utils/telegram_utils.py#L1682) and the general error handler below. The header escaping change is currently in an uncommitted state.
+Proof: [utils/telegram_utils.py](../../../utils/telegram_utils.py#L1682) and the general error handler below. The header escaping change is currently in an uncommitted state.
 
 ### P1 - Automatic updates are disabled by default, and their results are hard to interpret
 
 `YTDLP_AUTO_UPDATE=false` is set in the environment template and is the default setting. If updates are disabled, `ensure_latest_yt_dlp()` returns `attempted=False` and simultaneously `succeeded=True`; this may appear as a successful check, even though the new version was not actually verified. When enabled, every run triggers pip regardless of whether a new version is available. The code considers a zero exit code from pip as success and does not re-check YouTube functionality.
-Proof: [config.py](../../config.py#L161), [.env.example](../../.env.example#L68), [utils/ytdlp_runtime.py](../../utils/ytdlp_runtime.py#L76).
+Proof: [config.py](../../../config.py#L161), [.env.example](../../../.env.example#L68), [utils/ytdlp_runtime.py](../../../utils/ytdlp_runtime.py#L76).
 
 ### P1 - Channel switching does not guarantee transition to the selected release
 
 Channels describe not a fixed version, but arguments for `pip install --upgrade`. When switching from a newer nightly to an older stable version without explicitly specifying a version number, the command may leave the installed nightly version and finish successfully. The `master` channel uses a moving GitHub archive with `--force-reinstall`; the result cannot be reproduced from a single value of `YTDLP_RELEASE_CHANNEL`. None of the modes verify the actual release against the selected policy after installation.
-Proof: [utils/ytdlp_runtime.py](../../utils/ytdlp_runtime.py#L44) and the pip exit code check below only.
+Proof: [utils/ytdlp_runtime.py](../../../utils/ytdlp_runtime.py#L44) and the pip exit code check below only.
 
 ### P1 - Container updates are temporary and not reproducible
 
 The Docker image takes a pinned version from the lock file. Installing via pip changes the container layer during its lifetime; recreating the container returns the pinned version. The project already has a manual procedure for updating the pin, but the version is also repeated in the test and documentation. There is no single command that updates the input pin, recalculates hashes, and brings related checks into a consistent state.
-Proof: [requirements.in](../../requirements.in#L3), [Dockerfile](../../Dockerfile#L25), [youtube-download-runbook.md](../../docs/technical/youtube-download-runbook.md#L203).
+Proof: [requirements.in](../../../requirements.in#L3), [Dockerfile](../../../Dockerfile#L25), [youtube-download-runbook.md](../../runbooks/youtube-download-runbook.md#L203).
 
 ### P1 - the path from PR to a running server is missing in the update mechanism
 
 CI on push checks the code and image, but does not publish the new image. The release workflow publishes an image only for tags starting with `v*`. Even a successful release does not automatically update the container on the server: Compose uses a locally available image until the operator manually runs a `pull` and `recreate`. Therefore, a scheduled PR from the plan will generate an automatic update suggestion, not automatic live bot updates.
-**Evidence**: [.github/workflows/ci.yml](../../.github/workflows/ci.yml#L1), [.github/workflows/release.yml](../../.github/workflows/release.yml#L1), [compose.yaml](../../compose.yaml#L40), and the manual step on the server in [youtube-download-runbook.md](../../docs/technical/youtube-download-runbook.md#L224).
+**Evidence**: [.github/workflows/ci.yml](../../../.github/workflows/ci.yml#L1), [.github/workflows/release.yml](../../../.github/workflows/release.yml#L1), [compose.yaml](../../../compose.yaml#L40), and the manual step on the server in [youtube-download-runbook.md](../../runbooks/youtube-download-runbook.md#L224).
 
 ### P1 - the release checks the WebUI but not the bot's readiness
 
 The `web` service has a `/health` endpoint and a Compose healthcheck; the `bot` service lacks a healthcheck. CI and release smoke tests only launch `python -m web` from the image and verify the WebUI response. Thus, a successful image publication confirms WebUI startup but does not verify polling, Deno availability, or actual bot downloads. Automatic delivery of a new image without an independent readiness signal for the bot relies on an incorrect success criterion.
-**Evidence**: [compose.yaml](../../compose.yaml#L40), [compose.yaml](../../compose.yaml#L86), [.github/workflows/ci.yml](../../.github/workflows/ci.yml#L124), [.github/workflows/release.yml](../../.github/workflows/release.yml#L135).
+**Evidence**: [compose.yaml](../../../compose.yaml#L40), [compose.yaml](../../../compose.yaml#L86), [.github/workflows/ci.yml](../../../.github/workflows/ci.yml#L124), [.github/workflows/release.yml](../../../.github/workflows/release.yml#L135).
 
 ### P1 - automatic problem detection signal is disabled by default
 
 The canary downloads a reference video through production flow, bypassing the cache - this is a useful validation, not just a metadata check. However, `CANARY_ENABLED=false` by default, so the bot will not detect regressions automatically without explicit configuration. When a failure occurs, the canary performs a forced pip update and retries, but the retry runs under the same process with already loaded yt-dlp. The daily update limit is stored only in memory and resets on restart.
-**Evidence**: [config.py](../../config.py#L169), [utils/canary.py](../../utils/canary.py#L245).
+**Evidence**: [config.py](../../../config.py#L169), [utils/canary.py](../../../utils/canary.py#L245).
 
 ### P1 - the canary may skip a failure or terminate without notification
 
 The canary selects a format with a 50 MB budget and calls `download_video()`. However, if the primary attempt fails, the same downloader may switch to another format without that budget and then fall back to CLI. The CLI fallback does not receive `http_chunk_size=10 MB`, which is specified in the API download. The August incident specifically depended on the Range size, so a successful CLI fallback does not prove the primary API path is healthy. Moreover, a fallback format without size limits could sharply increase traffic and the size of the check file.
 `get_available_formats()` and format selection are outside error handlers in `run_youtube_canary_check()`. If either raises an exception, `_check_in_thread()` only catches timeouts, and `youtube_canary_job()` terminates before notifying administrators. On timeout, thread waiting stops, but the thread itself may continue running; the next pip update and retry may coincide with it in time.
-**Evidence**: [utils/canary.py](../../utils/canary.py#L123), [utils/youtube_utils.py](../../utils/youtube_utils.py#L400), [utils/youtube_utils.py](../../utils/youtube_utils.py#L296), [utils/ytdlp_common.py](../../utils/ytdlp_common.py#L19). The difference between CLI and API is already noted in [youtube-download-runbook.md](../../docs/technical/youtube-download-runbook.md#L108).
+**Evidence**: [utils/canary.py](../../../utils/canary.py#L123), [utils/youtube_utils.py](../../../utils/youtube_utils.py#L400), [utils/youtube_utils.py](../../../utils/youtube_utils.py#L296), [utils/ytdlp_common.py](../../../utils/ytdlp_common.py#L19). The difference between CLI and API is already noted in [youtube-download-runbook.md](../../runbooks/youtube-download-runbook.md#L108).
 
 ### P1 - report tail mixes metadata from different sessions
 
 The metadata analysis is called without `session_id`, and its entire output is written under a shared key. Then, `output_tail(session_id)` appends this shared tail to the session-specific tail. During parallel requests, warnings about other videos and platforms appear in the report. In the attached report, alongside Shorts, there are entries for TikTok, Instagram, and a public YouTube video used for cookie validation. Based on this tail, it's not possible to confidently assign each warning to a specific Shorts issue.
 
-Proof: [utils/youtube_utils.py](../../utils/youtube_utils.py#L72), [utils/ytdlp_common.py](../../utils/ytdlp_common.py#L149), [utils/download_report.py](../../utils/download_report.py#L60), [utils/cookie_health.py](../../utils/cookie_health.py#L51).
+Proof: [utils/youtube_utils.py](../../../utils/youtube_utils.py#L72), [utils/ytdlp_common.py](../../../utils/ytdlp_common.py#L149), [utils/download_report.py](../../../utils/download_report.py#L60), [utils/cookie_health.py](../../../utils/cookie_health.py#L51).
 
 ### P1 - Stuck metadata parsing may consume a thread after user timeout
 
 For YouTube, `process_url()` already has a `session_id`, but calls `run_blocking(get_video_info, url)` without it. In `get_video_info()`, network options are applied without `session_id`, so no cancellation hook is set. `asyncio.wait_for()` terminates waiting after `BLOCKING_TASK_TIMEOUT`, but does not stop the yt-dlp thread. A series of stuck parses can exhaust the download pool, even if users have already received timeout errors.
 
-Proof: [utils/telegram_utils.py](../../utils/telegram_utils.py#L1673), [utils/telegram_utils.py](../../utils/telegram_utils.py#L361), [utils/youtube_utils.py](../../utils/youtube_utils.py#L72), [utils/ytdlp_common.py](../../utils/ytdlp_common.py#L149).
+Proof: [utils/telegram_utils.py](../../../utils/telegram_utils.py#L1673), [utils/telegram_utils.py](../../../utils/telegram_utils.py#L361), [utils/youtube_utils.py](../../../utils/youtube_utils.py#L72), [utils/ytdlp_common.py](../../../utils/ytdlp_common.py#L149).
 
 ### P1 - Two EJS mechanisms allow unexpected network sources
 
 `yt-dlp-ejs` is already locked in the lockfile, but API options and CLI fallbacks additionally allow `ejs:github`. If the local EJS is missing or no longer compatible with yt-dlp versions, the application may download scripts from GitHub during URL processing. This compromises reproducibility, availability, and diagnostics: results depend on access to GitHub and remote releases. The fallback should be removed after confirming that compatible local scripts are present in the image.
 
-Proof: [requirements.txt](../../requirements.txt#L1194), [utils/ytdlp_common.py](../../utils/ytdlp_common.py#L29), [utils/youtube_utils.py](../../utils/youtube_utils.py#L323). Value of `ejs:github`: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+Proof: [requirements.txt](../../../requirements.txt#L1194), [utils/ytdlp_common.py](../../../utils/ytdlp_common.py#L29), [utils/youtube_utils.py](../../../utils/youtube_utils.py#L323). Value of `ejs:github`: [yt-dlp EJS setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
 ### P1 - `/admin` and crash report show incomplete update status
 
 The crash report includes the installed version and channel, but does not show whether the updater is enabled, when the last attempt was made, how it ended, whether a JS runtime is present, or whether a canary has passed after restart. Therefore, from a single report, it's impossible to distinguish between a current package without runtime and a failed installation or a successful update that hasn't yet taken effect.
 
-Proof: report field collection in [utils/telegram_utils.py](../../utils/telegram_utils.py#L281); runtime version is logged at startup in [main.py](../../main.py#L344).
+Proof: report field collection in [utils/telegram_utils.py](../../../utils/telegram_utils.py#L281); runtime version is logged at startup in [main.py](../../../main.py#L344).
 
 ### P1 - Notification delivery failure is not visible to administrators
 
 The canary and crash report catch errors in sending notifications to administrators and log them only at DEBUG level. If Telegram is unavailable or sending is blocked, an operator may not receive a signal about a YouTube failure, and standard `LOG_LEVEL=INFO` will not reveal the reason for delivery failure. A visible status of the last notification attempt and logging of the error at operational log level are needed; additionally, a separate notification channel can be selected.
-Proof: [utils/canary.py](../../utils/canary.py#L304), [utils/telegram_utils.py](../../utils/telegram_utils.py#L321), [.env.example](../../.env.example#L39).
+Proof: [utils/canary.py](../../../utils/canary.py#L304), [utils/telegram_utils.py](../../../utils/telegram_utils.py#L321), [.env.example](../../../.env.example#L39).
 
 ### P2 - Updates introduce unnecessary startup delay and modify dependencies on the fly
 
 When the setting is enabled, every startup waits for pip with a timeout of up to 240 seconds. Updates from canary can occur during user uploads. pip modifies the package code on disk while the application continues running; the update result is not isolated and is not activated in a coordinated manner.
-Proof: [utils/ytdlp_runtime.py](../../utils/ytdlp_runtime.py#L94), [utils/canary.py](../../utils/canary.py#L247).
+Proof: [utils/ytdlp_runtime.py](../../../utils/ytdlp_runtime.py#L94), [utils/canary.py](../../../utils/canary.py#L247).
 
 ### P2 - Current automated checks do not enforce the update contract
 
 A build test command for stable/nightly/master channels was found, but no full behavior checks for the updater were detected: disabled state, pip error, timeout, version difference before/after, restart/update application, and presence of JS runtime in the final image.
-Proof: The only direct coverage of the builder is in [test_audit_regressions.py](../../tests/test_audit_regressions.py#L1899); CI builds a Docker image, but the described job lacks verification that the runtime is actually available and resolves the JS challenge.
+Proof: The only direct coverage of the builder is in [test_audit_regressions.py](../../../tests/test_audit_regressions.py#L1899); CI builds a Docker image, but the described job lacks verification that the runtime is actually available and resolves the JS challenge.
 
 ### P2 - Cookie diagnostics may exacerbate widespread failures
 
 On every YouTube, TikTok, or Instagram error, the background report triggers `check_cookie_health()`. The result is cached for 10 minutes, but before a record appears, parallel errors may trigger multiple identical network probes. For YouTube, the probe accesses a separate video via yt-dlp and may take up to network timeouts, adding load precisely during a widespread platform outage. The `probe_failed` entry in the report refers to this additional check and does not establish the cause of the user-level failure.
-Proof: [utils/telegram_utils.py](../../utils/telegram_utils.py#L1062), [utils/cookie_health.py](../../utils/cookie_health.py#L22), [utils/cookie_health.py](../../utils/cookie_health.py#L274).
+Proof: [utils/telegram_utils.py](../../../utils/telegram_utils.py#L1062), [utils/cookie_health.py](../../../utils/cookie_health.py#L22), [utils/cookie_health.py](../../../utils/cookie_health.py#L274).
 
 ### P2 - Runbook contradicts current routing of `MEDIA_FORBIDDEN`
 
 The runbook states twice that admins should not receive crash reports when `MEDIA_FORBIDDEN` occurs. The function `_should_notify_admins_platform_failure()` returns `True` for this category if the stage is not a timeout. This creates incorrect expectations during investigations of widespread 403 errors. Before correcting the documentation, the actual message format must be verified and agreement on the required notification frequency must be reached.
-Proof: [youtube-download-runbook.md](../../docs/technical/youtube-download-runbook.md#L80), [utils/telegram_utils.py](../../utils/telegram_utils.py#L1035).
+Proof: [youtube-download-runbook.md](../../runbooks/youtube-download-runbook.md#L80), [utils/telegram_utils.py](../../../utils/telegram_utils.py#L1035).
 
 ## Fix Plan
 

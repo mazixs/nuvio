@@ -37,11 +37,11 @@ Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, 
 | `utils/logger.py`, `utils/cache_commands.py`, `utils/temp_file_manager.py` | Logging, cache commands, and temporary files |
 | `web/` | FastAPI application, templates, static assets, and localization |
 | `tests/` | Unit, integration, smoke, and regression tests |
-| `docs/` | English guides, technical notes, audits, and archived plans |
+| `docs/` | English guides, reference, runbooks, decisions (ADRs), research, and dated history (audits, plans, specs) |
 | `scripts/release_notes.py` | GitHub Release changelog generation |
 | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | CI and release pipelines |
 
-The documentation index is `docs/index.md`. The archived plans in `docs/superpowers/` describe past work and may contain historical commands or versions.
+The documentation index is `docs/index.md`. The plans, specs, and audits in `docs/history/` describe past work and may contain historical commands, versions, and file paths. Put new dated audits, plans, and specs in `docs/history/<kind>/` with the date in the file name and list them in `docs/history/README.md`; new ADRs go in `docs/decisions/`. Do not create other top-level folders under `docs/`, including tool defaults such as `docs/superpowers/`.
 
 ## Setup and operation
 
@@ -94,7 +94,7 @@ Public documentation may identify the repository owner as `mazixs` and use `mazi
 
 - Error IDs follow `PREFIX-CATEGORY-RANDOM`, for example `YT-ACCESS-A1B2C3`.
 - Prefixes are `YT`, `TT`, `IG`, `RU`, `VK`, `TG`, `FILE`, and `BOT`.
-- Categories and their eight-character abbreviations are listed in `docs/error-codes.md`. If the cause is unconfirmed, use `UNEXPECT` and include the exception type in the log. Do not create new `UNKNOWN` codes.
+- Categories and their eight-character abbreviations are listed in `docs/reference/error-codes.md`. If the cause is unconfirmed, use `UNEXPECT` and include the exception type in the log. Do not create new `UNKNOWN` codes.
 - Users see a safe, platform-specific explanation and the error ID. Cookie state, internal addresses, container details, and tracebacks belong only in administrator logs and reports.
 - Use `Exception.add_note()` to attach diagnostic context.
 

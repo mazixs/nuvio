@@ -40,7 +40,7 @@ Two changes addressed the issues:
 
 This section was added without rewriting the earlier decision history.
 
-The previously rejected quality tradeoff became the **default behavior**. `TIKTOK_FAST_PATH` is enabled by default and uses a third-party resolver's direct `play` URL, reliably delivering **576×1024 H.264 High + AAC** regardless of video duration. Measurements and rationale are in [latency, disk, and network research](latency-disk-network-research.md), sections 4 and 5.3.
+The previously rejected quality tradeoff became the **default behavior**. `TIKTOK_FAST_PATH` is enabled by default and uses a third-party resolver's direct `play` URL, reliably delivering **576×1024 H.264 High + AAC** regardless of video duration. Measurements and rationale are in [latency, disk, and network research](../research/latency-disk-network-research.md), sections 4 and 5.3.
 
 The change favors speed:
 

@@ -28,7 +28,7 @@ uv pip compile --python-version 3.14 --generate-hashes --output-file requirement
 - `utils/` - core application logic.
 - `web/` - FastAPI analytics WebUI.
 - `tests/` - pytest tests.
-- `docs/` - documentation.
+- `docs/` - documentation, indexed in `docs/index.md`. New ADRs go in `docs/decisions/`. Dated audits, plans, and specifications go in `docs/history/audits/`, `docs/history/plans/`, or `docs/history/specs/` with the date in the file name and a line in `docs/history/README.md`; do not create other top-level folders under `docs/`.
 
 ## Tests
 
@@ -60,7 +60,7 @@ Keep bot-facing messages in `messages.py` rather than embedding them in handlers
 - Prefixes: `YT`, `TT`, `IG`, `RU`, `VK`, `TG`, `FILE`, and `BOT`.
 - Show users a safe platform-specific explanation and an error ID. Keep tracebacks and operational details in administrative logs.
 - Use `Exception.add_note()` to attach diagnostic context.
-- The [error code reference](../error-codes.md) defines current categories and their eight-character IDs.
+- The [error code reference](../reference/error-codes.md) defines current categories and their eight-character IDs.
 
 ### Async work
 

@@ -14,7 +14,7 @@ from utils import cache_commands
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNBOOK = ROOT / "docs" / "technical" / "youtube-download-runbook.md"
+RUNBOOK = ROOT / "docs" / "runbooks" / "youtube-download-runbook.md"
 
 
 @pytest.mark.unit
@@ -26,7 +26,7 @@ def test_adr_001_records_fast_path_supersession():
     датой решения и ссылкой на замеры.
     """
     adr = (
-        ROOT / "docs" / "technical" / "adr-001-tiktok-audio-hevc-compatibility.md"
+        ROOT / "docs" / "decisions" / "adr-001-tiktok-audio-hevc-compatibility.md"
     ).read_text(encoding="utf-8")
 
     assert "2026-07-25" in adr
@@ -99,10 +99,10 @@ def test_youtube_runbook_names_the_pinned_ytdlp_version():
 
     runbook = RUNBOOK.read_text(encoding="utf-8")
     assert pinned_version in runbook, (
-        f"docs/technical/youtube-download-runbook.md не знает про yt-dlp {pinned_version}"
+        f"docs/runbooks/youtube-download-runbook.md не знает про yt-dlp {pinned_version}"
     )
     assert "scripts/update_ytdlp.py" in runbook
-    for duplicate in ("AGENTS.md", "README.ru.md", "docs/PRD.md"):
+    for duplicate in ("AGENTS.md", "README.ru.md", "docs/reference/PRD.md"):
         assert pinned_version in (ROOT / duplicate).read_text(encoding="utf-8")
 
 
@@ -156,13 +156,12 @@ def test_youtube_403_troubleshooting_leads_to_runbook():
     Оператор приходит с жалобой «не качается» в troubleshooting и с вопросом
     «где документация» в оглавление, поэтому ссылки нужны в обоих местах.
     """
-    relative_link = "technical/youtube-download-runbook.md"
-
-    issues = (ROOT / "docs" / "troubleshooting" / "common-issues.md").read_text(
+    issues = (ROOT / "docs" / "runbooks" / "common-issues.md").read_text(
         encoding="utf-8"
     )
     assert "HTTP Error 403" in issues
-    assert relative_link in issues
+    # Оба документа лежат в docs/runbooks/, поэтому ссылка соседняя.
+    assert "(youtube-download-runbook.md" in issues
 
     index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
-    assert relative_link in index
+    assert "runbooks/youtube-download-runbook.md" in index
