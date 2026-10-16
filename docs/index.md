@@ -21,6 +21,8 @@
 - [Cache and delivery implementation acceptance](audits/cache-and-delivery-acceptance-2026-10-06.md) - local evidence, runtime verification, and pending external checks.
 - [Cache and delivery audit](audits/cache-and-delivery-audit-2026-10-06.md) - dated findings and reproducible local experiments.
 - [Cache and delivery change plan](plans/cache-and-delivery-changes-2026-10-06.md) - implementation phases, acceptance gates, and rollback.
+- [Network outage of 2026-10-15](audits/network-outage-2026-10-15.md) - incident timeline, retry cascade, and local Bot API outage experiments.
+- [Network resilience plan](plans/network-resilience-2026-10-16.md) - staged fixes for classification, liveness, outage states, alerts, and delivery confirmation.
 
 ## Development
 
