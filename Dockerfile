@@ -14,12 +14,17 @@ FROM python:3.14-slim@sha256:0741d101873c12ab927e6f8653feb8862b9bd58771177acb1b8
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Обновляем системные пакеты из репозитория Debian: закрепленный базовый образ
-# может содержать уязвимости, уже исправленные после его сборки.
+# Обновляем системные пакеты из репозитория Debian: закреплённый базовый образ
+# может содержать уязвимости, уже исправленные после его сборки. CI берёт этот
+# слой из кэша, пока не изменится текст команды. Минимальная версия закреплена
+# в самом тексте: её повышение пересобирает слой, а проверка не даёт собрать
+# образ со старым пакетом. librsvg2-2 устанавливается как зависимость ffmpeg
+# (CVE-2026-96889).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
+        librsvg2-2 \
         openssl \
         libssl3t64 \
         openssl-provider-legacy \
@@ -32,6 +37,7 @@ RUN apt-get update && \
         login \
         mount \
         util-linux && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' librsvg2-2)" ge '2.60.0+dfsg-1+deb13u1' && \
     rm -rf /var/lib/apt/lists/*
 
 # yt-dlp использует Deno для решения JavaScript-задач YouTube. Без него часть
