@@ -24,6 +24,15 @@ def _locked_ytdlp_version(lock_text: str) -> str:
     return versions[0]
 
 
+def _canonical_dev_version(version: str) -> str:
+    """Приводит запись dev-релиза к виду из lock-файла.
+
+    В METADATA сборки hatchling стоит `2026.10.29.232701dev`, а в lock-файле та же
+    по PEP 440 версия записана как `2026.10.29.232701.dev0`.
+    """
+    return re.sub(r"\.?dev0?$", ".dev0", version)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--online", action="store_true", help="Проверить форматы контрольного ролика")
@@ -32,7 +41,7 @@ def main() -> None:
     pin = _locked_ytdlp_version(Path("requirements.txt").read_text(encoding="utf-8"))
     parts = runtime_components()
     sys.stdout.write(f"{parts}\n")
-    if parts["yt_dlp_installed"] != pin:
+    if _canonical_dev_version(parts["yt_dlp_installed"]) != _canonical_dev_version(pin):
         raise RuntimeError("версия yt-dlp в образе не совпадает с pin")
     if parts["ejs"] == "отсутствует" or parts["deno"] == "отсутствует":
         raise RuntimeError("для YouTube нужны EJS и Deno")
