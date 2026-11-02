@@ -220,6 +220,15 @@ def get_available_formats(
         ):
             continue
 
+        # yt-dlp не знает кодек IAMF (формат 773) и оставляет vcodec и acodec пустыми.
+        # Это звук, а не видео со звуком, и Telegram его не проиграет.
+        if (
+            format_info.get("vcodec") is None
+            and format_info.get("acodec") is None
+            and not format_info.get("height")
+        ):
+            continue
+
         # Применяем фильтрацию по размеру файла (если включена)
         if filter_by_size and filesize:
             if filesize > size_limit:
@@ -293,9 +302,9 @@ def get_available_formats(
                 }
             )
 
-    video_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
-    audio_formats.sort(key=lambda x: x.get("filesize", 0) or 0, reverse=True)
-    combined_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
+    video_formats.sort(key=lambda x: x.get("height") or 0, reverse=True)
+    audio_formats.sort(key=lambda x: x.get("filesize") or 0, reverse=True)
+    combined_formats.sort(key=lambda x: x.get("height") or 0, reverse=True)
 
     logger.info(
         f"Найдено форматов: video_only={len(video_formats)}, audio_only={len(audio_formats)}, combined={len(combined_formats)}"

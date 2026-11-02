@@ -2756,9 +2756,9 @@ def get_available_formats_tiktok(video_info: dict) -> dict:
                     "type": "combined",
                 }
             )
-    video_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
-    audio_formats.sort(key=lambda x: x.get("filesize", 0), reverse=True)
-    combined_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
+    video_formats.sort(key=lambda x: x.get("height") or 0, reverse=True)
+    audio_formats.sort(key=lambda x: x.get("filesize") or 0, reverse=True)
+    combined_formats.sort(key=lambda x: x.get("height") or 0, reverse=True)
     return {
         "video_only": video_formats,
         "audio_only": audio_formats,
