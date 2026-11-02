@@ -116,7 +116,9 @@ _PROBE_SUMMARIES = {
     "rate_limited": "platform temporarily rate-limited the validation probe",
     "probe_failed": "auth cookies are active but live probe could not complete",
 }
-# Публичный ролик извлекается и без входа, поэтому успех здесь сессию не доказывает.
+# Публичный ролик обычно извлекается и без входа, поэтому успех сессию не доказывает.
+# Но адрес может попасть под проверку на бота: 02.11.2026 без живой сессии тот же
+# ролик получал `Sign in to confirm`, и тогда это `stale`.
 _YTDLP_PROBE_VALID_SUMMARY = "session cookies are present and the test video was extracted"
 
 
@@ -288,8 +290,8 @@ def _probe_with_ytdlp(platform: str, file_path: Path) -> str:
     finally:
         forget_download_report(session_id)
 
-    # Публичный ролик извлекается и без входа, а ответ самой пробы мог удалить
-    # сессионную cookie: yt-dlp уже сохранил его в файл.
+    # Успех мог быть и без входа, а ответ самой пробы мог удалить сессионную cookie:
+    # yt-dlp уже сохранил его в файл.
     try:
         return "valid" if _has_live_session_cookie(platform, file_path) else "stale"
     except (OSError, ValueError) as exc:

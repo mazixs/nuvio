@@ -102,7 +102,7 @@ The parser accepts only what yt-dlp's jar reads whole and silently, because the 
 | TikTok | `GET https://www.tiktok.com/passport/web/account/info/` | `message=success` and `data.user_id_str` | HTTP 200 with `data.name=session_expired` or `data.error_code=13` | `rate_limited` on HTTP 429, else `probe_failed` |
 | Instagram | `GET /accounts/edit/`, first 256 KB of the body | `NON_FACEBOOK_USER_ID` is not zero | Redirect to `/accounts/login`, or HTTP 401 or 403 | `rate_limited` on HTTP 429 or a rate-limit message, else `probe_failed` |
 
-- **YouTube:** `valid` does not prove the session, because the test video extracts without sign-in. The summary says so: `session cookies are present and the test video was extracted`.
+- **YouTube:** `valid` does not prove the session, because the test video usually extracts without sign-in. Under YouTube's bot check it does not: on 2026-11-02 it failed with `Sign in to confirm you're not a bot` without a live session, which is `stale`. The summary says so: `session cookies are present and the test video was extracted`.
 - **TikTok:** the endpoint is undocumented, so an unfamiliar response is `probe_failed`, not a verdict on the session. The response contains the email, phone number, and `session_key`; only the verdict fields are read, and the body is not written anywhere. In a 2026-11-01 measurement, `sessionid` or `sid_tt` alone confirmed sign-in and `uid_tt` alone did not.
 - **Instagram:** any unfamiliar page used to look like a live session; now only the non-zero ID counts. The signal sits about 160 KB into the page, hence the 256 KB read. Markers such as `Log in` are useless because neither the sign-in page nor the signed-in page contains them, and `USER_ID` is `0` on both.
 

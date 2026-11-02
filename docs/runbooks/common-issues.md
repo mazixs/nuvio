@@ -83,7 +83,7 @@ The alert keeps no state, so it repeats once a day until the problem is resolved
 ### What `valid` proves
 
 - **TikTok and Instagram:** the platform recognized the account.
-- **YouTube:** only that a public test video was extracted and `LOGIN_INFO` is still in the copy. That video extracts without sign-in, so this does not prove the session.
+- **YouTube:** only that a public test video was extracted and `LOGIN_INFO` is still in the copy. That video usually extracts without sign-in, so this does not prove the session. A server under YouTube's bot check gets `Sign in to confirm you're not a bot` without a live session: on 2026-11-02 this failed the test video and a user request until fresh cookies were uploaded.
 
 ### TikTok stays on `probe_failed`
 
