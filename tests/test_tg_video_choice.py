@@ -1,5 +1,7 @@
 """Тесты выбора формата для кнопки «отправить видео в Telegram»."""
 
+import importlib
+
 import pytest
 
 from utils.tg_video_choice import (
@@ -240,6 +242,73 @@ def test_progressive_itag_18_is_not_offered():
 
     assert formats["combined"] == []
     assert [fmt["format_id"] for fmt in formats["video_only"]] == ["134"]
+
+
+@pytest.mark.unit
+def test_format_with_unknown_codecs_is_not_offered():
+    """yt-dlp не знает кодек IAMF и оставляет vcodec и acodec пустыми.
+
+    Формат 773 попадал в «видео со звуком» и ронял сортировку по высоте, поэтому
+    на таком ролике меню форматов не открывалось.
+    """
+    from utils.youtube_utils import get_available_formats
+
+    info = {
+        "formats": [
+            {
+                "format_id": "773",
+                "ext": "m4a",
+                "height": None,
+                "vcodec": None,
+                "acodec": None,
+                "audio_channels": 6,
+                "filesize": 26 * MB,
+            },
+            {
+                "format_id": "22",
+                "ext": "mp4",
+                "height": 720,
+                "vcodec": "avc1.42001E",
+                "acodec": "mp4a.40.2",
+                "filesize": 61 * MB,
+            },
+        ]
+    }
+
+    formats = get_available_formats(info, filter_by_size=False)
+
+    assert [fmt["format_id"] for fmt in formats["combined"]] == ["22"]
+    assert formats["audio_only"] == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("module", "function"),
+    [
+        ("utils.youtube_utils", "get_available_formats"),
+        ("utils.rutube_vk_utils", "_get_available_formats"),
+        ("utils.tiktok_instagram_utils", "get_available_formats_tiktok"),
+    ],
+)
+def test_sorting_survives_formats_without_height_or_size(module, function):
+    """Ключи в сгруппированных форматах есть всегда, поэтому пустое значение сравнивалось с числом."""
+    get_formats = getattr(importlib.import_module(module), function)
+    info = {
+        "formats": [
+            {"format_id": "1", "height": None, "audio_channels": 2, "vcodec": "avc1", "acodec": "mp4a"},
+            {"format_id": "2", "height": 720, "vcodec": "avc1", "acodec": "mp4a"},
+            {"format_id": "3", "height": None, "audio_channels": 2, "vcodec": "avc1", "acodec": "none"},
+            {"format_id": "4", "height": 720, "vcodec": "avc1", "acodec": "none"},
+            {"format_id": "5", "audio_channels": 2, "vcodec": "none", "acodec": "mp4a"},
+            {"format_id": "6", "audio_channels": 2, "vcodec": "none", "acodec": "opus"},
+        ]
+    }
+
+    formats = get_formats(info)
+
+    assert [fmt["format_id"] for fmt in formats["combined"]] == ["2", "1"]
+    assert [fmt["format_id"] for fmt in formats["video_only"]] == ["4", "3"]
+    assert len(formats["audio_only"]) == 2
 
 
 @pytest.mark.unit
