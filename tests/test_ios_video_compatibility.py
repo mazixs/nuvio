@@ -284,8 +284,8 @@ class _FakeYDL:
         return info
 
     def prepare_filename(self, info):
-        template = self.options.get("outtmpl", "%(title)s.%(ext)s")
-        return template.replace("%(title)s", info["title"]).replace(
+        template = self.options.get("outtmpl", "%(title).150B.%(ext)s")
+        return template.replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
 

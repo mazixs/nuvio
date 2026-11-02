@@ -2,6 +2,7 @@
 
 import errno
 import socket
+import uuid
 from collections.abc import Iterator
 
 import httpx
@@ -34,7 +35,7 @@ from messages import (
 # конкретный поток: так выглядит и протухшая ссылка, и смена правил выдачи на
 # стороне платформы. Первое лечится повторным разбором, второе — обновлением
 # yt-dlp, и различает их только серия таких отказов, поэтому категория обязана
-# доходить до админов (см. `_should_notify_admins_platform_failure`).
+# доходить до админов (см. `should_notify_admins`).
 _MEDIA_FORBIDDEN_MARKERS = (
     "unable to download video data",
     "fragment",
@@ -62,6 +63,46 @@ _CONNECTIVITY_MARKERS = (
     "no route to host",
     "connection refused",
 )
+
+
+_ERROR_CODE_PREFIXES = {
+    "youtube": "YT",
+    "tiktok": "TT",
+    "instagram": "IG",
+    "rutube": "RU",
+    "vk": "VK",
+    "telegram": "TG",
+    "file": "FILE",
+    "bot": "BOT",
+}
+
+
+def make_error_code(platform: str, category: str) -> str:
+    """Код вида `PREFIX-CATEGORY-RANDOM`, общий для бота и HTTP API."""
+    platform_prefix = _ERROR_CODE_PREFIXES.get(platform, "BOT")
+    # Старые вызовы не должны возвращать пользователю категорию UNKNOWN.
+    normalized_category = (
+        "UNEXPECT" if category.upper() == "UNKNOWN" else category.upper()
+    )[:8]
+    return f"{platform_prefix}-{normalized_category}-{uuid.uuid4().hex[:6].upper()}"
+
+
+# Ожидаемые ограничения платформ и сети, а не аварии: о них админов не зовут.
+_QUIET_FAILURE_CATEGORIES = frozenset({
+    "DURATION", "LARGE", "STORY_UNSUPPORTED", "NETWORK", "NETWORK_TIMEOUT", "TIMEOUT", "BLOCKED",
+})
+
+
+def should_notify_admins(category: str) -> bool:
+    """Отделяет ожидаемые ограничения платформ от настоящих аварий; общее для бота и API.
+
+    `MEDIA_FORBIDDEN` сюда не входит намеренно. 403 на медиафайле — единственный
+    признак, по которому видно, что платформа сменила правила выдачи: поломка
+    YouTube 18.08.2026 пришла именно так, и узнали о ней ровно потому, что
+    краш-репорт дошёл до админа. Замолчать эту категорию значит согласиться, что
+    бот будет стоять сломанным, пока кто-нибудь не пожалуется.
+    """
+    return category not in _QUIET_FAILURE_CATEGORIES
 
 
 def _error_chain(error: BaseException, limit: int = 16) -> Iterator[BaseException]:

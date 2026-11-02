@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Smoke tests for rutube_vk_utils with mocked yt-dlp."""
 
+import functools
+import time
 from pathlib import Path
 from contextlib import contextmanager
 
 import pytest
 
-from utils import rutube_vk_utils
+from utils import rutube_vk_utils, work_budget
 
 
 class FakeYDL:
@@ -61,8 +63,8 @@ class FakeYDL:
 
     def _resolve_output_path(self, info=None):
         info = info or self._info
-        template = self.options.get("outtmpl", "%(title)s.%(ext)s")
-        path_str = template.replace("%(title)s", info["title"]).replace(
+        template = self.options.get("outtmpl", "%(title).150B.%(ext)s")
+        path_str = template.replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
         return Path(path_str)
@@ -220,3 +222,32 @@ def test_vk_direct_download_stops_at_size_limit(monkeypatch, tmp_path):
             "https://vk.com/video-1_2", "vk-size-limit", tmp_path,
             force_local=True, format_id="url360",
         )
+
+
+def test_vk_direct_download_keeps_the_job_limit_outside_the_job(monkeypatch, tmp_path):
+    """Поток фрагментов yt-dlp вызывает хуки без контекста задачи."""
+    limit = rutube_vk_utils.MAX_FILE_SIZE * 2
+    seen = {}
+
+    class CapturingYDL(FakeYDL):
+        def __init__(self, options):
+            super().__init__(options)
+            seen.update(options)
+
+        def extract_info(self, url, download=False):
+            raise rutube_vk_utils.FileSizeLimitError("стоп")
+
+    monkeypatch.setattr(rutube_vk_utils.yt_dlp, "YoutubeDL", CapturingYDL)
+    download = functools.partial(
+        rutube_vk_utils.download_vk_video,
+        "https://vk.com/video-1_2", "vk-job-limit", tmp_path,
+        force_local=True, format_id="url360",
+    )
+    with pytest.raises(rutube_vk_utils.FileSizeLimitError):
+        work_budget.execute(download, (), time.monotonic() + 30, None, limit)
+
+    assert seen["max_filesize"] == limit
+    stop_oversize = seen["progress_hooks"][-1]
+    stop_oversize({"status": "downloading", "downloaded_bytes": limit})
+    with pytest.raises(rutube_vk_utils.FileSizeLimitError):
+        stop_oversize({"status": "downloading", "downloaded_bytes": limit + 1})

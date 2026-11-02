@@ -491,7 +491,7 @@ def convert_to_format(
 
         # Проверяем размер файла
         file_size = output_path.stat().st_size
-        if file_size > MAX_FILE_SIZE:
+        if file_size > work_budget.size_limit(MAX_FILE_SIZE):
             logger.warning(
                 f"Размер конвертированного файла превышает лимит: {file_size} байт"
             )
@@ -633,7 +633,7 @@ def convert_webm_to_mp4(input_path: Path, session_id: str) -> Path:
 def compress_file(
     input_path: Path,
     session_id: str,
-    target_size: int = MAX_FILE_SIZE,
+    target_size: int | None = None,
     output_filename: str | None = None,
 ) -> Path:
     """
@@ -642,8 +642,8 @@ def compress_file(
     Args:
         input_path (Path): Путь к входному файлу.
         session_id (str): Идентификатор сессии.
-        target_size (int, optional): Целевой размер файла в байтах.
-                                    По умолчанию MAX_FILE_SIZE.
+        target_size (int | None, optional): Целевой размер файла в байтах.
+                                    По умолчанию лимит текущей работы.
         output_filename (str | None, optional): Имя выходного файла.
                                                   По умолчанию используется имя входного файла.
 
@@ -653,6 +653,8 @@ def compress_file(
     Raises:
         Exception: Если произошла ошибка при сжатии.
     """
+    if target_size is None:
+        target_size = work_budget.size_limit(MAX_FILE_SIZE)
     logger.info(f"Сжатие файла {input_path} до размера {target_size} байт")
 
     if not check_ffmpeg_installed():

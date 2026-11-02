@@ -45,10 +45,11 @@ from utils.subtitles import (
     parse_subtitle_choice,
 )
 from utils.tg_video_choice import (
-    audio_language_rank,
     list_audio_options,
     list_video_options,
+    select_audio_format,
     select_tg_video_format,
+    select_unsized_video_format,
 )
 from utils.analytics_db import (
     init_db as _init_analytics,
@@ -92,6 +93,8 @@ from utils.platform_actions import (
 from utils.public_errors import (
     build_public_error_message,
     classify_internal_error_category,
+    make_error_code,
+    should_notify_admins,
     youtube_error_code,
 )
 from utils.runtime_status import runtime_components, read_canary_status
@@ -181,10 +184,12 @@ from utils.tiktok_instagram_utils import (
     get_instagram_info,
     is_instagram_audio_url,
     handle_instagram_audio_url,
+    is_photo_post_error,
     PhotoPostAudioMissingError,
 )
 from utils.rutube_vk_utils import (
     VkLiveActiveError,
+    vk_download_timeout,
     is_valid_rutube_url,
     is_valid_vk_url,
     get_rutube_info,
@@ -1230,21 +1235,7 @@ def _youtube_error_code(error_msg: str | BaseException) -> str:
 
 
 def _make_error_code(platform: str, category: str) -> str:
-    platform_prefix = {
-        "youtube": "YT",
-        "tiktok": "TT",
-        "instagram": "IG",
-        "rutube": "RU",
-        "vk": "VK",
-        "telegram": "TG",
-        "file": "FILE",
-        "bot": "BOT",
-    }.get(platform, "BOT")
-    # Старые вызовы не должны возвращать пользователю категорию UNKNOWN.
-    normalized_category = (
-        "UNEXPECT" if category.upper() == "UNKNOWN" else category.upper()
-    )[:8]
-    return f"{platform_prefix}-{normalized_category}-{uuid.uuid4().hex[:6].upper()}"
+    return make_error_code(platform, category)
 
 
 def _classify_internal_error_category(platform: str, error_msg: str | BaseException) -> str:
@@ -1270,17 +1261,9 @@ def _should_notify_admins_platform_failure(
 ) -> bool:
     """Отделяет ожидаемые пользовательские ограничения платформ от настоящих аварий.
 
-    `MEDIA_FORBIDDEN` сюда не входит намеренно. 403 на медиафайле — единственный
-    признак, по которому видно, что платформа сменила правила выдачи: поломка
-    YouTube 18.08.2026 пришла именно так, и узнали о ней ровно потому, что
-    краш-репорт дошёл до админа. Замолчать эту категорию значит согласиться, что
-    бот будет стоять сломанным, пока кто-нибудь не пожалуется.
+    Правило общее с HTTP API и описано в `should_notify_admins`.
     """
-    if category in {
-        "DURATION", "LARGE", "STORY_UNSUPPORTED", "NETWORK", "NETWORK_TIMEOUT", "TIMEOUT", "BLOCKED",
-    }:
-        return False
-    return True
+    return should_notify_admins(category)
 
 
 async def _log_platform_failure(
@@ -1294,12 +1277,12 @@ async def _log_platform_failure(
     output_tail: list[str] | None = None,
 ) -> None:
     category = _classify_internal_error_category(platform, exc)
-    should_notify_admins = _should_notify_admins_platform_failure(
+    notify_admins = _should_notify_admins_platform_failure(
         platform, category, stage
     )
     cookie_status = "not_checked"
     cookie_summary = "not_checked"
-    if should_notify_admins and platform in {"youtube", "instagram", "tiktok"}:
+    if notify_admins and platform in {"youtube", "instagram", "tiktok"}:
         try:
             health = await asyncio.to_thread(check_cookie_health, platform)
             cookie_status = health.status
@@ -1308,7 +1291,7 @@ async def _log_platform_failure(
             cookie_status = "health_failed"
             cookie_summary = str(health_exc)
 
-    log_method = logger.error if should_notify_admins else logger.warning
+    log_method = logger.error if notify_admins else logger.warning
     log_method(
         "USER_FLOW_FAIL code=%s platform=%s stage=%s category=%s exception=%s session_id=%s url=%s cookie_status=%s cookie_summary=%s error=%s",
         error_code,
@@ -1321,10 +1304,10 @@ async def _log_platform_failure(
         cookie_status,
         cookie_summary,
         exc,
-        exc_info=should_notify_admins,
+        exc_info=notify_admins,
     )
 
-    if should_notify_admins:
+    if notify_admins:
         await _notify_admins_crash(
             error_code=error_code,
             platform=platform,
@@ -3247,7 +3230,7 @@ async def _handle_main_callback(
                     ),
                 )
             except Exception as e:
-                if "фото-пост нужно отправлять" in str(e).lower():
+                if is_photo_post_error(e):
                     await _send_photo_post_assets(
                         query, session_token, session_data, context
                     )
@@ -3485,13 +3468,7 @@ async def _handle_main_callback(
                     session_id,
                     description="download_vk_video",
                     session_id=session_id,
-                    timeout=(
-                        max(
-                            BLOCKING_TASK_TIMEOUT,
-                            min(3600, selected_size // (1024 * 1024) + 120),
-                        )
-                        if selected_size else None
-                    ),
+                    timeout=vk_download_timeout(selected_size),
                 )
                 if not file_path:
                     await query.edit_message_text(ERROR_MESSAGE)
@@ -3583,31 +3560,12 @@ async def _handle_main_callback(
                 return
 
             audio_only = formats.get("audio_only", [])
-            ranked_audio = sorted(
-                audio_only,
-                key=lambda fmt: (
-                    audio_language_rank(fmt),
-                    -(fmt.get("filesize") or 0),
-                ),
-            )
-            native_audio = None
-            best_language_rank = (
-                audio_language_rank(ranked_audio[0]) if ranked_audio else None
-            )
-            for ext in ("m4a", "mp3", "ogg"):
-                native_audio = next(
-                    (
-                        fmt for fmt in ranked_audio
-                        if fmt.get("ext") == ext
-                        and audio_language_rank(fmt) == best_language_rank
-                    ),
-                    None,
-                )
-                if native_audio:
-                    logger.info(f"Найден нативный аудио формат: {ext}")
-                    break
+            audio_format, is_native = select_audio_format(audio_only)
+            native_audio = audio_format if is_native else None
+            if native_audio:
+                logger.info("Найден нативный аудио формат: %s", native_audio.get("ext"))
 
-            if not native_audio and ranked_audio:
+            if audio_format and not native_audio:
                 logger.warning(
                     "Нативные форматы не найдены. Доступные: %s. Конвертируем в m4a.",
                     [f.get("ext") for f in audio_only],
@@ -3618,7 +3576,7 @@ async def _handle_main_callback(
                 file_path = await run_blocking(
                     functools.partial(download_audio, preferred_codec="m4a"),
                     url,
-                    ranked_audio[0]["format_id"],
+                    audio_format["format_id"],
                     session_id,
                     description="download_audio_bestaudio",
                     session_id=session_id,
@@ -3761,22 +3719,9 @@ async def _handle_main_callback(
 
             if not tg_video:
                 # Форматы без известного размера сверить с бюджетом нельзя,
-                # поэтому select_tg_video_format их не рассматривает. Берём
-                # осторожно — из нижней трети по высоте, чтобы скачанное с
-                # большей вероятностью прошло по лимиту доставки.
-                formats_without_size = [
-                    fmt for fmt in combined if fmt.get("filesize") is None
-                ]
-                if formats_without_size:
-                    best_rank = min(
-                        audio_language_rank(fmt) for fmt in formats_without_size
-                    )
-                    formats_without_size = [
-                        fmt for fmt in formats_without_size
-                        if audio_language_rank(fmt) == best_rank
-                    ]
-                    formats_without_size.sort(key=lambda x: x.get("height", 0))
-                    tg_video = formats_without_size[len(formats_without_size) // 3]
+                # поэтому select_tg_video_format их не рассматривает.
+                tg_video = select_unsized_video_format(combined)
+                if tg_video:
                     logger.info(
                         "Выбран резервный формат (размер неизвестен): %s - %sp",
                         tg_video.get("format_id"),

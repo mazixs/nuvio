@@ -3,6 +3,7 @@ Shared utilities and configuration for yt-dlp downloaders.
 """
 
 import random
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,14 @@ DEFAULT_YTDLP_NETWORK_OPTS: dict[str, Any] = {
     "continuedl": False,
     "noplaylist": True,
 }
+
+# Значение yt-dlp для настроек, где `socket_timeout` не задан.
+_YTDLP_SOCKET_TIMEOUT = 20
+
+# Название режется по байтам. Имя файла на ext4 ограничено 255 байтами, а символ
+# кириллицы занимает 2 байта и CJK — 3: длинное название вместе с `.f140.m4a.part`
+# давало «File name too long».
+OUTPUT_FILENAME_TEMPLATE = "%(title).150B.%(ext)s"
 
 # Префикс строк прогресса. yt-dlp гонит их тем же каналом, что и полезный вывод,
 # по несколько штук в секунду, а многострочный прогресс ещё и нумерует строки
@@ -112,12 +121,47 @@ def apply_network_opts(options: dict[str, Any], session_id: str | None = None) -
     """
     work_budget.check()
     options.update(DEFAULT_YTDLP_NETWORK_OPTS)
-    options["socket_timeout"] = work_budget.remaining(options["socket_timeout"])
     options.update(output_capture_opts(session_id))
+    apply_work_limits(options, session_id)
+
+
+def apply_work_limits(options: dict[str, Any], session_id: str | None = None) -> None:
+    """Подчиняет yt-dlp отмене, сроку и явному лимиту размера текущей работы.
+
+    Остальные сетевые настройки не трогает: TikTok и Instagram работают без них.
+    Явный лимит есть только у задач HTTP API. Бот проверяет размер готового файла,
+    потому что файл может ужаться при перекодировании.
+    """
+    options["socket_timeout"] = work_budget.remaining(
+        options.get("socket_timeout", _YTDLP_SOCKET_TIMEOUT)
+    )
+    hooks = list(options.get("progress_hooks") or [])
     if session_id:
-        hooks = list(options.get("progress_hooks") or [])
         hooks.append(cancellation_hook(session_id))
+    limit = work_budget.job_size_limit()
+    if limit is not None:
+        hooks.append(size_limit_hook(limit))
+    if hooks:
         options["progress_hooks"] = hooks
+
+
+def size_limit_hook(limit: int) -> Callable[[dict[str, Any]], None]:
+    """Progress hook, останавливающий загрузку, когда её файлы вместе превысили лимит.
+
+    `max_filesize` yt-dlp не действует на HLS и DASH. Лимит передаётся явно, а счётчик
+    под замком: хук вызывают и потоки фрагментов, у которых нет контекста задачи.
+    """
+    lock = threading.Lock()
+    downloaded: dict[str | None, int] = {}
+
+    def _hook(status: dict[str, Any]) -> None:
+        with lock:
+            downloaded[status.get("filename")] = status.get("downloaded_bytes") or 0
+            total = sum(downloaded.values())
+        if total > limit:
+            raise FileSizeLimitError(f"Загрузка превысила лимит: {total} > {limit}")
+
+    return _hook
 
 
 def execute_with_backoff(
@@ -184,22 +228,23 @@ def execute_with_backoff(
 
 
 class FileSizeLimitError(Exception):
-    """Файл превышает предел выбранного Telegram Bot API."""
+    """Файл превышает лимит размера: Telegram Bot API у бота, свой у HTTP API."""
 
 
 def finalize_downloaded_file(downloaded_file: Path, force_local: bool) -> Path:
     """Возвращает локальный файл или удаляет его при превышении лимита."""
     file_size = downloaded_file.stat().st_size
-    if force_local or file_size <= MAX_FILE_SIZE:
+    size_limit = work_budget.size_limit(MAX_FILE_SIZE)
+    if force_local or file_size <= size_limit:
         return downloaded_file
 
     logger.warning(
-        "Файл %s (%s байт) превышает лимит Telegram %s байт.",
+        "Файл %s (%s байт) превышает лимит %s байт.",
         downloaded_file,
         file_size,
-        MAX_FILE_SIZE,
+        size_limit,
     )
     downloaded_file.unlink(missing_ok=True)
     raise FileSizeLimitError(
-        f"Файл превышает допустимый размер: {file_size} > {MAX_FILE_SIZE}"
+        f"Файл превышает допустимый размер: {file_size} > {size_limit}"
     )

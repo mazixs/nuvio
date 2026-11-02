@@ -100,7 +100,7 @@ docker compose exec bot sh -c 'cp /app/.secrets/www.youtube.com_cookies.txt /tmp
 docker compose exec bot python -m yt_dlp --no-playlist -F --cookies /tmp/probe-cookies.txt '<VIDEO_URL>'
 ```
 
-yt-dlp rewrites a supplied `cookiefile` from its cookie jar and can remove valid entries. Nuvio therefore uses a working copy in `/app/data/cookie-work` (`utils/cookie_workfile.py`); manual probes must also use a copy. A nonempty anonymous list and empty authenticated list can be expected. Cookies remain needed for age-restricted and private videos.
+yt-dlp rewrites a supplied `cookiefile` from its cookie jar and can remove valid entries. Nuvio therefore uses a working copy in `/app/data/cookie-work` (`utils/cookie_workfile.py`); manual probes must also use a copy. A probe copied from the original can pass while the bot's working copy is already damaged, so check the status in `/admin` as well. A nonempty anonymous list and empty authenticated list can be expected. Cookies remain needed for age-restricted and private videos.
 
 ### Step 5: inspect yt-dlp's own output
 

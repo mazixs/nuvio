@@ -34,7 +34,7 @@ FFmpeg is required for audio and video processing, including audio extraction, W
 ### YouTube asks for authentication
 
 - YouTube may block downloading without cookies. Upload a cookie file to `.secrets/www.youtube.com_cookies.txt` or through `/admin`.
-- Cookies expire. Check their current health and look for `cookie_status` in the administrative logs.
+- Cookies expire, and yt-dlp can lose them from the working copy while the uploaded file stays intact. Run the check in `/admin` or look for `cookie_status` in the administrative logs, then follow [Cookie problems](#cookie-problems).
 
 ### YouTube returns `HTTP Error 403` during download
 
@@ -54,6 +54,51 @@ The yt-dlp version may be outdated. On 18 August 2026, YouTube changed direct `v
 
 - Instagram limits request volume. Authorized cookies can raise the available limit.
 - The bot inserts pauses between requests. Private accounts require cookies from an authorized session.
+
+## Cookie problems
+
+### A cookie alert or a failed check
+
+The status appears in a daily message to administrators, after the check button in `/admin`, and as `cookie_status` in the administrative logs. It describes the working copy in `DATA_DIR/cookie-work`, which yt-dlp changes, not the file you uploaded. An intact original proves nothing: on 2026-11-01 the YouTube original had all its auth cookies while the copy had one of six and no `LOGIN_INFO`.
+
+| Status | Meaning | Action |
+|---|---|---|
+| `expired` | Every auth cookie or the session cookie is past its date. | Upload a fresh export from a signed-in browser through `/admin`. |
+| `degraded` | There is no session cookie, or fewer than half of the auth cookies are alive. | Upload a fresh export from a signed-in browser. On YouTube, see the warning below. |
+| `stale` | The platform rejected the session, or `LOGIN_INFO` disappeared from the YouTube copy during the probe. | Upload a fresh export from a signed-in browser. |
+| `invalid_format` | The file has no Netscape header, has a malformed row or expiry, is not UTF-8, cannot be read, or holds no auth cookies. The summary gives a line number, never the value. | Export again in Netscape format and upload. If the file cannot be read, check its permissions on the server. |
+| `rate_limited` | The platform limited the probe. This says nothing about the session. The status alone raises no alert. | Nothing now. Check again later. |
+| `probe_failed` | The probe did not finish or got an unfamiliar response. This says nothing about the session. The status alone raises no alert. | Check the server network. If it persists on TikTok, see [below](#tiktok-stays-on-probe_failed). |
+| `missing` | There is no cookie file for this platform. No alert. | Cookies are optional for public media. Upload a file if this platform needs them. |
+| `valid` | See [what it proves](#what-valid-proves). | Nothing. |
+
+The session cookie is `LOGIN_INFO` on YouTube, `sessionid` on Instagram, and `sessionid` or `sid_tt` on TikTok.
+
+**Fewer than 14 days until the session ends** also triggers the alert, whatever the status. On YouTube and Instagram, upload a fresh export before that date. Only TikTok renews itself.
+
+**`degraded` on YouTube: upload a fresh browser export, not the old file.** The old file restores the working copy, but the server may already have revoked that session, and a YouTube `valid` would not show it. The bot deliberately does not restore the copy from the original on its own.
+
+The alert keeps no state, so it repeats once a day until the problem is resolved.
+
+### What `valid` proves
+
+- **TikTok and Instagram:** the platform recognized the account.
+- **YouTube:** only that a public test video was extracted and `LOGIN_INFO` is still in the copy. That video extracts without sign-in, so this does not prove the session.
+
+### TikTok stays on `probe_failed`
+
+Only TikTok renews its session automatically: the daily check calls an undocumented `passport` endpoint, and its response moves the expiry date in the working copy. If TikTok changes that endpoint, the check returns `probe_failed` and renewal stops. The first alert comes only when fewer than 14 days remain.
+
+- Check `/admin` for `probe_failed` together with a `Сессия до DD.MM.YYYY` line whose date no longer moves.
+- Look for `Cookie probe failed for tiktok` in `logs/bot.log`. The text after it separates a network or HTTP error from `unfamiliar response`, which points to a changed endpoint.
+- If the server network is fine, the probe in `utils/cookie_health.py` needs fixing. Until then, upload fresh exports by hand before the session end date.
+
+### A cookie upload is refused or warns
+
+An upload is checked locally before it replaces the current file.
+
+- **Refused:** the file did not pass the local check. The previous file stays in use and upload mode stays on, so send a corrected file straight away.
+- **Saved with a `stale` warning:** the file passed the local check and was saved, but the live probe did not accept the session. Upload a fresh export from a signed-in browser.
 
 ## File problems
 

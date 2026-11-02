@@ -74,6 +74,23 @@ def _parse_canary_interval_hours(value: str | None) -> int:
     return hours
 
 
+def _parse_int_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Целое из env в границах; мусор и выход за пределы → умолчание."""
+    raw = os.environ.get(name)
+    try:
+        value = int((raw or str(default)).strip())
+    except ValueError:
+        logging.warning("%s=%r не число, используем %s", name, raw, default)
+        return default
+    if not minimum <= value <= maximum:
+        logging.warning(
+            "%s=%s вне диапазона %s–%s, используем %s",
+            name, value, minimum, maximum, default,
+        )
+        return default
+    return value
+
+
 def _parse_canary_video_id(value: str | None) -> str:
     """Проверяет id ролика канарейки, при непохожем значении берёт эталонный."""
     candidate = (value or "").strip()
@@ -157,6 +174,22 @@ CANARY_INTERVAL_HOURS = _parse_canary_interval_hours(
     os.environ.get("CANARY_INTERVAL_HOURS")
 )
 CANARY_VIDEO_ID = _parse_canary_video_id(os.environ.get("CANARY_VIDEO_ID"))
+
+# HTTP API для внешних клиентов (`python -m api`). Ключи выдаёт админ в WebUI.
+# Лимиты защищают диск и пул загрузок от одного ключа: файлы результата
+# живут API_RESULT_TTL_MINUTES, а не до перезапуска.
+API_PORT = _parse_int_setting("API_PORT", 8090, 1, 65535)
+API_DOWNLOAD_WORKERS = _parse_int_setting("API_DOWNLOAD_WORKERS", 4, 1, 32)
+API_MAX_ACTIVE_JOBS = _parse_int_setting("API_MAX_ACTIVE_JOBS", 2, 1, 50)
+# API отдаёт файлы сам, без Telegram, поэтому лимиты Bot API к нему не относятся.
+# Загрузчикам этот лимит передаёт задача: см. work_budget.execute.
+API_MAX_FILE_SIZE_MB = _parse_int_setting("API_MAX_FILE_SIZE_MB", 2000, 1, 2000)
+API_RATE_LIMIT_PER_MINUTE = _parse_int_setting("API_RATE_LIMIT_PER_MINUTE", 120, 1, 10_000)
+API_RESULT_TTL_MINUTES = _parse_int_setting("API_RESULT_TTL_MINUTES", 60, 5, 1440)
+# Сколько места занимают готовые файлы всех ключей вместе; сверх него старые
+# результаты истекают досрочно. Идущие загрузки сверху: до
+# API_DOWNLOAD_WORKERS × API_MAX_FILE_SIZE_MB.
+API_STORAGE_LIMIT_MB = _parse_int_setting("API_STORAGE_LIMIT_MB", 10000, 100, 1_000_000)
 
 # Список ID администраторов (через запятую)
 # Пример: ADMIN_IDS = 123456789,987654321

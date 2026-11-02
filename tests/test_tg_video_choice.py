@@ -6,6 +6,7 @@ from utils.tg_video_choice import (
     list_audio_options,
     list_video_options,
     select_tg_video_format,
+    select_unsized_video_format,
 )
 
 
@@ -505,3 +506,16 @@ def test_lonely_drc_track_is_kept():
     formats = get_available_formats(info, filter_by_size=False)
 
     assert [fmt["format_id"] for fmt in formats["audio_only"]] == ["141-drc"]
+
+
+@pytest.mark.unit
+def test_unsized_fallback_tolerates_formats_without_height():
+    """yt-dlp отдаёт `height: None`, и сортировка не должна падать на сравнении."""
+    combined = [
+        {"format_id": "a", "height": None, "filesize": None},
+        {"format_id": "b", "height": 720, "filesize": None},
+        {"format_id": "c", "height": 360, "filesize": None},
+    ]
+
+    # Без высоты формат встаёт в начало: a, c, b — и берётся нижняя треть.
+    assert select_unsized_video_format(combined)["format_id"] == "c"

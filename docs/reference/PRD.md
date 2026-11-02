@@ -241,14 +241,15 @@ Through `/admin`, an administrator can:
 1. **Upload** Netscape cookie files for YouTube, TikTok, and Instagram (up to 1 MB).
 2. **Health check** - validation of each cookie with a detailed status:
    - ✅ Valid - working cookies
-   - ❌ Expired / Stale / Invalid Format
-   - ⚠️ Rate Limited / Probe Failed
+   - ❌ Expired / Stale / Degraded / Invalid Format
+   - ⚠️ Rate Limited / Probe Failed / Missing
 
 ### 6.3 Automated tasks
 
 | Task | Schedule | Purpose |
 |---|---|---|
 | Cache cleanup | Every 24 hours | Delete entries older than 90 days |
+| Cookie health check | Every 24 hours | Check the working copies, renew the TikTok session, and alert administrators |
 | Database `VACUUM` | Every seven days | Reduce SQLite file size |
 | yt-dlp update | At startup if enabled in this dated design | Upgrade from the selected channel; current releases use a pinned image |
 

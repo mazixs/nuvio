@@ -8,17 +8,20 @@ from typing import Any
 
 import httpx
 import yt_dlp
-from config import MAX_FILE_SIZE, MAX_VIDEO_DURATION
+from config import BLOCKING_TASK_TIMEOUT, MAX_FILE_SIZE, MAX_VIDEO_DURATION
+from utils import work_budget
 from utils.download_report import record_delivered_format
 from utils.logger import setup_logger
 from utils.media_errors import DurationLimitError
 from utils.media_processor import ensure_ios_compatible_video
 from utils.temp_file_manager import get_temp_file_path
 from utils.ytdlp_common import (
+    OUTPUT_FILENAME_TEMPLATE,
     FileSizeLimitError,
     apply_network_opts,
     execute_with_backoff,
     finalize_downloaded_file,
+    size_limit_hook,
 )
 
 logger = setup_logger(__name__)
@@ -40,6 +43,13 @@ VK_LIVE_URL_PATTERN = re.compile(
 
 class VkLiveActiveError(ValueError):
     """Текущая трансляция еще не стала конечным файлом."""
+
+
+def vk_download_timeout(size: int | None) -> int:
+    """Срок загрузки VK по размеру формата: записи бывают многогигабайтными."""
+    if not size:
+        return BLOCKING_TASK_TIMEOUT
+    return max(BLOCKING_TASK_TIMEOUT, min(3600, size // (1024 * 1024) + 120))
 
 
 def is_valid_rutube_url(url: str) -> bool:
@@ -139,7 +149,7 @@ def _select_vk_direct_format(info: dict[str, Any]) -> tuple[str, int | None, int
     """Выбирает наиболее четкий прямой MP4, пригодный для проверки лимита.
 
     Если CDN не сообщает размер, выбирается самый маленький прямой формат.
-    Его загрузка останавливается при превышении лимита Telegram.
+    Его загрузка останавливается при превышении лимита размера.
     """
     candidates = sorted(
         (
@@ -156,7 +166,7 @@ def _select_vk_direct_format(info: dict[str, Any]) -> tuple[str, int | None, int
     if not candidates:
         return None
 
-    limit = int(MAX_FILE_SIZE * 0.95)
+    limit = int(work_budget.size_limit(MAX_FILE_SIZE) * 0.95)
     unknown: dict[str, Any] | None = None
     with httpx.Client(follow_redirects=True, timeout=8) as client:
         for fmt in candidates:
@@ -184,7 +194,7 @@ def _get_available_formats(
         filesize = format_info.get("filesize") or format_info.get("filesize_approx")
         if not format_info.get("height") and not format_info.get("audio_channels"):
             continue
-        if filter_by_size and filesize and filesize > MAX_FILE_SIZE:
+        if filter_by_size and filesize and filesize > work_budget.size_limit(MAX_FILE_SIZE):
             continue
 
         format_id = format_info.get("format_id")
@@ -256,8 +266,8 @@ def get_available_formats_vk(
 
 def _resolve_output_template(session_id: str, output_dir: Path | None) -> Path:
     if output_dir is None:
-        return get_temp_file_path(session_id, "%(title)s.%(ext)s")
-    return output_dir / "%(title)s.%(ext)s"
+        return get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
+    return output_dir / OUTPUT_FILENAME_TEMPLATE
 
 
 def _ensure_ios_compatible(downloaded_file: Path, session_id: str) -> Path:
@@ -295,13 +305,10 @@ def _download_video(
             # У прямого MP4 есть Range: повтор после сетевого сбоя продолжит
             # .part вместо повторной загрузки гигабайтного файла с нуля.
             ydl_opts["continuedl"] = True
-            ydl_opts["max_filesize"] = MAX_FILE_SIZE
-
-            def _stop_oversize(progress: dict[str, Any]) -> None:
-                if (progress.get("downloaded_bytes") or 0) > MAX_FILE_SIZE:
-                    raise FileSizeLimitError("Прямой файл VK превышает лимит Telegram")
-
-            ydl_opts["progress_hooks"].append(_stop_oversize)
+            # Хуки может вызвать поток фрагментов yt-dlp без контекста задачи.
+            size_limit = work_budget.size_limit(MAX_FILE_SIZE)
+            ydl_opts["max_filesize"] = size_limit
+            ydl_opts["progress_hooks"].append(size_limit_hook(size_limit))
         logger.info(
             f"Скачивание {url} через yt-dlp без cookies, формат: {format_selector}"
         )

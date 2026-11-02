@@ -55,6 +55,7 @@ The category segment is limited to eight characters. Logs and codes may therefor
 - `ROUTE` - the handler received a post type that needs another delivery path.
 - `STORAGE` - insufficient disk space.
 - `STORY_UN` - this handler does not support Instagram Stories.
+- `STUCK` - an HTTP API download thread did not return within five minutes after its deadline. The thread cannot be stopped from outside; repeats point to a hung network or tool call.
 - `TELEGRAM` - Telegram denied the bot access to the destination chat; this does not establish a source-platform restriction.
 - `TIMEOUT` - operation timed out.
 - `UNAVAILA` - YouTube reported that the video is unavailable to the selected extraction path. This alone does not establish deletion, privacy, or permanent unavailability.
@@ -74,6 +75,7 @@ New errors must not use the `UNKNOWN` category. Previously issued `UNKNOWN` code
 | Platform access refusal (`ACCESS`, `ACCESS_R`) | Explain that access failed; authentication, removal, and an expired link are possibilities, not confirmed facts. | Yes; retain the original exception and cookie diagnostics. |
 | Rate limit (`RATE_LI`) | Explain the reported request limit and suggest a later attempt without a recovery deadline. | Yes. |
 | Connection failure or deadline (`NETWORK`, `NETWORK_`, `TIMEOUT`) | Describe the connection failure or exceeded deadline. A repeat is optional and does not promise success. | No; retain a warning. Unconfirmed Telegram delivery still uses its separate no-resend message. |
+| Stuck HTTP API worker (`STUCK`) | The client gets the `timeout` error with this code as its reference. | Yes; unlike an ordinary deadline, the worker never returned and still holds its slot. |
 | Media URL refused (`MEDIA_FO`) | Explain that the platform refused the media download. Do not call it a network problem or assume the video is private. | Yes; investigate expired streams or changed delivery rules. |
 | Local permissions, storage, cookies, processing tools, extractor/runtime, rendering, routing | Explain that the service could not prepare the file and ask for the error code to be passed to an administrator. No installation instructions or raw exception text. | Yes; technical details stay in diagnostics. |
 | Missing file (`FILE`) or Telegram API refusal (`API`, `TELEGRAM`) | Explain the file/delivery failure without claiming it is temporary. | Yes. |
@@ -112,6 +114,6 @@ journalctl -u nuvio.service -n 500 --no-pager | grep "YT-ACCESS-A1B2C3"
 
 ## Notes
 
-- Cookie status is logged as `cookie_status`; it is not shown to users.
+- Cookie status is logged as `cookie_status`; it is not shown to users. It describes the working copy, not the uploaded original; [Troubleshooting](../runbooks/common-issues.md#cookie-problems) explains each status. `not_checked` means that the failure does not notify administrators or the platform has no cookie check, and `health_failed` means that the check itself raised an exception.
 - Do not send users tracebacks, extractor error text, file paths, module names, or server structure.
 - If errors of one category increase across many codes, check yt-dlp, cookies, and server network conditions first.

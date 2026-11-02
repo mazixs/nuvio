@@ -6,6 +6,7 @@ source =
     messages
     utils
     web
+    api
 
 [report]
 show_missing = True

@@ -1,10 +1,12 @@
 """Проверки доставки YouTube-аудио и переходов между источниками."""
 
+import functools
+import time
 from pathlib import Path
 
 import pytest
 
-from utils import youtube_utils
+from utils import work_budget, youtube_utils
 
 
 URL = "https://www.youtube.com/watch?v=abc123def45"
@@ -44,7 +46,7 @@ class _AudioYDL:
         return {"title": "track", "ext": "m4a", "format_id": self.options["format"]}
 
     def prepare_filename(self, info):
-        return self.options["outtmpl"].replace("%(title)s", info["title"]).replace(
+        return self.options["outtmpl"].replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
 
@@ -158,6 +160,19 @@ def test_access_denial_does_not_use_cli(monkeypatch, tmp_path, download):
         )
 
 
+def _in_job(download, limit):
+    return work_budget.execute(download, (), time.monotonic() + 30, None, limit)
+
+
+def test_nonlocal_audio_selector_applies_the_job_limit(tmp_path):
+    limit = youtube_utils.MAX_FILE_SIZE * 2
+    _in_job(functools.partial(
+        youtube_utils.download_audio_native, URL, "140-1", "audio-job-limit", output_dir=tmp_path,
+    ), limit)
+
+    assert f"filesize<=?{limit}" in _AudioYDL.calls[0]["format"]
+
+
 def test_nonlocal_audio_selector_applies_size_limit(tmp_path):
     youtube_utils.download_audio_native(URL, "140-1", "audio-limit", output_dir=tmp_path)
 
@@ -196,7 +211,7 @@ class _VideoYDL:
         return info
 
     def prepare_filename(self, info):
-        return self.options["outtmpl"].replace("%(title)s", info["title"]).replace(
+        return self.options["outtmpl"].replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
 
@@ -246,6 +261,15 @@ def test_youtube_video_retries_with_cookies_after_anonymous_failure(
     assert len(_VideoYDL.calls) == 2
     assert "cookiefile" not in _VideoYDL.calls[0]
     assert _VideoYDL.calls[1]["cookiefile"] == str(cookie)
+
+
+def test_youtube_video_selector_applies_the_job_limit(tmp_path, _setup_video):
+    limit = youtube_utils.MAX_FILE_SIZE * 2
+    _in_job(functools.partial(
+        youtube_utils.download_video, URL, "137", "video-job-limit", output_dir=tmp_path,
+    ), limit)
+
+    assert f"filesize<=?{limit}" in _VideoYDL.calls[0]["format"]
 
 
 def test_youtube_video_passes_canary_size_budget(tmp_path, _setup_video):

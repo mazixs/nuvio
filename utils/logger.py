@@ -3,12 +3,15 @@
 """
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from config import LOG_FORMAT, BASE_DIR, LOG_LEVEL
 
 _LOG_DIR = BASE_DIR / "logs"
-_LOG_FILE = _LOG_DIR / "bot.log"
+# Процесс HTTP API пишет в свой файл: ротацию одного файла из двух процессов
+# RotatingFileHandler не переживает, а при прямом запуске API идёт рядом с ботом.
+_LOG_FILE = _LOG_DIR / ("api.log" if os.environ.get("NUVIO_PROCESS") == "api" else "bot.log")
 _shared_file_handler: RotatingFileHandler | None = None
 
 
@@ -32,7 +35,7 @@ def setup_logger(
 ) -> logging.Logger:
     """
     Настраивает и возвращает логгер с указанным именем и уровнем логирования.
-    Все логгеры пишут в единый файл bot.log с ротацией.
+    Все логгеры процесса пишут в единый файл bot.log (у HTTP API — api.log) с ротацией.
 
     Args:
         name: Имя логгера

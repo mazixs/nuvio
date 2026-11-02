@@ -17,6 +17,7 @@ Documents are grouped by purpose. The first four sections describe how Nuvio wor
 - [Configuration](guides/configuration.md) - environment variables, cookies, and limits.
 - [Media cache and delivery](guides/cache-and-delivery.md) - retention settings, album reuse, delivery evidence, migration, and rollback.
 - [Feedback and moderation](guides/feedback-and-moderation.md) - user reports, WebUI review, and access restrictions.
+- [HTTP API](guides/api.md) - API keys in the WebUI, download endpoints, errors, limits, and deployment.
 - [Contributing](guides/contributing.md) - local environment, tests, and code conventions.
 
 ## Reference

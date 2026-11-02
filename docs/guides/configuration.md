@@ -46,6 +46,20 @@ Set a stable `WEB_SECRET_KEY` to keep signed sessions valid across restarts. Gen
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
+## HTTP API
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_PORT` | `8090` | Listening port |
+| `API_DOWNLOAD_WORKERS` | `4` | Concurrent downloads across all keys, separate from `DOWNLOAD_WORKERS` |
+| `API_MAX_ACTIVE_JOBS` | `2` | Queued and running jobs per key |
+| `API_RATE_LIMIT_PER_MINUTE` | `120` | Requests per key per minute |
+| `API_RESULT_TTL_MINUTES` | `60` | Minutes a finished file stays available, from 5 to 1,440 |
+| `API_MAX_FILE_SIZE_MB` | `2000` | Largest file the API downloads, from 1 to 2,000; `TELEGRAM_*` limits do not apply to it |
+| `API_STORAGE_LIMIT_MB` | `10000` | Disk space for finished files of all keys together; the oldest results expire early above it |
+
+Invalid or out-of-range values fall back to the default with a warning in the log. Keys are managed in the WebUI, not through environment variables. See the [HTTP API guide](api.md).
+
 ## Downloads and processing
 
 | Variable | Default | Description |

@@ -45,7 +45,7 @@ class FakeYDL:
             if "outtmpl" in self.options
             else "% (title)s.%(ext)s"
         )
-        path_str = template.replace("%(title)s", info["title"]).replace(
+        path_str = template.replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
         return Path(path_str)

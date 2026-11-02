@@ -189,6 +189,24 @@ def init_db() -> None:
                 UNIQUE(user_id, message_key)
             )
         """)
+        # Ключи HTTP API: хранится только SHA-256, сам ключ показывается один раз.
+        # previous_hash — прежний ключ на время мягкой ротации.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                name                TEXT NOT NULL,
+                prefix              TEXT NOT NULL,
+                key_hash            TEXT NOT NULL UNIQUE,
+                previous_hash       TEXT UNIQUE,
+                previous_expires_at TEXT,
+                created_at          TEXT NOT NULL,
+                rotated_at          TEXT,
+                expires_at          TEXT,
+                revoked_at          TEXT,
+                last_used_at        TEXT,
+                downloads_total     INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_user_time ON feedback(user_id, created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_feedback_status_time ON feedback(status, created_at DESC)")
 

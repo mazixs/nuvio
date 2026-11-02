@@ -101,7 +101,52 @@ services:
         max-size: 10m
         max-file: "3"
 
+  api:
+    image: ghcr.io/mazixs/nuvio:${TAG:-latest}
+    restart: unless-stopped
+    # Внешний API открывает наружу новый порт, поэтому включается явно:
+    # `--profile api` или `COMPOSE_PROFILES=api`.
+    profiles: ["api"]
+    command: python -m api
+    env_file:
+      - ${NUVIO_ENV_FILE:-.secrets/.env}
+    environment:
+      DATA_DIR: /app/data
+      TEMP_DIR: /app/media
+      API_PORT: "8090"
+      # Уведомления админов о сбоях идут тем же сервером Bot API, что у бота.
+      # Лимит размера файла задаёт API_MAX_FILE_SIZE_MB, а не режим Telegram.
+      TELEGRAM_BOT_API_BASE_URL: http://telegram-bot-api:8081/bot
+    ports:
+      - "${API_PORT:-8090}:8090"
+    volumes:
+      # Ключи лежат в общей analytics.db, рабочие копии cookies — рядом.
+      - bot-data:/app/data
+      # Свой том: файлы API не нужны локальному Bot API и не попадают под
+      # суточную чистку временных файлов бота.
+      - api-media:/app/media
+      # Cookies, загруженные админом через бота; API их только читает.
+      - ./.secrets:/app/.secrets:ro
+      # Свой файл api.log рядом с bot.log: ротация двух процессов не пересекается.
+      - ./logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8090/health')
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 volumes:
   bot-data:
   telegram-bot-api-data:
   shared-media:
+  api-media:
