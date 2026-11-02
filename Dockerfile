@@ -19,12 +19,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # слой из кэша, пока не изменится текст команды. Минимальная версия закреплена
 # в самом тексте: её повышение пересобирает слой, а проверка не даёт собрать
 # образ со старым пакетом. librsvg2-2 устанавливается как зависимость ffmpeg
-# (CVE-2026-96889).
+# (CVE-2026-96889). Так же закреплён libbrotli1 (CVE-2026-111497).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
         librsvg2-2 \
+        libbrotli1 \
         openssl \
         libssl3t64 \
         openssl-provider-legacy \
@@ -38,6 +39,7 @@ RUN apt-get update && \
         mount \
         util-linux && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' librsvg2-2)" ge '2.60.0+dfsg-1+deb13u1' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge '1.1.0-2+deb13u1' && \
     rm -rf /var/lib/apt/lists/*
 
 # yt-dlp использует Deno для решения JavaScript-задач YouTube. Без него часть
