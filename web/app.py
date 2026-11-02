@@ -45,6 +45,19 @@ from utils.analytics_db import (  # noqa: E402
 
 from utils.db_worker import run_db  # noqa: E402
 from utils.cache_policy import get_cache_policy, set_cache_policy  # noqa: E402
+from utils.api_keys import (  # noqa: E402
+    DEFAULT_EXPIRY_DAYS,
+    EXPIRY_PRESET_DAYS,
+    NAME_MAX_LENGTH,
+    ROTATION_GRACE_HOURS,
+    create_api_key,
+    delete_api_key,
+    list_api_keys,
+    parse_expiry,
+    revoke_api_key,
+    rotate_api_key,
+    set_api_key_expiry,
+)
 
 logger = logging.getLogger("nuvio.web")
 
@@ -277,7 +290,7 @@ async def set_language(request: Request, language: str, next: str = "/"):
     destination = (
         next
         if (
-            next in {"/", "/login", "/users", "/settings", "/feedback"}
+            next in {"/", "/login", "/users", "/settings", "/feedback", "/api-keys"}
             or (next.startswith("/users/") and next.removeprefix("/users/").isdigit())
         )
         else "/"
@@ -669,6 +682,170 @@ async def settings_submit(
             ),
         )
     return RedirectResponse("/settings?saved=1", status_code=303)
+
+
+# ── API-ключи ───────────────────────────────────────────────────
+
+# Открытый ключ ждёт первого показа в памяти процесса не дольше пяти минут.
+# Cookie сессии подписана, но не зашифрована, а URL оседает в истории и
+# журналах, поэтому в сессии лежит только одноразовый указатель.
+_REVEAL_TTL_SECONDS = 300
+_revealed_keys: dict[str, tuple[float, int, str]] = {}
+
+_API_KEY_NOTICES = {
+    "created": "API key created. Copy it now: it will not be shown again.",
+    "rotated": "New key issued. Copy it now: it will not be shown again.",
+    "expiry": "Expiry updated. It applies to the next request.",
+    "revoked": "API key revoked. Requests with it are rejected immediately.",
+    "deleted": "API key deleted.",
+}
+
+
+def _stash_revealed_key(request: Request, key_id: int, key: str) -> None:
+    now = time.time()
+    for token, (expires, _, _) in list(_revealed_keys.items()):
+        if expires <= now:
+            del _revealed_keys[token]
+    token = secrets.token_urlsafe(16)
+    _revealed_keys[token] = (now + _REVEAL_TTL_SECONDS, key_id, key)
+    request.session["api_key_reveal"] = token
+
+
+def _pop_revealed_key(request: Request) -> dict | None:
+    token = request.session.pop("api_key_reveal", None)
+    entry = _revealed_keys.pop(token, None) if token else None
+    if entry is None or entry[0] <= time.time():
+        return None
+    return {"id": entry[1], "key": entry[2]}
+
+
+def _api_port() -> int:
+    """Порт API для примеров на странице ключей.
+
+    WebUI не импортирует config, поэтому проверка повторена здесь: мусор и
+    выход за 1–65535 дают 8090, как `config.API_PORT` у самого API.
+    """
+    raw = os.environ.get("API_PORT", "").strip()
+    if raw.isascii() and raw.isdigit() and 1 <= int(raw) <= 65535:
+        return int(raw)
+    return 8090
+
+
+async def _api_keys_page(
+    request: Request, *, error: str | None = None, status: int = 200
+) -> HTMLResponse:
+    language = _language(request)
+    notice = _API_KEY_NOTICES.get(request.query_params.get("saved", ""))
+    response = _render(request, "api_keys.html", {
+        "keys": await run_db(list_api_keys),
+        "revealed": None if error else _pop_revealed_key(request),
+        "notice": None if error else (translate(language, notice) if notice else None),
+        "error": error,
+        "expiry_presets": EXPIRY_PRESET_DAYS,
+        "default_expiry": DEFAULT_EXPIRY_DAYS,
+        "grace_hours": ROTATION_GRACE_HOURS,
+        "name_max_length": NAME_MAX_LENGTH,
+        "api_port": _api_port(),
+        "today": datetime.now(timezone.utc).date().isoformat(),
+    })
+    response.status_code = status
+    # Страница может нести открытый ключ: ни браузер, ни прокси не должны её хранить.
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+class _ApiKeyFormError(Exception):
+    """Отказ в изменении ключа, который показывается на странице ключей."""
+
+    def __init__(self, message: str, status: int = 422):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+@app.exception_handler(_ApiKeyFormError)
+async def api_key_form_error_handler(request: Request, exc: _ApiKeyFormError):
+    return await _api_keys_page(
+        request, error=translate(_language(request), exc.message), status=exc.status
+    )
+
+
+def _form_expiry(expiry: str, expiry_date: str):
+    try:
+        return parse_expiry(expiry, expiry_date)
+    except ValueError as error:
+        raise _ApiKeyFormError(str(error)) from error
+
+
+async def _change_api_key(action, *args):
+    try:
+        return await run_db(action, *args)
+    except LookupError as error:
+        raise _ApiKeyFormError("API key not found", 404) from error
+    except ValueError as error:
+        raise _ApiKeyFormError(str(error)) from error
+
+
+def _api_keys_redirect(notice: str) -> RedirectResponse:
+    return RedirectResponse(f"/api-keys?saved={notice}", status_code=303)
+
+
+@app.get("/api-keys", response_class=HTMLResponse)
+async def api_keys_page(request: Request, _=Depends(require_auth)):
+    return await _api_keys_page(request)
+
+
+@app.post("/api-keys", response_class=HTMLResponse)
+async def api_key_create(
+    request: Request, name: str = Form(""), expiry: str = Form(str(DEFAULT_EXPIRY_DAYS)),
+    expiry_date: str = Form(""), csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    key_id, key = await _change_api_key(create_api_key, name, _form_expiry(expiry, expiry_date))
+    _stash_revealed_key(request, key_id, key)
+    return _api_keys_redirect("created")
+
+
+@app.post("/api-keys/{key_id}/rotate", response_class=HTMLResponse)
+async def api_key_rotate(
+    request: Request, key_id: int, grace_hours: str = Form("0"),
+    csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    # Сравнение со строками, а не isdigit(): тот пропускает «²», и int() падает.
+    if grace_hours not in {str(hours) for hours in ROTATION_GRACE_HOURS}:
+        raise _ApiKeyFormError("Unknown grace period")
+    key = await _change_api_key(rotate_api_key, key_id, int(grace_hours))
+    _stash_revealed_key(request, key_id, key)
+    return _api_keys_redirect("rotated")
+
+
+@app.post("/api-keys/{key_id}/expiry", response_class=HTMLResponse)
+async def api_key_expiry(
+    request: Request, key_id: int, expiry: str = Form(""), expiry_date: str = Form(""),
+    csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    await _change_api_key(set_api_key_expiry, key_id, _form_expiry(expiry, expiry_date))
+    return _api_keys_redirect("expiry")
+
+
+@app.post("/api-keys/{key_id}/revoke", response_class=HTMLResponse)
+async def api_key_revoke(
+    request: Request, key_id: int, csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    await _change_api_key(revoke_api_key, key_id)
+    return _api_keys_redirect("revoked")
+
+
+@app.post("/api-keys/{key_id}/delete", response_class=HTMLResponse)
+async def api_key_delete(
+    request: Request, key_id: int, csrf_token: str = Form(""), _=Depends(require_auth),
+):
+    _require_csrf(request, csrf_token)
+    await _change_api_key(delete_api_key, key_id)
+    return _api_keys_redirect("deleted")
 
 
 # ── API (JSON) ──────────────────────────────────────────────────

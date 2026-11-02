@@ -2,11 +2,12 @@
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
-from utils import media_processor
+from utils import media_processor, work_budget
 
 
 @pytest.fixture
@@ -130,6 +131,18 @@ def test_missing_or_oversized_output_is_rejected(monkeypatch, compression, size,
         media_processor.compress_file(compression, "compress", target_size=100)
 
     assert any("session_id=compress" in note for note in error.value.__notes__)
+
+
+def test_compression_targets_the_job_limit_by_default(monkeypatch, compression):
+    monkeypatch.setattr(media_processor, "MAX_FILE_SIZE", 1000)
+    _processes(monkeypatch, size=150)
+
+    assert media_processor.compress_file(compression, "compress").stat().st_size == 150
+    with pytest.raises(Exception, match="Не удалось сжать файл"):
+        work_budget.execute(
+            media_processor.compress_file, (compression, "compress"),
+            time.monotonic() + 30, None, 100,
+        )
 
 
 def test_ffmpeg_is_required(monkeypatch, compression):

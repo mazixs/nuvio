@@ -324,3 +324,52 @@ def select_tg_video_format(
             return combined_choice
 
     return pair_choice
+
+
+def select_unsized_video_format(
+    combined: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Запасной combined-формат, когда размер неизвестен и бюджет не проверить.
+
+    Берётся нижняя треть по высоте среди дорожек лучшего языка, чтобы скачанное
+    с большей вероятностью прошло по лимиту доставки.
+    """
+    unsized = [fmt for fmt in combined if fmt.get("filesize") is None]
+    if not unsized:
+        return None
+    best_rank = min(audio_language_rank(fmt) for fmt in unsized)
+    candidates = sorted(
+        (fmt for fmt in unsized if audio_language_rank(fmt) == best_rank),
+        # Ключ height есть всегда, но бывает None: get(..., 0) его не заменит.
+        key=lambda fmt: fmt.get("height") or 0,
+    )
+    return candidates[len(candidates) // 3]
+
+
+def select_audio_format(
+    audio_only: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Аудиодорожка для кнопки «аудио» и признак, что её можно не перекодировать.
+
+    Среди дорожек лучшего языка предпочитается контейнер, который играет без
+    конвертации: m4a, затем mp3, затем ogg. Если такого нет, возвращается лучшая
+    дорожка с признаком ``False`` — её нужно перекодировать.
+    """
+    ranked = sorted(
+        audio_only,
+        key=lambda fmt: (audio_language_rank(fmt), -(fmt.get("filesize") or 0)),
+    )
+    if not ranked:
+        return None, False
+    best_rank = audio_language_rank(ranked[0])
+    for ext in ("m4a", "mp3", "ogg"):
+        native = next(
+            (
+                fmt for fmt in ranked
+                if fmt.get("ext") == ext and audio_language_rank(fmt) == best_rank
+            ),
+            None,
+        )
+        if native:
+            return native, True
+    return ranked[0], False

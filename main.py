@@ -6,10 +6,8 @@ Telegram бот для скачивания видео с YouTube, TikTok и Ins
 import asyncio
 import signal
 from contextlib import suppress
-from pathlib import Path
 
 import telegram
-from dotenv import load_dotenv
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -21,15 +19,10 @@ from telegram.ext import (
     TypeHandler,
 )
 
+from utils.env_files import load_env_files
+
 # Load file-based environment variables from canonical to legacy paths.
-_BASE_DIR = Path(__file__).parent
-for _dotenv_path in (
-    _BASE_DIR / ".secrets" / ".env",
-    _BASE_DIR / ".env.local",
-    _BASE_DIR / ".env",
-):
-    if _dotenv_path.exists():
-        load_dotenv(dotenv_path=_dotenv_path, override=False)
+load_env_files()
 
 from config import (  # noqa: E402
     CANARY_ENABLED,
@@ -55,6 +48,7 @@ from utils.cookie_manager import (
     admin_command,
     handle_admin_callback,
     handle_document_upload,
+    scheduled_cookie_health_check,
 )  # noqa: E402
 from utils.ytdlp_runtime import get_installed_yt_dlp_version  # noqa: E402
 from utils.runtime_status import runtime_components  # noqa: E402
@@ -335,6 +329,9 @@ def _build_application() -> Application:
         )
         application.job_queue.run_repeating(
             scheduled_csi_dispatch, interval=86400, first=3600
+        )
+        application.job_queue.run_repeating(
+            scheduled_cookie_health_check, interval=86400, first=900
         )
         logger.info(
             "🕒 Планировщик задач инициализирован (автоочистка кэша + CSI активны)"

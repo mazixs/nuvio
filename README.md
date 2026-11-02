@@ -18,6 +18,7 @@ Nuvio is an asynchronous Telegram bot for downloading video, photo posts, and au
 - General feedback through `/feedback` or an error-message button, with reports managed in the WebUI.
 - User blocking and unblocking from WebUI profiles, applied to new bot requests without a restart.
 - A FastAPI analytics WebUI. English is the default language; Russian is available from the language switch.
+- An HTTP API for downloading video or audio by link, with keys issued, rotated, given an expiry, and revoked in the WebUI.
 
 ### Platform notes
 
@@ -60,7 +61,7 @@ docker compose --env-file .secrets/.env -f compose.yaml -f compose.dev.yaml up -
 docker compose --env-file .secrets/.env up -d
 ```
 
-The local Bot API port is not exposed to the host. See the [deployment guide](docs/guides/deployment.md) for ports, volumes, passwords, cookies, and systemd setup.
+The HTTP API starts only with `--profile api`; see the [API guide](docs/guides/api.md). The local Bot API port is not exposed to the host. See the [deployment guide](docs/guides/deployment.md) for ports, volumes, passwords, cookies, and systemd setup.
 
 ## Configuration
 
@@ -74,6 +75,13 @@ The sole environment template is [`.env.example`](.env.example). Keep the workin
 | `WEB_USERNAME`, `WEB_PASSWORD` | `admin`, `changeme` | WebUI sign-in credentials; change the password |
 | `WEB_SECRET_KEY` | generated on startup | Session signing key; set it to keep sessions across restarts |
 | `WEB_PORT` | `8080` | WebUI port |
+| `API_PORT` | `8090` | HTTP API port |
+| `API_DOWNLOAD_WORKERS` | `4` | Concurrent HTTP API downloads across all keys |
+| `API_MAX_ACTIVE_JOBS` | `2` | Queued and running HTTP API jobs per key |
+| `API_RATE_LIMIT_PER_MINUTE` | `120` | HTTP API requests per key per minute |
+| `API_RESULT_TTL_MINUTES` | `60` | Minutes a finished HTTP API file stays available |
+| `API_MAX_FILE_SIZE_MB` | `2000` | Largest file the HTTP API downloads, independent of the Telegram mode |
+| `API_STORAGE_LIMIT_MB` | `10000` | Disk space for finished HTTP API files of all keys |
 | `DOWNLOAD_WORKERS` | `8` | Worker threads for blocking downloads and FFmpeg tasks |
 | `BLOCKING_TASK_TIMEOUT` | `600` | Blocking task timeout in seconds |
 | `TIKTOK_FAST_PATH` | `true` | Direct TikTok H.264 path; cached links retain their previous quality |
@@ -117,18 +125,19 @@ CI runs linting, tests, Docker smoke checks, and vulnerability scanning on pushe
 
 ## Security
 
-SQLite queries are parameterized. WebUI credential checks use timing-safe comparison, sign-in attempts are rate limited by IP, and sessions are signed with `WEB_SECRET_KEY`. The WebUI disables Swagger, ReDoc, and the OpenAPI schema, and Jinja2 escapes HTML. Users receive safe error summaries; operational details stay in administrative logs. Cookie files are stored with owner-only permissions.
+SQLite queries are parameterized. WebUI credential checks use timing-safe comparison, sign-in attempts are rate limited by IP, and sessions are signed with `WEB_SECRET_KEY`. The WebUI disables Swagger, ReDoc, and the OpenAPI schema, and Jinja2 escapes HTML. HTTP API keys are stored only as SHA-256 hashes and shown once; each key sees only its own downloads. Users receive safe error summaries; operational details stay in administrative logs. Cookie files are stored with owner-only permissions.
 
 ## Documentation
 
 - [Documentation index](docs/index.md)
 - [Feedback and moderation](docs/guides/feedback-and-moderation.md)
+- [HTTP API](docs/guides/api.md)
 - [Architecture](docs/reference/architecture.md)
 - [YouTube incident runbook](docs/runbooks/youtube-download-runbook.md)
 - [Contributor guide](docs/guides/contributing.md)
 - [Troubleshooting](docs/runbooks/common-issues.md)
 
-The code is organized around `main.py` (bot lifecycle), `config.py` (settings), `messages.py` (bot text), `utils/` (media and delivery logic), `web/` (analytics WebUI), and `tests/`. The [architecture guide](docs/reference/architecture.md) describes the modules and their interactions.
+The code is organized around `main.py` (bot lifecycle), `config.py` (settings), `messages.py` (bot text), `utils/` (media and delivery logic), `web/` (analytics WebUI), `api/` (HTTP API), and `tests/`. The [architecture guide](docs/reference/architecture.md) describes the modules and their interactions.
 
 ## License
 

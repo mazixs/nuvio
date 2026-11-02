@@ -56,6 +56,41 @@ def test_environment_template_documents_youtube_canary():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "default"),
+    [
+        ("API_PORT", 8090),
+        ("API_DOWNLOAD_WORKERS", 4),
+        ("API_MAX_ACTIVE_JOBS", 2),
+        ("API_RATE_LIMIT_PER_MINUTE", 120),
+        ("API_RESULT_TTL_MINUTES", 60),
+        ("API_MAX_FILE_SIZE_MB", 2000),
+        ("API_STORAGE_LIMIT_MB", 10000),
+    ],
+)
+def test_environment_template_matches_http_api_defaults(name, default):
+    """Шаблон показывает те же умолчания HTTP API, что применяет `config.py`."""
+    template = (ROOT / ".env.example").read_text(encoding="utf-8")
+    config_source = (ROOT / "config.py").read_text(encoding="utf-8")
+
+    assert f"\n{name}={default}\n" in template
+    assert f'_parse_int_setting("{name}", {default},' in config_source
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["", "  ", "много", "4.5", "0", "1441"])
+def test_invalid_http_api_settings_fall_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv("API_RESULT_TTL_MINUTES", raw)
+    assert config._parse_int_setting("API_RESULT_TTL_MINUTES", 60, 5, 1440) == 60
+
+
+@pytest.mark.unit
+def test_valid_http_api_setting_is_used(monkeypatch):
+    monkeypatch.setenv("API_RESULT_TTL_MINUTES", " 1440 ")
+    assert config._parse_int_setting("API_RESULT_TTL_MINUTES", 60, 5, 1440) == 1440
+
+
+@pytest.mark.unit
 def test_direct_dependencies_are_pinned_to_reviewed_versions():
     requirements = (ROOT / "requirements.in").read_text(encoding="utf-8")
     lock = (ROOT / "requirements.txt").read_text(encoding="utf-8")

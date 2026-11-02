@@ -1291,3 +1291,27 @@ h3 { font-size: 0.95rem; font-weight: 600; color: var(--text-secondary); }
 .cache-settings input[type="number"]:disabled { opacity: .55; }
 .cache-settings input:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 3px; }
 .cache-summary { margin-block: 1.25rem .75rem; }
+
+/* API-ключи: одноразовый показ нового ключа, список ключей и их действия. */
+.form-group[hidden] { display: none; }
+.form-group select { width: 100%; padding: .75rem 1rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: .95rem; }
+.form-group select:focus-visible { outline: 2px solid var(--primary-light); outline-offset: 2px; }
+.api-key-reveal { margin-bottom: 2rem; padding: 1.25rem; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--accent-glow); }
+.api-key-reveal h2 { color: var(--text); margin-bottom: .5rem; }
+.api-key-reveal p { max-width: 72ch; margin-bottom: 1rem; }
+.api-key-secret { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+.api-key-secret code { font-size: .95rem; padding: .6rem .85rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; user-select: all; }
+.api-key-secret code, .api-key-head code, .api-key-example { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.api-key-form, .api-key-action { display: flex; flex-wrap: wrap; gap: .75rem; align-items: flex-end; }
+.api-key-form .form-group, .api-key-action .form-group { flex: 1 1 12rem; max-width: 22rem; margin-bottom: 0; }
+.api-key-entry { padding: 1.25rem 0; border-bottom: 1px solid var(--border); }
+.api-key-head { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: .75rem; }
+.api-key-head h3 { color: var(--text); font-size: 1rem; overflow-wrap: anywhere; }
+.api-key-head code { color: var(--text-secondary); font-size: .85rem; }
+.api-key-meta { display: flex; flex-wrap: wrap; gap: .5rem 2rem; margin-bottom: 1rem; }
+.api-key-meta dt { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+.api-key-meta dd { margin: 0; font-variant-numeric: tabular-nums; }
+.api-key-actions { display: flex; flex-wrap: wrap; gap: 1rem 2.5rem; align-items: flex-end; }
+.api-key-example { margin-top: 1rem; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; font-size: .8rem; line-height: 1.5; }
+.badge-active { background: var(--accent-glow); color: var(--accent); }
+.badge-warn { background: var(--warn-glow); color: var(--warn); }

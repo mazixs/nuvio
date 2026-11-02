@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
+import tempfile
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from messages import BROADCAST_RESTRICTED
@@ -14,12 +17,18 @@ from telegram.ext import ContextTypes
 from config import ADMIN_IDS, SECRETS_DIR
 from utils.analytics_db import get_all_user_ids, is_user_blocked, track_event
 from utils.db_worker import run_db
-from utils.cookie_health import CookieHealthResult, check_all_cookie_health
+from utils.cookie_health import (
+    CookieHealthResult,
+    check_all_cookie_health,
+    check_cookie_health,
+    inspect_cookie_file,
+)
 from utils.cookie_workfile import working_cookie_file
+from utils.logger import setup_logger
 from utils.runtime_status import format_runtime_status
 from utils.telegram_callbacks import answer_callback
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 async def _safe_edit(query, text, **kwargs):
@@ -46,11 +55,42 @@ COOKIE_TARGETS = {
     "instagram": "www.instagram.com_cookies.txt",
     "tiktok": "www.tiktok.com_cookies.txt",
 }
+COOKIE_PLATFORMS = {file_name: platform for platform, file_name in COOKIE_TARGETS.items()}
 COOKIE_LABELS = {
     "youtube": "YouTube",
     "instagram": "Instagram",
     "tiktok": "TikTok",
 }
+COOKIE_SUMMARY_TRANSLATIONS = {
+    "file not found": "файл cookies не найден",
+    "no cookie records found": "записи cookies не найдены в файле",
+    "cookie file cannot be read": "файл cookies не удалось прочитать",
+    "Cookie file is not valid UTF-8": "файл cookies не в кодировке UTF-8",
+    "Cookie file has no Netscape header": (
+        "нет заголовка Netscape (первая строка должна быть «# Netscape HTTP Cookie File»)"
+    ),
+    "required auth cookies are missing": "отсутствуют cookies авторизации",
+    "all auth cookies are expired": "срок действия всех cookies авторизации истёк",
+    "session cookies are expired": "срок действия сессионных cookies истёк",
+    "auth cookies are active": "cookies авторизации активны",
+    "auth cookies are active and probe succeeded": "cookies активны, тест авторизации пройден",
+    "session cookies are present and the test video was extracted": (
+        "сессионные cookies на месте, тестовое видео извлечено"
+    ),
+    "auth cookie set is incomplete, re-upload is needed": (
+        "часть cookies авторизации потеряна, загрузите файл заново"
+    ),
+    "auth cookies exist but authenticated probe failed": "cookies есть, но тест авторизации не прошёл",
+    "platform temporarily rate-limited the validation probe": "платформа временно ограничила запросы проверки",
+    "auth cookies are active but live probe could not complete": "cookies активны, но сетевой тест не завершился",
+}
+# Ядро дописывает к этим текстам « at line N», поэтому в словарь выше они не попадают.
+COOKIE_LINE_SUMMARY_TRANSLATIONS = {
+    "Invalid Netscape cookie row": "строка {line} не похожа на запись cookies в формате Netscape",
+    "Invalid cookie expiration value": "неверный срок действия cookie в строке {line}",
+}
+COOKIE_ALERT_STATUSES = frozenset({"expired", "stale", "degraded", "invalid_format"})
+COOKIE_EXPIRY_ALERT_SECONDS = 14 * 24 * 60 * 60
 NON_ADMIN_DOCUMENT_MESSAGE = (
     "🔒 Бот не принимает файлы от пользователей. "
     "Поддерживаются только ссылки на видео и админская загрузка cookies."
@@ -189,6 +229,22 @@ def _format_health_icon(status: str) -> str:
     return "ℹ️"
 
 
+def _translate_cookie_summary(summary: str) -> str:
+    prefix, separator, line = summary.rpartition(" at line ")
+    if separator and prefix in COOKIE_LINE_SUMMARY_TRANSLATIONS:
+        return COOKIE_LINE_SUMMARY_TRANSLATIONS[prefix].format(line=line)
+    return COOKIE_SUMMARY_TRANSLATIONS.get(summary, summary)
+
+
+def _format_session_date(expires_at: int) -> str:
+    try:
+        return datetime.fromtimestamp(expires_at, UTC).strftime("%d.%m.%Y")
+    except (ValueError, OverflowError, OSError):
+        # Срок берётся из файла как есть: например, в миллисекундах он не влезет в
+        # datetime, и панель из-за этого падать не должна.
+        return "неизвестной даты"
+
+
 def _build_cookie_health_text(
     results: dict[str, CookieHealthResult],
     expected_file_name: str | None = None,
@@ -207,30 +263,18 @@ def _build_cookie_health_text(
         "missing": "отсутствуют",
         "invalid_format": "неверный формат",
         "probe_failed": "ошибка проверки",
-        "not_supported": "без проверки",
-    }
-
-    SUMMARY_TRANSLATIONS = {
-        "file not found": "файл cookies не найден",
-        "no cookie records found": "записи cookies не найдены в файле",
-        "required auth cookies are missing": "отсутствуют сессионные cookies",
-        "all auth cookies are expired": "срок действия всех сессионных cookies истёк",
-        "auth cookies are active and probe succeeded": "cookies активны, тест авторизации пройден",
-        "auth cookie set is incomplete, re-upload is needed": "часть сессионных cookies потеряна, загрузите файл заново",
-        "auth cookies exist but authenticated probe failed": "cookies есть, но тест авторизации не прошёл",
-        "platform temporarily rate-limited the validation probe": "платформа временно ограничила запросы проверки",
-        "auth cookies are active; live probe is not available for this platform": "cookies активны; автопроверка недоступна для платформы",
-        "auth cookies are active but live probe could not complete": "cookies активны, но сетевой тест не завершился",
     }
 
     for platform in ("youtube", "instagram", "tiktok"):
         result = results[platform]
         label = COOKIE_LABELS[platform]
         status_ru = STATUS_TRANSLATIONS.get(result.status, result.status)
-        summary_ru = SUMMARY_TRANSLATIONS.get(result.summary, result.summary)
+        summary_ru = _translate_cookie_summary(result.summary)
         lines.append(
             f"{_format_health_icon(result.status)} {label}: {status_ru} — {summary_ru}"
         )
+        if result.session_expires_at is not None:
+            lines.append(f"Сессия до {_format_session_date(result.session_expires_at)}")
 
     if expected_file_name:
         lines.extend(
@@ -297,7 +341,7 @@ async def handle_admin_callback(
             "Проверяю состояние файлов cookies...",
             reply_markup=_build_admin_panel_markup(expected_file_name),
         )
-        results = await asyncio.to_thread(check_all_cookie_health)
+        results = await asyncio.to_thread(check_all_cookie_health, force=True)
         await _safe_edit(
             query,
             _build_cookie_health_text(results, expected_file_name),
@@ -360,6 +404,35 @@ async def handle_admin_callback(
     )
 
 
+async def _check_uploaded_cookies(platform: str) -> str:
+    """Живая проверка уже сохранённого файла: её итог только сообщается.
+
+    Файл прошёл локальную проверку, а `stale` или сетевой сбой могут быть временными,
+    поэтому откатывать загрузку незачем: прежний файл, скорее всего, ещё хуже.
+    """
+    label = COOKIE_LABELS[platform]
+    try:
+        result = await asyncio.to_thread(check_cookie_health, platform, force=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("Не удалось проверить загруженные cookies %s", platform)
+        return (
+            f"⚠️ {label}: файл сохранён, но проверка не завершилась. "
+            "Повторите её кнопкой «Проверить cookies»."
+        )
+
+    summary_ru = _translate_cookie_summary(result.summary)
+    if result.status == "valid":
+        lines = [f"✅ {label}: {summary_ru}"]
+    else:
+        lines = [
+            f"⚠️ {label}: {summary_ru}",
+            "Файл уже сохранён. Если скачивание не заработает, выгрузите cookies заново.",
+        ]
+    if result.session_expires_at is not None:
+        lines.append(f"Сессия до {_format_session_date(result.session_expires_at)}")
+    return "\n".join(lines)
+
+
 async def handle_document_upload(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -413,17 +486,48 @@ async def handle_document_upload(
         )
         return
 
+    temporary_path: Path | None = None
     try:
-        telegram_file = await document.get_file()
+        platform = COOKIE_PLATFORMS[expected_file_name]
         file_path = SECRETS_DIR / expected_file_name
-        await telegram_file.download_to_drive(file_path)
+        telegram_file = await document.get_file()
+        # Рядом с целевым файлом: `os.replace` атомарен только в пределах одной
+        # файловой системы. `mkstemp` сразу даёт режим 600, а PTB пишет в готовый
+        # файл и режим не меняет, так что живая сессия не лежит открытой ни на миг.
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=SECRETS_DIR, prefix=f".{expected_file_name}.", suffix=".tmp"
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        await telegram_file.download_to_drive(temporary_path)
 
-        if os.name != "nt":
-            file_path.chmod(0o600)
+        inspection = await asyncio.to_thread(
+            inspect_cookie_file, platform, temporary_path
+        )
+        if inspection.status != "valid":
+            logger.warning(
+                "Admin %s uploaded rejected cookie file for %s: %s (%s)",
+                user_id,
+                platform,
+                inspection.status,
+                inspection.summary,
+            )
+            await message.reply_text(
+                "\n".join(
+                    [
+                        f"❌ Файл не принят: {_translate_cookie_summary(inspection.summary)}.",
+                        "Сохранённые ранее cookies не изменены.",
+                        "Режим загрузки всё ещё включён: отправьте другой файл "
+                        "или нажмите «Отменить загрузку».",
+                    ]
+                ),
+                reply_markup=_build_admin_panel_markup(expected_file_name),
+            )
+            return
 
-        working_cookie_file(file_path)
-
+        os.replace(temporary_path, file_path)
         context.user_data.pop(ADMIN_UPLOAD_TARGET_KEY, None)
+        working_cookie_file(file_path, fresh=True)
         logger.info(
             "Admin %s updated cookie file %s from uploaded file %s",
             user_id,
@@ -431,8 +535,9 @@ async def handle_document_upload(
             file_name,
         )
         await message.reply_text(
-            f"✅ Cookies обновлены и сохранены как {expected_file_name}.",
+            f"✅ Cookies обновлены и сохранены как {expected_file_name}. Проверяю их...",
         )
+        await message.reply_text(await _check_uploaded_cookies(platform))
         await message.reply_text(
             _build_admin_panel_text(),
             reply_markup=_build_admin_panel_markup(),
@@ -445,6 +550,68 @@ async def handle_document_upload(
             exc_info=True,
         )
         await message.reply_text(f"❌ Произошла ошибка при сохранении файла: {exc}")
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _build_cookie_alert_text(
+    results: dict[str, CookieHealthResult], now: float
+) -> str | None:
+    """Текст тревоги для админов или None, если им нечего делать.
+
+    Срок сессии проверяется при любом статусе: его даёт файл, а не сеть. Если TikTok
+    изменит `passport`, проверка будет молча давать `probe_failed`, продление
+    остановится, и приближение срока останется единственным сигналом.
+    """
+    problems = []
+    for platform, result in results.items():
+        reasons = []
+        if result.status in COOKIE_ALERT_STATUSES:
+            reasons.append(_translate_cookie_summary(result.summary))
+        expires_at = result.session_expires_at
+        if expires_at is not None and expires_at - now < COOKIE_EXPIRY_ALERT_SECONDS:
+            reasons.append(f"сессия истекает {_format_session_date(expires_at)}")
+        if reasons:
+            problems.append(f"- {COOKIE_LABELS[platform]}: {'; '.join(reasons)}")
+    if not problems:
+        return None
+    return "\n".join(
+        [
+            "⚠️ Cookies пора обновить",
+            "",
+            *problems,
+            "",
+            "Загрузите свежие файлы через /admin.",
+        ]
+    )
+
+
+async def scheduled_cookie_health_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в сутки проверяет cookies и зовёт админов, если их пора обновить.
+
+    Заодно продлевает сессию TikTok: срок в её файле обновляет только ответ живой
+    проверки, и без регулярного запуска cookie в указанный день перестанет
+    отправляться. Состояние не хранится: тревога повторяется, пока проблема не решена.
+    """
+    try:
+        results = await asyncio.to_thread(check_all_cookie_health, force=True)
+        logger.info(
+            "Плановая проверка cookies: %s",
+            {platform: result.status for platform, result in results.items()},
+        )
+        text = _build_cookie_alert_text(results, time.time())
+        if text is None:
+            return
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Не удалось отправить тревогу о cookies админу %s: %s", admin_id, exc
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("Плановая проверка cookies не удалась")
 
 
 async def handle_admin_text_input(

@@ -14,6 +14,7 @@ from config import (
     YOUTUBE_COOKIES_FILE,
     YTDLP_CLI_FALLBACK,
 )
+from utils import work_budget
 from utils.cookie_workfile import working_cookie_file
 from utils.cancellation import CancelledByUser, is_cancelled
 from utils.download_report import record_delivered_format
@@ -26,6 +27,8 @@ from utils.ytdlp_runtime import extract_cli_output_path, run_yt_dlp_cli
 from utils.subtitles import srt_to_text
 from utils.ytdlp_common import (
     DEFAULT_YTDLP_NETWORK_OPTS,
+    OUTPUT_FILENAME_TEMPLATE,
+    FileSizeLimitError,
     apply_network_opts,
     classify_download_error_kind,
     execute_with_backoff,
@@ -187,7 +190,7 @@ def get_available_formats(
 
     Args:
         video_info (Dict[str, Any]): Информация о видео.
-        filter_by_size (bool): Фильтровать форматы по MAX_FILE_SIZE (по умолчанию True).
+        filter_by_size (bool): Фильтровать форматы по лимиту размера (по умолчанию True).
 
     Returns:
         Dict[str, List[Dict[str, Any]]]: Словарь с группами форматов.
@@ -197,6 +200,7 @@ def get_available_formats(
     audio_formats: list[FormatInfoDict] = []
     combined_formats: list[FormatInfoDict] = []
     shadowed_drc_ids = _shadowed_drc_format_ids(formats)
+    size_limit = work_budget.size_limit(MAX_FILE_SIZE)
 
     for format_info in formats:
         # Логируем, что получили по filesize
@@ -218,9 +222,9 @@ def get_available_formats(
 
         # Применяем фильтрацию по размеру файла (если включена)
         if filter_by_size and filesize:
-            if filesize > MAX_FILE_SIZE:
+            if filesize > size_limit:
                 logger.debug(
-                    f"Формат {format_info.get('format_id')} пропущен: размер {filesize} превышает {MAX_FILE_SIZE}"
+                    f"Формат {format_info.get('format_id')} пропущен: размер {filesize} превышает {size_limit}"
                 )
                 continue
 
@@ -317,8 +321,8 @@ def _ensure_ios_compatible(downloaded_file: Path, session_id: str) -> Path:
 def _resolve_output_template(session_id: str, output_dir: Path | None) -> Path:
     """Возвращает шаблон пути для yt-dlp."""
     if output_dir is None:
-        return get_temp_file_path(session_id, "%(title)s.%(ext)s")
-    return output_dir / "%(title)s.%(ext)s"
+        return get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
+    return output_dir / OUTPUT_FILENAME_TEMPLATE
 
 
 def _cookiefile_if_available(use_cookies: bool) -> str | None:
@@ -448,6 +452,7 @@ def download_video(
 ) -> Path | str:
     logger.info(f"Скачивание видео: {url}, формат: {format_id}")
     output_path_template = _resolve_output_template(session_id, output_dir)
+    size_filter = max_file_size or work_budget.size_limit(MAX_FILE_SIZE)
     # `format_id!=18` — тот же PO-токен: без него прогрессивный itag 18 отдаёт 403,
     # поэтому запасной селектор не должен на него сваливаться.
     fallback_non_hls = (
@@ -456,7 +461,7 @@ def download_video(
         "[protocol!=http_dash_segments]/"
         "bestaudio[protocol!=m3u8_dash][protocol!=http_dash_segments])/"
         "best[protocol!=m3u8_dash][protocol!=http_dash_segments][ext=mp4]"
-        f"[format_id!=18][filesize<=?{max_file_size or MAX_FILE_SIZE}]"
+        f"[format_id!=18][filesize<=?{size_filter}]"
     )
 
     def _resolve_format_selector(
@@ -475,7 +480,7 @@ def download_video(
             and "[" not in format_to_use
             and "+" not in format_to_use
         ):
-            format_to_use = f"{format_to_use}[filesize<=?{max_file_size or MAX_FILE_SIZE}]"
+            format_to_use = f"{format_to_use}[filesize<=?{size_filter}]"
             logger.info("Применяем фильтр по размеру: %s", format_to_use)
 
         return format_to_use
@@ -627,7 +632,10 @@ def download_video(
                         merge_output_format="mp4",
                         max_file_size=max_file_size,
                     )
+                except FileSizeLimitError:
+                    raise
                 except Exception as cli_error:
+                    work_budget.check()
                     if _network_unavailable("CLI fallback yt-dlp", cli_error):
                         # Сейчас причина — сеть, и пользователь должен увидеть
                         # её, а не прежнюю ошибку встроенного API.
@@ -671,7 +679,7 @@ def download_audio_native(
             and "[" not in effective_format
             and "+" not in effective_format
         ):
-            filtered = f"{effective_format}[filesize<=?{MAX_FILE_SIZE}]"
+            filtered = f"{effective_format}[filesize<=?{work_budget.size_limit(MAX_FILE_SIZE)}]"
             logger.info("Применяем фильтр по размеру для нативного аудио: %s", filtered)
             return filtered
         return effective_format
@@ -791,7 +799,10 @@ def download_audio_native(
                     output_dir=output_dir,
                     force_local=force_local,
                 )
+            except FileSizeLimitError:
+                raise
             except Exception as cli_error:
+                work_budget.check()
                 if _network_unavailable("CLI fallback нативного аудио", cli_error):
                     raise cli_error from final_error
                 logger.warning("CLI fallback нативного аудио не удался: %s", cli_error)
@@ -835,7 +846,7 @@ def download_audio(
             and "[" not in effective_format
             and "+" not in effective_format
         ):
-            filtered = f"{effective_format}[filesize<=?{MAX_FILE_SIZE}]"
+            filtered = f"{effective_format}[filesize<=?{work_budget.size_limit(MAX_FILE_SIZE)}]"
             logger.info("Применяем фильтр по размеру для аудио: %s", filtered)
             return filtered
         if "+" in effective_format:
@@ -969,7 +980,10 @@ def download_audio(
                     force_local=force_local,
                     extract_audio_codec=preferred_codec,
                 )
+            except FileSizeLimitError:
+                raise
             except Exception as cli_error:
+                work_budget.check()
                 if _network_unavailable(f"CLI fallback {preferred_codec}-аудио", cli_error):
                     raise cli_error from final_error
                 logger.warning(
@@ -1006,9 +1020,9 @@ def download_subtitles(
 
     def _download_subs(use_cookies: bool) -> Path | None:
         if output_dir is None:
-            output_path_template = get_temp_file_path(session_id, "%(title)s.%(ext)s")
+            output_path_template = get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
         else:
-            output_path_template = output_dir / "%(title)s.%(ext)s"
+            output_path_template = output_dir / OUTPUT_FILENAME_TEMPLATE
 
         ydl_opts = {
             "skip_download": True,

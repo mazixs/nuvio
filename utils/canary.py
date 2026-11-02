@@ -43,7 +43,7 @@ from utils.cancellation import (
     request_cancellation,
 )
 from utils.logger import setup_logger
-from utils.public_errors import classify_internal_error_category
+from utils.public_errors import classify_internal_error_category, make_error_code
 from utils.runtime_status import save_canary_status
 from utils.temp_file_manager import cleanup_temp_files
 from utils.tg_video_choice import select_tg_video_format
@@ -83,17 +83,6 @@ def canary_video_url() -> str:
     return f"https://www.youtube.com/watch?v={CANARY_VIDEO_ID}"
 
 
-def _error_code(category: str) -> str:
-    """Код в том же формате, что видит пользователь: `YT-<КАТЕГОРИЯ>-<6 знаков>`.
-
-    Формат повторён здесь намеренно: `_make_error_code` живёт в
-    `utils/telegram_utils.py` вместе с хэндлерами и антиспамом, а канарейке из
-    этого модуля не нужно ничего, кроме одной строки формата.
-    """
-    normalized = "UNEXPECT" if category.upper() == "UNKNOWN" else category.upper()
-    return f"YT-{normalized[:8]}-{uuid.uuid4().hex[:6].upper()}"
-
-
 def _failure(
     stage: str, exc: BaseException, format_id: str | None = None
 ) -> CanaryOutcome:
@@ -104,7 +93,7 @@ def _failure(
         stage=stage,
         detail=f"{type(exc).__name__}: {exc}",
         category=category,
-        error_code=_error_code(category),
+        error_code=make_error_code("youtube", category),
         format_id=format_id,
     )
 
@@ -136,7 +125,7 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
                 stage=stage,
                 detail="ни один формат не влез в бюджет проверки",
                 category="FORMAT_UNAVAILABLE",
-                error_code=_error_code("FORMAT_UNAVAILABLE"),
+                error_code=make_error_code("youtube", "FORMAT_UNAVAILABLE"),
             )
         format_id = choice.format_id
         stage = "download"
@@ -152,7 +141,7 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
                 stage="download",
                 detail="размер файла вне бюджета проверки",
                 category="FILE" if size_bytes <= 0 else "LARGE",
-                error_code=_error_code("FILE" if size_bytes <= 0 else "LARGE"),
+                error_code=make_error_code("youtube", "FILE" if size_bytes <= 0 else "LARGE"),
                 format_id=format_id,
             )
         return CanaryOutcome(
@@ -168,7 +157,7 @@ def run_youtube_canary_check(session_id: str) -> CanaryOutcome:
             stage="cancelled",
             detail="проверка прервана по таймауту",
             category="TIMEOUT",
-            error_code=_error_code("TIMEOUT"),
+            error_code=make_error_code("youtube", "TIMEOUT"),
             format_id=format_id,
         )
     except Exception as exc:  # noqa: BLE001
@@ -216,7 +205,7 @@ async def _check_in_thread() -> CanaryOutcome:
             stage="timeout",
             detail=f"проверка не завершилась за {CANARY_TIMEOUT_SECONDS} с",
             category="NETWORK_TIMEOUT",
-            error_code=_error_code("NETWORK_TIMEOUT"),
+            error_code=make_error_code("youtube", "NETWORK_TIMEOUT"),
         )
 
 

@@ -6,3 +6,7 @@ services:
   web:
     build: .
     image: nuvio:dev
+
+  api:
+    build: .
+    image: nuvio:dev

@@ -33,9 +33,10 @@ Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, 
 | `utils/youtube_utils.py`, `utils/tiktok_instagram_utils.py`, `utils/rutube_vk_utils.py` | Platform downloaders |
 | `utils/media_processor.py` | FFmpeg conversion, extraction, and compression |
 | `utils/video_cache.py`, `utils/analytics_db.py` | SQLite cache and analytics |
-| `utils/ytdlp_runtime.py`, `utils/cookie_manager.py`, `utils/cookie_health.py` | yt-dlp runtime and cookie management |
+| `utils/ytdlp_runtime.py`, `utils/cookie_manager.py`, `utils/cookie_health.py`, `utils/cookie_workfile.py` | yt-dlp runtime, cookie management and health checks, and working copies |
 | `utils/logger.py`, `utils/cache_commands.py`, `utils/temp_file_manager.py` | Logging, cache commands, and temporary files |
 | `web/` | FastAPI application, templates, static assets, and localization |
+| `api/`, `utils/api_keys.py`, `utils/media_fetch.py` | HTTP API: jobs, key storage, and Telegram-free downloads |
 | `tests/` | Unit, integration, smoke, and regression tests |
 | `docs/` | English guides, reference, runbooks, decisions (ADRs), research, and dated history (audits, plans, specs) |
 | `scripts/release_notes.py` | GitHub Release changelog generation |
@@ -57,7 +58,7 @@ mkdir -p .secrets
 cp .env.example .secrets/.env
 ```
 
-Set `TELEGRAM_TOKEN` and `ADMIN_IDS` for a direct run. Start the bot with `python main.py` and the WebUI in a separate process with `python -m web`. Direct runs use the cloud Bot API and a 50 MB file limit.
+Set `TELEGRAM_TOKEN` and `ADMIN_IDS` for a direct run. Start the bot with `python main.py`, the WebUI in a separate process with `python -m web`, and the optional HTTP API with `python -m api`. Direct runs use the cloud Bot API and a 50 MB file limit.
 
 For the Docker stack, also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`:
 
@@ -117,7 +118,7 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 - Block repeated WebUI sign-in attempts by IP using `FAIL2BAN_RETRIES` and `FAIL2BAN_TIME`.
 - Limit entered usernames and passwords to 128 characters.
 - Sign sessions through `SessionMiddleware` with `WEB_SECRET_KEY`.
-- Keep Swagger, ReDoc, and the OpenAPI schema (`/openapi.json`) disabled; let Jinja2 escape HTML.
+- Keep Swagger, ReDoc, and the OpenAPI schema (`/openapi.json`) disabled in the WebUI; let Jinja2 escape HTML. The HTTP API publishes its own reference at `/api/docs` and `/api/v1/openapi.json` on purpose: it is a public contract for clients and describes only the API routes, never WebUI routes.
 - Do not expose database structure or tracebacks to users.
 - Save cookie files with owner-only `0o600` permissions.
 
@@ -151,6 +152,13 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 | `WEB_PORT` | No | `8080` | WebUI port |
 | `FAIL2BAN_RETRIES` | No | `5` | Failed sign-ins before IP lockout |
 | `FAIL2BAN_TIME` | No | `10m` | Lockout duration, such as `10m`, `1h`, or `300` |
+| `API_PORT` | No | `8090` | HTTP API port |
+| `API_DOWNLOAD_WORKERS` | No | `4` | Concurrent HTTP API downloads across all keys |
+| `API_MAX_ACTIVE_JOBS` | No | `2` | Queued and running HTTP API jobs per key |
+| `API_RATE_LIMIT_PER_MINUTE` | No | `120` | HTTP API requests per key per minute |
+| `API_RESULT_TTL_MINUTES` | No | `60` | Minutes a finished HTTP API file stays available |
+| `API_MAX_FILE_SIZE_MB` | No | `2000` | Largest HTTP API file; each job passes it to the downloaders instead of the Telegram limit |
+| `API_STORAGE_LIMIT_MB` | No | `10000` | Disk space for finished HTTP API files of all keys |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 | `DOWNLOAD_WORKERS` | No | `8` | Blocking worker threads |
 | `BLOCKING_TASK_TIMEOUT` | No | `600` | Blocking task timeout in seconds |

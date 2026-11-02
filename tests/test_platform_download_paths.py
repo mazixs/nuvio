@@ -44,7 +44,7 @@ class _TikTokYDL:
         return info
 
     def prepare_filename(self, info):
-        return self.options["outtmpl"].replace("%(title)s", info["title"]).replace(
+        return self.options["outtmpl"].replace("%(title).150B", info["title"]).replace(
             "%(ext)s", info["ext"]
         )
 
@@ -166,7 +166,7 @@ def test_instagram_audio_falls_back_only_when_needed(
             Path(command[-1]).write_bytes(b"audio")
         return SimpleNamespace(returncode=result, stderr="conversion failed" if result else "")
 
-    monkeypatch.setattr("subprocess.run", ffmpeg_run)
+    monkeypatch.setattr(media, "_run_ffmpeg", ffmpeg_run)
 
     result = media.download_instagram_audio(
         INSTAGRAM_URL, "instagram-audio", output_dir=tmp_path, force_local=True
@@ -188,7 +188,7 @@ def test_instagram_audio_failure_removes_input_and_partial_output(monkeypatch, t
         Path(command[-1]).write_bytes(b"partial")
         return SimpleNamespace(returncode=1, stderr="conversion failed")
 
-    monkeypatch.setattr("subprocess.run", failing_ffmpeg)
+    monkeypatch.setattr(media, "_run_ffmpeg", failing_ffmpeg)
 
     with pytest.raises(Exception, match="даже в MP3"):
         media.download_instagram_audio(
@@ -235,7 +235,7 @@ def _install_instagram_ydl(monkeypatch, *, outcome="single", require_cookie=Fals
             return info
 
         def prepare_filename(self, info):
-            return self.options["outtmpl"].replace("%(title)s", info["title"]).replace(
+            return self.options["outtmpl"].replace("%(title).150B", info["title"]).replace(
                 "%(ext)s", info["ext"]
             )
 

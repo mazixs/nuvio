@@ -12,6 +12,7 @@ you're not a bot».
 import os
 
 import pytest
+import yt_dlp
 
 from utils.cookie_workfile import cleanup_old_workfiles, working_cookie_file
 
@@ -19,6 +20,12 @@ from utils.cookie_workfile import cleanup_old_workfiles, working_cookie_file
 pytestmark = pytest.mark.unit
 
 ORIGINAL = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tabc\n"
+# Срок задан явно: без него yt-dlp сохранил бы другое значение, и файл бы отличался.
+SAVED_BY_YT_DLP = (
+    "# Netscape HTTP Cookie File\n"
+    ".youtube.com\tTRUE\t/\tTRUE\t4102444800\tSID\tabc\n"
+    ".youtube.com\tTRUE\t/\tTRUE\t4102444800\tHSID\tdef\n"
+)
 
 
 @pytest.fixture
@@ -99,6 +106,68 @@ def test_copy_is_readable_only_by_owner(original, work_dir):
     assert copy.stat().st_mode & 0o077 == 0
 
 
+def test_fresh_restores_the_copy_of_the_same_file(original, work_dir):
+    """Имя копии зависит от хэша: без `fresh` админ получил бы её же, уже испорченную."""
+    copy = working_cookie_file(original, work_dir=work_dir)
+    copy.write_text("# yt-dlp выкинул половину\n", encoding="utf-8")
+
+    again = working_cookie_file(original, work_dir=work_dir, fresh=True)
+
+    assert again == copy
+    assert again.read_text(encoding="utf-8") == ORIGINAL
+    assert [item.name for item in work_dir.iterdir()] == [copy.name]
+
+
+def test_fresh_creates_a_missing_copy(original, work_dir):
+    copy = working_cookie_file(original, work_dir=work_dir, fresh=True)
+
+    assert copy.read_text(encoding="utf-8") == ORIGINAL
+
+
+def test_fresh_keeps_the_whole_old_copy_until_the_swap(original, work_dir, monkeypatch):
+    """Загрузчики читают копию параллельно и не должны увидеть её недописанной."""
+    copy = working_cookie_file(original, work_dir=work_dir)
+    copy.write_text("# старая копия\n", encoding="utf-8")
+    seen = []
+    really_replace = os.replace
+
+    def spy(source, target):
+        seen.append((copy.read_text(encoding="utf-8"), open(source, encoding="utf-8").read()))
+        really_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", spy)
+    working_cookie_file(original, work_dir=work_dir, fresh=True)
+
+    assert seen == [("# старая копия\n", ORIGINAL)]
+
+
+def test_refused_fresh_keeps_the_old_copy_and_uses_the_original(
+    original, work_dir, monkeypatch, caplog
+):
+    """Так Windows отвечает на замену файла, открытого другим потоком."""
+    copy = working_cookie_file(original, work_dir=work_dir)
+    copy.write_text("# старая копия\n", encoding="utf-8")
+
+    def refuse(source, target):
+        raise PermissionError("файл занят")
+
+    monkeypatch.setattr(os, "replace", refuse)
+
+    assert working_cookie_file(original, work_dir=work_dir, fresh=True) == original
+    assert copy.read_text(encoding="utf-8") == "# старая копия\n"
+    assert [item.name for item in work_dir.iterdir()] == [copy.name]
+    assert "файл занят" in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="На Windows нет режимов POSIX")
+def test_fresh_copy_is_readable_only_by_owner(original, work_dir):
+    original.chmod(0o644)
+
+    copy = working_cookie_file(original, work_dir=work_dir, fresh=True)
+
+    assert copy.stat().st_mode & 0o777 == 0o600
+
+
 def test_cleanup_preserves_current_copy_and_removes_replaced_copy(original, tmp_path, monkeypatch):
     import config
 
@@ -121,3 +190,83 @@ def test_cleanup_preserves_current_copy_and_removes_replaced_copy(original, tmp_
     assert cleanup_old_workfiles() == (1, 0)
     assert not current.exists()
     assert replacement.exists()
+
+
+# ── Атомарная запись ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def jar(tmp_path):
+    path = tmp_path / "cookies.txt"
+    path.write_text(SAVED_BY_YT_DLP, encoding="utf-8")
+    loaded = yt_dlp.cookies.load_cookies(str(path), None, None)
+    return loaded, path
+
+
+def test_yt_dlp_creates_the_atomic_jar(tmp_path):
+    """Падает, если yt-dlp переименует класс или перестанет брать его по имени."""
+    path = tmp_path / "cookies.txt"
+    path.write_text(SAVED_BY_YT_DLP, encoding="utf-8")
+
+    with yt_dlp.YoutubeDL({"cookiefile": str(path), "quiet": True}) as ydl:
+        assert type(ydl.cookiejar).__name__ == "AtomicCookieJar"
+        assert len(ydl.cookiejar) == 2
+
+    assert "SID" in path.read_text(encoding="utf-8")
+    assert [item.name for item in tmp_path.iterdir()] == ["cookies.txt"]
+
+
+def test_reader_sees_the_whole_old_file_while_saving(jar, monkeypatch):
+    loaded, path = jar
+    before = path.read_bytes()
+    seen = []
+    really_save = type(loaded)._really_save
+
+    def spy(self, handle, *args):
+        seen.append(path.read_bytes())
+        return really_save(self, handle, *args)
+
+    monkeypatch.setattr(type(loaded), "_really_save", spy)
+    loaded.save()
+
+    assert seen == [before]
+
+
+def test_failed_save_keeps_the_file_and_leaves_no_temporary(jar, monkeypatch):
+    loaded, path = jar
+    before = path.read_bytes()
+
+    def fail(self, handle, *args):
+        handle.write("# обрыв")
+        raise OSError("диск заполнен")
+
+    monkeypatch.setattr(type(loaded), "_really_save", fail)
+    with pytest.raises(OSError, match="диск заполнен"):
+        loaded.save()
+
+    assert path.read_bytes() == before
+    assert [item.name for item in path.parent.iterdir()] == ["cookies.txt"]
+
+
+def test_refused_replace_skips_the_save(jar, monkeypatch, caplog):
+    """Так Windows отвечает на замену файла, открытого другим потоком."""
+    loaded, path = jar
+    before = path.read_bytes()
+
+    def refuse(source, target):
+        raise PermissionError("файл занят")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    loaded.save()
+
+    assert path.read_bytes() == before
+    assert [item.name for item in path.parent.iterdir()] == ["cookies.txt"]
+    assert "файл занят" in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="На Windows нет режимов POSIX")
+def test_saved_file_stays_private(jar):
+    loaded, path = jar
+    path.chmod(0o644)
+    loaded.save()
+    assert path.stat().st_mode & 0o777 == 0o600

@@ -28,6 +28,7 @@
 - Обратная связь через `/feedback` или кнопку под ошибкой; обращения доступны в WebUI
 - Блокировка и разблокировка пользователей в карточках WebUI, без перезапуска бота
 - WebUI-дашборд аналитики (FastAPI + Jinja2 + Chart.js)
+- HTTP API для скачивания видео и аудио по ссылке; ключи выдаются, перевыпускаются, получают срок действия и отзываются в WebUI
 - Предложения обновления yt-dlp через scheduled PR с проверкой нового образа
 - Готовность к headless/systemd-развертыванию (`init_env.sh` в качестве `ExecStartPre`)
 - Поддержка Docker
@@ -76,6 +77,7 @@ cp .env.example .secrets/.env
 ```bash
 python main.py     # бот
 python -m web      # дашборд на http://localhost:8080
+python -m api      # HTTP API на http://localhost:8090 (необязательно)
 ```
 
 Прямой запуск `python main.py` использует облачный Bot API с лимитом 50 МБ.
@@ -96,7 +98,8 @@ docker compose --env-file .secrets/.env up -d
 ```
 
 Дашборд будет доступен на `http://localhost:<WEB_PORT>` (по умолчанию 8080).
-Порт локального Bot API наружу не публикуется.
+Порт локального Bot API наружу не публикуется. HTTP API запускается только с
+`--profile api`, подробности в [руководстве по API](docs/guides/api.md).
 
 Подробная настройка Docker (порты, пароли, volumes, cookies) - в [`docs/guides/deployment.md`](docs/guides/deployment.md).
 
@@ -139,6 +142,13 @@ git push origin v1.0.0
 | `WEB_PORT` | нет | `8080` | Порт WebUI-дашборда |
 | `FAIL2BAN_RETRIES` | нет | `5` | Неудачных попыток логина до блокировки IP |
 | `FAIL2BAN_TIME` | нет | `10m` | Время блокировки IP (`10m`, `1h`, `300`) |
+| `API_PORT` | нет | `8090` | Порт HTTP API |
+| `API_DOWNLOAD_WORKERS` | нет | `4` | Одновременных загрузок HTTP API на все ключи |
+| `API_MAX_ACTIVE_JOBS` | нет | `2` | Задач в очереди и в работе на один ключ |
+| `API_RATE_LIMIT_PER_MINUTE` | нет | `120` | Запросов в минуту на один ключ |
+| `API_RESULT_TTL_MINUTES` | нет | `60` | Сколько минут готовый файл доступен для скачивания |
+| `API_MAX_FILE_SIZE_MB` | нет | `2000` | Наибольший файл для HTTP API, не зависит от режима Telegram |
+| `API_STORAGE_LIMIT_MB` | нет | `10000` | Место под готовые файлы HTTP API всех ключей вместе |
 | `LOG_LEVEL` | нет | `INFO` | Уровень логирования |
 | `DOWNLOAD_WORKERS` | нет | `8` | Количество потоков в ThreadPoolExecutor |
 | `BLOCKING_TASK_TIMEOUT` | нет | `600` | Таймаут блокирующих задач (секунды) |
@@ -205,6 +215,7 @@ WEB_SECRET_KEY=a3f8b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1
 - **Swagger/ReDoc и схема OpenAPI** - отключены (`docs_url=None, redoc_url=None, openapi_url=None`), `/openapi.json` отвечает 404
 - **Jinja2** - автоэкранирование HTML по умолчанию, защита от XSS
 - **Ошибки** - не раскрывают внутреннюю структуру БД или стектрейсы пользователю
+- **Ключи HTTP API** хранятся только как SHA-256 и показываются один раз; каждый ключ видит только свои загрузки, а ключ в строке запроса не принимается
 
 ---
 
@@ -360,6 +371,7 @@ Deno и последней проверки YouTube видно в `/admin`.
 - [Архитектура проекта](docs/reference/architecture.md) и [FSM-анализ](docs/reference/fsm-architecture.md)
 - [Руководство по развертыванию](docs/guides/deployment.md)
 - [Справочник по конфигурации](docs/guides/configuration.md)
+- [HTTP API](docs/guides/api.md)
 - [Устранение неполадок](docs/runbooks/common-issues.md)
 - [Коды ошибок](docs/reference/error-codes.md)
 

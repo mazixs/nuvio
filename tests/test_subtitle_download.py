@@ -51,7 +51,7 @@ class FakeYDL:
 
     def prepare_filename(self, info):
         template = str(self.options["outtmpl"])
-        return template.replace("%(title)s", "video").replace("%(ext)s", "mp4")
+        return template.replace("%(title).150B", "video").replace("%(ext)s", "mp4")
 
     def download(self, urls):
         base = Path(self.prepare_filename(self._info))

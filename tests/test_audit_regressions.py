@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,13 +108,32 @@ class _DummyDocument:
         raise AssertionError("get_file must not be called in this test")
 
 
+_NETSCAPE_HEADER = "# Netscape HTTP Cookie File\n"
+_YOUTUBE_SESSION_EXPIRES_AT = 4102444800  # 01.01.2100 00:00 UTC
+
+
+def _youtube_cookies(names, expires=_YOUTUBE_SESSION_EXPIRES_AT):
+    return _NETSCAPE_HEADER + "".join(
+        f".youtube.com\tTRUE\t/\tTRUE\t{expires}\t{name}\tfake-{name}\n" for name in names
+    )
+
+
+_VALID_YOUTUBE_COOKIES = _youtube_cookies(
+    ["SID", "HSID", "SSID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO"]
+)
+
+
 class _DummyTelegramFile:
-    def __init__(self):
+    def __init__(self, content: str = _VALID_YOUTUBE_COOKIES, *, error: Exception | None = None):
+        self.content = content
+        self.error = error
         self.downloaded_to = None
 
     async def download_to_drive(self, file_path):
         self.downloaded_to = file_path
-        Path(file_path).write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        Path(file_path).write_text(self.content, encoding="utf-8")
+        if self.error:
+            raise self.error
 
 
 class _DownloadableDummyDocument(_DummyDocument):
@@ -1249,7 +1269,7 @@ def test_handle_main_callback_reroutes_instagram_photo_exception_to_asset_sender
         called.append(args)
 
     def fake_download_instagram_video(*args, **kwargs):
-        raise Exception(
+        raise tiktok_instagram_utils.PhotoPostError(
             "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
         )
 
@@ -1476,32 +1496,191 @@ def test_admin_document_upload_requires_armed_mode(monkeypatch):
     assert document.get_file_called is False
 
 
-def test_admin_cookie_upload_renames_txt_to_expected_file(monkeypatch, tmp_path):
-    telegram_file = _DummyTelegramFile()
-    document = _DownloadableDummyDocument("youtube-cookies-export.txt", telegram_file)
-    message = _DummyMessage("")
-    message.document = document
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=1),
-        message=message,
-    )
-    context = SimpleNamespace(
-        user_data={
-            cookie_manager.ADMIN_UPLOAD_TARGET_KEY: "www.youtube.com_cookies.txt"
-        }
-    )
+@pytest.fixture
+def cookie_upload(monkeypatch, tmp_path):
+    """Админская загрузка без сети: живая проверка настоящая, кроме запроса к платформе."""
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    target = secrets_dir / "www.youtube.com_cookies.txt"
+    probe = SimpleNamespace(status="valid", calls=[])
 
+    def fake_probe(platform, path):
+        probe.calls.append(path)
+        return probe.status
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(cookie_manager, "ADMIN_IDS", [1])
-    monkeypatch.setattr(cookie_manager, "SECRETS_DIR", tmp_path)
+    monkeypatch.setattr(cookie_manager, "SECRETS_DIR", secrets_dir)
+    monkeypatch.setitem(cookie_health.COOKIE_PATHS, "youtube", target)
+    monkeypatch.setattr(cookie_health, "_probe_authenticated_session", fake_probe)
+    cookie_health._COOKIE_HEALTH_CACHE.clear()
 
-    asyncio.run(cookie_manager.handle_document_upload(update, context))
+    def upload(telegram_file, context=None):
+        message = _DummyMessage("")
+        message.document = _DownloadableDummyDocument("export.txt", telegram_file)
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=1), message=message)
+        context = context or SimpleNamespace(
+            user_data={cookie_manager.ADMIN_UPLOAD_TARGET_KEY: target.name}
+        )
+        asyncio.run(cookie_manager.handle_document_upload(update, context))
+        return message, context
 
-    expected_path = tmp_path / "www.youtube.com_cookies.txt"
-    assert document.get_file_called is True
-    assert telegram_file.downloaded_to == expected_path
-    assert expected_path.exists()
+    yield SimpleNamespace(
+        target=target,
+        secrets_dir=secrets_dir,
+        upload=upload,
+        probe=probe,
+        work_dir=tmp_path / "data" / "cookie-work",
+    )
+    cookie_health._COOKIE_HEALTH_CACHE.clear()
+
+
+def test_admin_cookie_upload_renames_txt_to_expected_file(cookie_upload):
+    telegram_file = _DummyTelegramFile()
+
+    message, context = cookie_upload.upload(telegram_file)
+
+    assert telegram_file.downloaded_to != cookie_upload.target
+    assert telegram_file.downloaded_to.parent == cookie_upload.secrets_dir
+    assert cookie_upload.target.read_text(encoding="utf-8") == _VALID_YOUTUBE_COOKIES
     assert cookie_manager.ADMIN_UPLOAD_TARGET_KEY not in context.user_data
-    assert "сохранены как www.youtube.com_cookies.txt" in message.replies[-2]
+    assert "сохранены как www.youtube.com_cookies.txt" in message.replies[0]
+    assert "✅ YouTube: сессионные cookies на месте, тестовое видео извлечено" in message.replies[1]
+    assert "Сессия до 01.01.2100" in message.replies[1]
+    assert "Статус файлов cookies:" in message.replies[2]
+    assert [item.name for item in cookie_upload.secrets_dir.iterdir()] == [
+        cookie_upload.target.name
+    ]
+
+
+def test_successful_upload_recreates_the_working_copy(cookie_upload):
+    cookie_upload.upload(_DummyTelegramFile())
+
+    copies = list(cookie_upload.work_dir.iterdir())
+    assert [copy.read_text(encoding="utf-8") for copy in copies] == [_VALID_YOUTUBE_COOKIES]
+    assert cookie_upload.probe.calls == copies
+
+
+@pytest.mark.skipif(os.name == "nt", reason="На Windows нет режимов POSIX")
+def test_uploaded_cookie_file_is_private(cookie_upload):
+    seen_modes = []
+
+    class SpyFile(_DummyTelegramFile):
+        async def download_to_drive(self, file_path):
+            seen_modes.append(Path(file_path).stat().st_mode & 0o777)
+            await super().download_to_drive(file_path)
+
+    cookie_upload.upload(SpyFile())
+
+    assert seen_modes == [0o600]
+    assert cookie_upload.target.stat().st_mode & 0o777 == 0o600
+
+
+def test_reupload_of_same_file_restores_eroded_working_copy(cookie_upload):
+    """Имя копии зависит от хэша оригинала, поэтому без пересоздания вернулась бы она же."""
+    cookie_upload.upload(_DummyTelegramFile())
+    copy = next(cookie_upload.work_dir.iterdir())
+    copy.write_text(_youtube_cookies(["__Secure-3PSID"]), encoding="utf-8")
+    assert cookie_health.check_cookie_health("youtube", force=True).status == "degraded"
+
+    message, _context = cookie_upload.upload(_DummyTelegramFile())
+
+    assert list(cookie_upload.work_dir.iterdir()) == [copy]
+    assert copy.read_text(encoding="utf-8") == _VALID_YOUTUBE_COOKIES
+    assert "✅ YouTube" in message.replies[1]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        ("not a cookie file\n", "нет заголовка Netscape"),
+        (_NETSCAPE_HEADER, "записи cookies не найдены"),
+        (_NETSCAPE_HEADER + "broken-row\n", "строка 2 не похожа на запись cookies"),
+        (
+            _NETSCAPE_HEADER + ".youtube.com\tTRUE\t/\tTRUE\tsoon\tSID\tfake\n",
+            "неверный срок действия cookie в строке 2",
+        ),
+        (_youtube_cookies(["SID", "LOGIN_INFO"], expires=1), "всех cookies авторизации истёк"),
+        (_youtube_cookies(["__Secure-3PSID"]), "часть cookies авторизации потеряна"),
+    ],
+)
+def test_rejected_upload_keeps_old_file_and_upload_mode(cookie_upload, content, reason):
+    old_content = _youtube_cookies(["SID", "HSID", "SSID", "LOGIN_INFO"])
+    cookie_upload.target.write_text(old_content, encoding="utf-8")
+
+    message, context = cookie_upload.upload(_DummyTelegramFile(content))
+
+    assert cookie_upload.target.read_text(encoding="utf-8") == old_content
+    assert context.user_data[cookie_manager.ADMIN_UPLOAD_TARGET_KEY] == cookie_upload.target.name
+    assert len(message.replies) == 1
+    assert reason in message.replies[0]
+    assert "Режим загрузки всё ещё включён" in message.replies[0]
+    assert "fake" not in message.replies[0]
+    assert "reply_markup" in message.reply_calls[0][1]
+    assert cookie_upload.probe.calls == []
+    assert [item.name for item in cookie_upload.secrets_dir.iterdir()] == [
+        cookie_upload.target.name
+    ]
+
+
+def test_upload_mode_survives_rejection_for_the_next_file(cookie_upload):
+    _message, context = cookie_upload.upload(_DummyTelegramFile("not a cookie file\n"))
+
+    message, context = cookie_upload.upload(_DummyTelegramFile(), context)
+
+    assert cookie_upload.target.read_text(encoding="utf-8") == _VALID_YOUTUBE_COOKIES
+    assert cookie_manager.ADMIN_UPLOAD_TARGET_KEY not in context.user_data
+    assert "сохранены как" in message.replies[0]
+
+
+def test_failed_download_keeps_old_file_and_leaves_no_temporary(cookie_upload):
+    cookie_upload.target.write_text("# прежний файл\n", encoding="utf-8")
+
+    message, context = cookie_upload.upload(
+        _DummyTelegramFile("# обрыв", error=OSError("сеть пропала"))
+    )
+
+    assert cookie_upload.target.read_text(encoding="utf-8") == "# прежний файл\n"
+    assert context.user_data[cookie_manager.ADMIN_UPLOAD_TARGET_KEY] == cookie_upload.target.name
+    assert "ошибка при сохранении файла" in message.replies[0]
+    assert [item.name for item in cookie_upload.secrets_dir.iterdir()] == [
+        cookie_upload.target.name
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "summary"),
+    [
+        ("stale", "cookies есть, но тест авторизации не прошёл"),
+        ("rate_limited", "платформа временно ограничила запросы проверки"),
+        ("probe_failed", "cookies активны, но сетевой тест не завершился"),
+    ],
+)
+def test_failed_live_check_does_not_roll_back_upload(cookie_upload, status, summary):
+    cookie_upload.target.write_text("# прежний файл\n", encoding="utf-8")
+    cookie_upload.probe.status = status
+
+    message, context = cookie_upload.upload(_DummyTelegramFile())
+
+    assert cookie_upload.target.read_text(encoding="utf-8") == _VALID_YOUTUBE_COOKIES
+    assert cookie_manager.ADMIN_UPLOAD_TARGET_KEY not in context.user_data
+    assert "сохранены как" in message.replies[0]
+    assert f"⚠️ YouTube: {summary}" in message.replies[1]
+    assert "Файл уже сохранён" in message.replies[1]
+
+
+def test_live_check_crash_is_not_reported_as_a_failed_save(cookie_upload, monkeypatch):
+    def crash(platform, *, force):
+        raise RuntimeError("сбой проверки")
+
+    monkeypatch.setattr(cookie_manager, "check_cookie_health", crash)
+
+    message, _context = cookie_upload.upload(_DummyTelegramFile())
+
+    assert cookie_upload.target.read_text(encoding="utf-8") == _VALID_YOUTUBE_COOKIES
+    assert "файл сохранён, но проверка не завершилась" in message.replies[1]
+    assert not any("ошибка при сохранении" in reply for reply in message.replies)
+    assert "Статус файлов cookies:" in message.replies[-1]
 
 
 def test_admin_cookie_upload_rejects_non_txt_name(monkeypatch):
@@ -1578,6 +1757,7 @@ def test_cookie_health_detects_expired_auth_cookie(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setitem(cookie_health.COOKIE_PATHS, "youtube", cookie_file)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     cookie_health._COOKIE_HEALTH_CACHE.clear()
 
     result = cookie_health.check_cookie_health("youtube", force=True)
@@ -1589,12 +1769,11 @@ def test_admin_callback_runs_cookie_health_check(monkeypatch):
     query = _DummyQuery("admin|cookies|check", user_id=1)
     update = SimpleNamespace(callback_query=query)
     context = SimpleNamespace(user_data={})
+    calls = []
 
-    monkeypatch.setattr(cookie_manager, "ADMIN_IDS", [1])
-    monkeypatch.setattr(
-        cookie_manager,
-        "check_all_cookie_health",
-        lambda: {
+    def fake_check(**kwargs):
+        calls.append(kwargs)
+        return {
             "youtube": cookie_health.CookieHealthResult(
                 "youtube", "valid", "probe ok", 0.0, 3, 3
             ),
@@ -1609,13 +1788,103 @@ def test_admin_callback_runs_cookie_health_check(monkeypatch):
                 2,
                 2,
             ),
-        },
-    )
+        }
+
+    monkeypatch.setattr(cookie_manager, "ADMIN_IDS", [1])
+    monkeypatch.setattr(cookie_manager, "check_all_cookie_health", fake_check)
 
     asyncio.run(cookie_manager.handle_admin_callback(update, context))
 
+    assert calls == [{"force": True}]
     assert "Проверка здоровья cookies" in query.edits[-1][0]
     assert "YouTube: активны — probe ok" in query.edits[-1][0]
+
+
+def _health_results(**overrides):
+    results = {
+        platform: cookie_health.CookieHealthResult(
+            platform, "valid", "auth cookies are active and probe succeeded", 0.0, 2, 2
+        )
+        for platform in ("youtube", "instagram", "tiktok")
+    }
+    results.update(overrides)
+    return results
+
+
+@pytest.mark.parametrize(
+    ("summary", "translated"),
+    [
+        ("session cookies are expired", "срок действия сессионных cookies истёк"),
+        (
+            "session cookies are present and the test video was extracted",
+            "сессионные cookies на месте, тестовое видео извлечено",
+        ),
+        ("auth cookies are active", "cookies авторизации активны"),
+        ("Cookie file has no Netscape header", "нет заголовка Netscape"),
+        (
+            "Invalid Netscape cookie row at line 17",
+            "строка 17 не похожа на запись cookies в формате Netscape",
+        ),
+        (
+            "Invalid cookie expiration value at line 42",
+            "неверный срок действия cookie в строке 42",
+        ),
+    ],
+)
+def test_cookie_health_text_translates_summaries(summary, translated):
+    result = cookie_health.CookieHealthResult("youtube", "invalid_format", summary, 0.0, 0, 0)
+
+    text = cookie_manager._build_cookie_health_text(_health_results(youtube=result))
+
+    assert f"YouTube: неверный формат — {translated}" in text
+    assert summary not in text
+
+
+def test_cookie_health_text_keeps_unknown_summary_visible():
+    result = cookie_health.CookieHealthResult("youtube", "valid", "probe at line 3", 0.0, 2, 2)
+
+    text = cookie_manager._build_cookie_health_text(_health_results(youtube=result))
+
+    assert "YouTube: активны — probe at line 3" in text
+
+
+def test_cookie_health_text_no_longer_knows_removed_status():
+    import inspect
+
+    assert "not_supported" not in inspect.getsource(cookie_manager._build_cookie_health_text)
+
+
+@pytest.mark.parametrize(
+    ("expires_at", "date"),
+    [
+        # По обе стороны полуночи UTC: при любом ненулевом смещении местное время
+        # хотя бы в одном из случаев дало бы другую дату.
+        (1898551800, "28.02.2030"),
+        (1898551800 + 3600, "01.03.2030"),
+    ],
+)
+def test_cookie_health_text_shows_session_date_in_utc(expires_at, date):
+    result = cookie_health.CookieHealthResult(
+        "tiktok", "valid", "auth cookies are active and probe succeeded", 0.0, 2, 2,
+        session_expires_at=expires_at,
+    )
+
+    text = cookie_manager._build_cookie_health_text(_health_results(tiktok=result))
+
+    assert f"Сессия до {date}" in text
+    assert text.count("Сессия до") == 1
+
+
+def test_cookie_health_text_survives_absurd_session_date():
+    """Срок берётся из файла как есть: экспорт в миллисекундах не должен ронять панель."""
+    result = cookie_health.CookieHealthResult(
+        "tiktok", "valid", "auth cookies are active and probe succeeded", 0.0, 2, 2,
+        session_expires_at=10**18,
+    )
+
+    text = cookie_manager._build_cookie_health_text(_health_results(tiktok=result))
+
+    assert "Сессия до неизвестной даты" in text
 
 
 def test_admin_broadcast_sends_text_to_all_known_users(monkeypatch):

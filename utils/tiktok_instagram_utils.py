@@ -5,6 +5,7 @@
 import json
 import mimetypes
 import re
+import subprocess
 import threading
 import time
 from html import unescape
@@ -23,8 +24,11 @@ from utils.cookie_workfile import working_cookie_file
 from utils.download_report import record_delivered_format
 from utils.logger import setup_logger
 from utils.temp_file_manager import get_temp_file_path
+from utils import work_budget
 from utils.ytdlp_common import (
+    OUTPUT_FILENAME_TEMPLATE,
     FileSizeLimitError,
+    apply_work_limits,
     finalize_downloaded_file,
     output_capture_opts,
 )
@@ -43,6 +47,7 @@ from utils.url_delivery import (
     plan_url_handoff,
 )
 from config import (
+    BLOCKING_TASK_TIMEOUT,
     INSTAGRAM_COOKIES_PATH,
     INSTAGRAM_FAST_PATH,
     MAX_FILE_SIZE,
@@ -214,6 +219,10 @@ class PhotoPostAudioMissingError(Exception):
     """У фото-поста нет отдельной аудиодорожки."""
 
 
+class PhotoPostError(Exception):
+    """Публикация — фото-пост: её отправляют набором изображений, а не видео."""
+
+
 class CriticalExtractorError(Exception):
     """Критическая ошибка экстрактора (блокировка, приватный контент, необходимость авторизации)."""
 
@@ -229,6 +238,20 @@ def is_valid_tiktok_url(url: str) -> bool:
 def is_tiktok_photo_url(url: str) -> bool:
     """Проверяет, указывает ли ссылка на TikTok-фото-пост."""
     return "/photo/" in (url or "").lower()
+
+
+def is_photo_post_error(error: BaseException) -> bool:
+    """Загрузчик видео отказался, потому что публикация — фото-пост.
+
+    Бот по этому признаку отправляет изображения, а HTTP API отвечает, что
+    ссылка не на видео.
+    """
+    return isinstance(error, PhotoPostError)
+
+
+def resolve_tiktok_url(url: str) -> str:
+    """Конечный адрес короткой TikTok-ссылки; при сбое сети — она же."""
+    return _resolve_tiktok_url(url)
 
 
 def is_valid_instagram_url(url: str) -> bool:
@@ -267,7 +290,11 @@ def _smart_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             return func()
+        except FileSizeLimitError:
+            raise
         except Exception as e:
+            # Срок мог кончиться внутри yt-dlp, а он прячет его в DownloadError.
+            work_budget.check()
             last_exception = e
             error_msg = str(e).lower()
 
@@ -278,7 +305,7 @@ def _smart_retry(
                     logger.warning(
                         f"{context} - Rate-limit обнаружен, ожидание {delay}s перед попыткой {attempt + 1}/{max_attempts}"
                     )
-                    time.sleep(delay)
+                    work_budget.pause(delay)
                     continue
             # SSL/EOF ошибки — не retry, сразу пробрасываем (вызывающий код перейдёт к след. конфигурации)
             elif "ssl" in error_msg or "unexpected eof" in error_msg:
@@ -640,12 +667,13 @@ def _download_remote_file(
                 )
 
         # Проверяем Content-Length перед скачиванием
+        size_limit = work_budget.size_limit(MAX_FILE_SIZE)
         content_length_str = response.headers.get("content-length")
         if content_length_str:
             try:
-                if int(content_length_str) > MAX_FILE_SIZE:
+                if int(content_length_str) > size_limit:
                     raise ValueError(
-                        f"Размер удаленного файла превышает лимит в {MAX_FILE_SIZE // 1024 // 1024} МБ."
+                        f"Размер удаленного файла превышает лимит в {size_limit // 1024 // 1024} МБ."
                     )
             except ValueError as val_err:
                 if "превышает лимит" in str(val_err):
@@ -655,14 +683,18 @@ def _download_remote_file(
         try:
             with destination.open("wb") as file:
                 for chunk in response.iter_bytes():
+                    # Быстрый путь идёт мимо progress hooks yt-dlp: без этой
+                    # проверки ни отмена, ни общий срок задачи его не прерывали.
+                    work_budget.check()
                     if chunk:
                         total_downloaded += len(chunk)
-                        if total_downloaded > MAX_FILE_SIZE:
+                        if total_downloaded > size_limit:
                             raise ValueError(
-                                f"Размер скачанного удаленного файла превысил лимит в {MAX_FILE_SIZE // 1024 // 1024} МБ."
+                                f"Размер скачанного удаленного файла превысил лимит в {size_limit // 1024 // 1024} МБ."
                             )
                         file.write(chunk)
-        except Exception:
+        except BaseException:
+            # BaseException: отмена (`CancelledByUser`) тоже не оставляет обрывок.
             if destination.exists():
                 destination.unlink()
             raise
@@ -2267,7 +2299,7 @@ def download_tiktok_video(
 
     resolved_url = _resolve_tiktok_url(url)
     if _is_tiktok_photo_post_info(cached_info) or is_tiktok_photo_url(resolved_url):
-        raise Exception(
+        raise PhotoPostError(
             "TikTok фото-пост нужно отправлять как набор изображений и отдельное аудио."
         )
 
@@ -2291,16 +2323,17 @@ def download_tiktok_video(
     # Предварительная проверка известного размера до скачивания через yt-dlp.
     if cached_info and not force_local:
         filesize = cached_info.get("filesize") or cached_info.get("filesize_approx", 0)
-        if filesize and filesize > MAX_FILE_SIZE:
+        size_limit = work_budget.size_limit(MAX_FILE_SIZE)
+        if filesize and filesize > size_limit:
             raise FileSizeLimitError(
                 f"Файл превышает допустимый размер "
-                f"{MAX_FILE_SIZE // 1024 // 1024} МБ"
+                f"{size_limit // 1024 // 1024} МБ"
             )
 
     if output_dir is None:
-        output_path_template = get_temp_file_path(session_id, "%(title)s.%(ext)s")
+        output_path_template = get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
     else:
-        output_path_template = output_dir / "%(title)s.%(ext)s"
+        output_path_template = output_dir / OUTPUT_FILENAME_TEMPLATE
 
     def _download_with_config(use_cookies: bool, config: dict) -> Path | str:
         """Внутренняя функция для скачивания"""
@@ -2308,6 +2341,7 @@ def download_tiktok_video(
         meta_opts = config.copy()
         meta_opts["quiet"] = True
         meta_opts.update(output_capture_opts(session_id))
+        apply_work_limits(meta_opts, session_id)
         meta_cookiefile = _tiktok_cookiefile(use_cookies)
         if meta_cookiefile:
             meta_opts["cookiefile"] = meta_cookiefile
@@ -2353,6 +2387,7 @@ def download_tiktok_video(
             opts["merge_output_format"] = "mp4"
             opts["quiet"] = False
             opts.update(output_capture_opts(session_id))
+            apply_work_limits(opts, session_id)
 
             download_cookiefile = _tiktok_cookiefile(use_cookies)
             if download_cookiefile:
@@ -2423,9 +2458,10 @@ def download_tiktok_video(
                         max_attempts=2,
                         context=f"TikTok download (config {attempt}, с cookies)",
                     )
-                except (CriticalExtractorError, RateLimitError):
+                except (CriticalExtractorError, RateLimitError, FileSizeLimitError):
                     raise
                 except Exception as e:
+                    work_budget.check()
                     logger.warning(f"Конфигурация {attempt} с cookies неудачна: {e}")
 
             # Затем без cookies
@@ -2437,12 +2473,13 @@ def download_tiktok_video(
                 max_attempts=2,
                 context=f"TikTok download (config {attempt}, без cookies)",
             )
-        except (CriticalExtractorError, RateLimitError) as e:
+        except (CriticalExtractorError, RateLimitError, FileSizeLimitError) as e:
             logger.error(
                 f"Прерываем обход конфигураций из-за критической ошибки при скачивании: {e}"
             )
             raise
         except Exception as e:
+            work_budget.check()
             logger.warning(f"Конфигурация {attempt} неудачна: {e}")
             if attempt == len(configurations):
                 raise Exception(
@@ -2465,7 +2502,7 @@ def download_instagram_video(
     if _is_instagram_photo_post_info(
         cached_info
     ) or _is_instagram_empty_playlist_result(cached_info):
-        raise Exception(
+        raise PhotoPostError(
             "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
         )
 
@@ -2483,9 +2520,9 @@ def download_instagram_video(
             )
 
     if output_dir is None:
-        output_path_template = get_temp_file_path(session_id, "%(title)s.%(ext)s")
+        output_path_template = get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
     else:
-        output_path_template = output_dir / "%(title)s.%(ext)s"
+        output_path_template = output_dir / OUTPUT_FILENAME_TEMPLATE
 
     def _download(use_cookies: bool) -> Path | str:
         """Внутренняя функция для скачивания с/без cookies"""
@@ -2512,6 +2549,7 @@ def download_instagram_video(
                 "Sec-Fetch-Site": "none",
             },
         }
+        apply_work_limits(ydl_opts, session_id)
 
         download_cookiefile = _instagram_cookiefile(use_cookies)
         if download_cookiefile:
@@ -2525,7 +2563,7 @@ def download_instagram_video(
 
             # Для stories и плейлистов yt-dlp может вернуть entries
             if _is_instagram_empty_playlist_result(info):
-                raise Exception(
+                raise PhotoPostError(
                     "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
                 )
             actual_info = info
@@ -2585,11 +2623,14 @@ def download_instagram_video(
     try:
         logger.info("Пробуем скачать Instagram видео без cookies.")
         return _download(False)
+    except FileSizeLimitError:
+        raise
     except Exception as e:
+        work_budget.check()
         error_msg = str(e).lower()
         logger.warning(f"Ошибка скачивания без cookies: {e}")
         if _is_instagram_no_video_error(error_msg):
-            raise Exception(
+            raise PhotoPostError(
                 "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
             ) from e
 
@@ -2609,9 +2650,12 @@ def download_instagram_video(
                 try:
                     logger.info("Пробуем скачать с cookies файлом...")
                     return _download(True)
+                except FileSizeLimitError:
+                    raise
                 except Exception as e_cookie:
+                    work_budget.check()
                     if _is_instagram_no_video_error(str(e_cookie)):
-                        raise Exception(
+                        raise PhotoPostError(
                             "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
                         ) from e_cookie
                     logger.error(f"Ошибка скачивания даже с cookies: {e_cookie}")
@@ -2642,7 +2686,7 @@ def download_instagram_video(
                     return _download(True)
                 except Exception as e_cookie:
                     if _is_instagram_no_video_error(str(e_cookie)):
-                        raise Exception(
+                        raise PhotoPostError(
                             "Instagram фото-пост нужно отправлять как набор изображений и отдельное аудио."
                         ) from e_cookie
                     logger.error(f"Ошибка скачивания даже с cookies: {e_cookie}")
@@ -2766,9 +2810,9 @@ def download_tiktok_audio(
             )
 
     if output_dir is None:
-        output_path_template = get_temp_file_path(session_id, "%(title)s.%(ext)s")
+        output_path_template = get_temp_file_path(session_id, OUTPUT_FILENAME_TEMPLATE)
     else:
-        output_path_template = output_dir / "%(title)s.%(ext)s"
+        output_path_template = output_dir / OUTPUT_FILENAME_TEMPLATE
 
     def _download_audio_with_config(use_cookies: bool, config: dict) -> Path | str:
         """Скачивание аудио с указанной конфигурацией"""
@@ -2776,6 +2820,7 @@ def download_tiktok_audio(
         meta_opts = config.copy()
         meta_opts["quiet"] = True
         meta_opts.update(output_capture_opts(session_id))
+        apply_work_limits(meta_opts, session_id)
         meta_cookiefile = _tiktok_cookiefile(use_cookies)
         if meta_cookiefile:
             meta_opts["cookiefile"] = meta_cookiefile
@@ -2819,6 +2864,7 @@ def download_tiktok_audio(
             ]
             opts["quiet"] = False
             opts.update(output_capture_opts(session_id))
+            apply_work_limits(opts, session_id)
 
             download_cookiefile = _tiktok_cookiefile(use_cookies)
             if download_cookiefile:
@@ -2881,9 +2927,10 @@ def download_tiktok_audio(
                         max_attempts=2,
                         context=f"TikTok audio M4A (config {attempt}, с cookies)",
                     )
-                except (CriticalExtractorError, RateLimitError):
+                except (CriticalExtractorError, RateLimitError, FileSizeLimitError):
                     raise
                 except Exception as e:
+                    work_budget.check()
                     logger.warning(f"Конфигурация {attempt} с cookies неудачна: {e}")
 
             # Затем без cookies
@@ -2895,12 +2942,13 @@ def download_tiktok_audio(
                 max_attempts=2,
                 context=f"TikTok audio M4A (config {attempt}, без cookies)",
             )
-        except (CriticalExtractorError, RateLimitError) as e:
+        except (CriticalExtractorError, RateLimitError, FileSizeLimitError) as e:
             logger.error(
                 f"Прерываем обход конфигураций из-за критической ошибки при скачивании аудио: {e}"
             )
             raise
         except Exception as e:
+            work_budget.check()
             logger.warning(f"Конфигурация {attempt} неудачна: {e}")
             if attempt == len(configurations):
                 raise Exception(
@@ -2909,6 +2957,20 @@ def download_tiktok_audio(
             continue
 
     raise Exception("Не удалось скачать TikTok аудио")
+
+
+def _run_ffmpeg(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Запускает FFmpeg так, чтобы его останавливали отмена и общий срок работы."""
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        stdout, stderr = work_budget.communicate(process, timeout=BLOCKING_TASK_TIMEOUT)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.communicate()
+        raise TimeoutError("FFmpeg превысил лимит времени") from error
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def download_instagram_audio(
@@ -2931,8 +2993,6 @@ def download_instagram_audio(
     Returns:
         Path: Путь к локальному M4A-файлу.
     """
-    import subprocess
-
     logger.info(f"Скачивание нативного аудио (M4A) из Instagram: {url}")
 
     if _is_instagram_photo_post_info(
@@ -2973,7 +3033,7 @@ def download_instagram_audio(
             str(audio_path_m4a),
         ]
 
-        result = subprocess.run(cmd_copy, capture_output=True, text=True)
+        result = _run_ffmpeg(cmd_copy)
 
         # Если copy не сработал (не AAC кодек), конвертируем в AAC
         if result.returncode != 0:
@@ -2993,7 +3053,7 @@ def download_instagram_audio(
                 str(audio_path_m4a),
             ]
 
-            result_convert = subprocess.run(cmd_convert, capture_output=True, text=True)
+            result_convert = _run_ffmpeg(cmd_convert)
 
             if result_convert.returncode != 0:
                 logger.error(f"Ошибка конвертации в AAC: {result_convert.stderr}")
@@ -3012,7 +3072,7 @@ def download_instagram_audio(
                     "-y",
                     str(audio_path_mp3),
                 ]
-                result_mp3 = subprocess.run(cmd_mp3, capture_output=True, text=True)
+                result_mp3 = _run_ffmpeg(cmd_mp3)
                 if result_mp3.returncode != 0:
                     raise Exception(
                         f"Не удалось извлечь аудио даже в MP3: {result_mp3.stderr}"

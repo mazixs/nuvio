@@ -55,6 +55,7 @@ A bot token cannot be used through the cloud and local Bot APIs at the same time
 | `telegram-bot-api` | Local Telegram Bot API in `--local` mode | Not published |
 | `bot` | Download, processing, and delivery | Not published |
 | `web` | Analytics dashboard | `${WEB_PORT:-8080}` |
+| `api` | HTTP API for downloads by link; starts only with `--profile api` | `${API_PORT:-8090}` |
 
 The bot and local Bot API share `/app/media`. The bot passes an absolute file path, so a large file does not need to be uploaded to an external intermediate store.
 
@@ -85,6 +86,8 @@ docker compose --env-file .secrets/.env logs -f bot telegram-bot-api
 ```
 
 The WebUI is at `http://<server-address>:<WEB_PORT>`. It opens in English by default and offers a Russian language switch.
+
+To run the HTTP API as well, add the profile: `docker compose --env-file .secrets/.env --profile api up -d`. Publish its port only through an HTTPS reverse proxy; the [HTTP API guide](api.md) covers keys, limits, and proxy settings.
 
 ## Update and rollback
 

@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}{{ t('API keys') }}{% endblock %}
+{% block nav_api_keys %}active{% endblock %}
+{% macro moment(value) %}{% if value %}<time datetime="{{ value }}">{{ value[:16] | replace('T', ' ') }} UTC</time>{% else %}-{% endif %}{% endmacro %}
+{% macro expiry_fields(prefix, selected) %}
+<div class="form-group">
+    <label for="{{ prefix }}-expiry">{{ t('Expires') }}</label>
+    <select id="{{ prefix }}-expiry" name="expiry" data-expiry-choice>
+        {% for days in expiry_presets %}
+        <option value="{{ days }}" {% if days == selected %}selected{% endif %}>{{ t('In {days} days', days=days) }}</option>
+        {% endfor %}
+        <option value="custom">{{ t('On a date') }}</option>
+        <option value="never">{{ t('No expiry') }}</option>
+    </select>
+</div>
+<div class="form-group" data-expiry-date>
+    <label for="{{ prefix }}-expiry-date">{{ t('Expiry date (UTC)') }}</label>
+    <input type="date" id="{{ prefix }}-expiry-date" name="expiry_date" min="{{ today }}">
+</div>
+{% endmacro %}
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>{{ t('API keys') }}</h1>
+        <p class="subtitle">{{ t('Keys let external clients download video and audio by link through the HTTP API.') }}</p>
+    </div>
+</div>
+
+{% if notice %}<div class="alert alert-success" role="status">{{ notice }}</div>{% endif %}
+{% if error %}<div class="alert alert-error" role="alert">{{ error }}</div>{% endif %}
+
+{% if revealed %}
+<section class="api-key-reveal" aria-labelledby="reveal-title">
+    <h2 id="reveal-title">{{ t('Your new key') }}</h2>
+    <p>{{ t('This is the only time the key is shown. Nuvio keeps only its hash, so a lost key can only be rotated.') }}</p>
+    <div class="api-key-secret">
+        <code id="revealed-key">{{ revealed.key }}</code>
+        <button type="button" class="btn" data-copy="revealed-key" data-copied="{{ t('Copied') }}">{{ t('Copy') }}</button>
+    </div>
+</section>
+{% endif %}
+
+<section class="moderation-section" aria-labelledby="create-title">
+    <h2 id="create-title">{{ t('Create a key') }}</h2>
+    <form method="POST" action="/api-keys" class="api-key-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+            <label for="key-name">{{ t('Key name') }}</label>
+            <input type="text" id="key-name" name="name" maxlength="{{ name_max_length }}" required autocomplete="off"
+                   placeholder="{{ t('Client or integration') }}">
+        </div>
+        {{ expiry_fields('create', default_expiry) }}
+        <button type="submit" class="btn btn-primary">{{ t('Create key') }}</button>
+    </form>
+</section>
+
+<section class="moderation-section" aria-labelledby="keys-title">
+    <h2 id="keys-title">{{ t('Issued keys') }}</h2>
+    {% for key in keys %}
+    <article class="api-key-entry" aria-labelledby="key-{{ key.id }}-name">
+        <header class="api-key-head">
+            <h3 id="key-{{ key.id }}-name">{{ key.name }}</h3>
+            <code>{{ key.prefix }}…</code>
+            {% if key.status == 'active' %}<span class="badge badge-active">{{ t('Active') }}</span>
+            {% elif key.status == 'expired' %}<span class="badge badge-warn">{{ t('Expired') }}</span>
+            {% else %}<span class="badge badge-danger">{{ t('Revoked') }}</span>{% endif %}
+        </header>
+        <dl class="api-key-meta">
+            <div><dt>{{ t('Created') }}</dt><dd>{{ moment(key.created_at) }}</dd></div>
+            <div><dt>{{ t('Expires') }}</dt><dd>{% if key.expires_at %}{{ moment(key.expires_at) }}{% else %}{{ t('No expiry') }}{% endif %}</dd></div>
+            <div><dt>{{ t('Last used') }}</dt><dd>{% if key.last_used_at %}{{ moment(key.last_used_at) }}{% else %}{{ t('Not used yet') }}{% endif %}</dd></div>
+            <div><dt>{{ t('Downloads') }}</dt><dd>{{ key.downloads_total }}</dd></div>
+            {% if key.rotated_at %}<div><dt>{{ t('Rotated') }}</dt><dd>{{ moment(key.rotated_at) }}</dd></div>{% endif %}
+            {% if key.revoked_at %}<div><dt>{{ t('Revoked') }}</dt><dd>{{ moment(key.revoked_at) }}</dd></div>{% endif %}
+        </dl>
+        {% if key.grace_until %}
+        <p class="subtitle">{{ t('The previous key also works until') }} {{ moment(key.grace_until) }}.</p>
+        {% endif %}
+
+        {% if key.status == 'revoked' %}
+        <form method="POST" action="/api-keys/{{ key.id }}/delete" class="api-key-action"
+              data-confirm="{{ t('Delete this key and its history?') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-danger">{{ t('Delete') }}</button>
+        </form>
+        {% else %}
+        <div class="api-key-actions">
+            <form method="POST" action="/api-keys/{{ key.id }}/expiry" class="api-key-action">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ expiry_fields('key-' ~ key.id, default_expiry) }}
+                <button type="submit" class="btn">{{ t('Change expiry') }}</button>
+            </form>
+            <form method="POST" action="/api-keys/{{ key.id }}/rotate" class="api-key-action"
+                  data-confirm="{{ t('Issue a new key? Clients must switch to it.') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-group">
+                    <label for="key-{{ key.id }}-grace">{{ t('Grace period for the old key') }}</label>
+                    <select id="key-{{ key.id }}-grace" name="grace_hours">
+                        {% for hours in grace_hours %}
+                        <option value="{{ hours }}">{% if hours == 0 %}{{ t('None, stop at once') }}{% elif hours % 24 == 0 %}{{ t('{days} d', days=hours // 24) }}{% else %}{{ t('{hours} h', hours=hours) }}{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit" class="btn">{{ t('Rotate') }}</button>
+            </form>
+            <form method="POST" action="/api-keys/{{ key.id }}/revoke" class="api-key-action"
+                  data-confirm="{{ t('Revoke this key? Requests with it will be rejected immediately.') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-danger">{{ t('Revoke') }}</button>
+            </form>
+        </div>
+        {% endif %}
+    </article>
+    {% else %}
+    <p class="empty">{{ t('No API keys yet') }}</p>
+    {% endfor %}
+</section>
+
+{% set base_url = request.url.scheme ~ '://' ~ request.url.hostname ~ ':' ~ api_port %}
+<section class="moderation-section" aria-labelledby="usage-title">
+    <h2 id="usage-title">{{ t('Usage') }}</h2>
+    <p>{{ t('The API listens on port {port}. Publish it through an HTTPS reverse proxy: a key sent over plain HTTP can be intercepted.', port=api_port) }}</p>
+    <p>{{ t('Interactive reference:') }} <code>{{ base_url }}/api/docs</code></p>
+    <pre class="api-key-example"><code>curl -X POST {{ base_url }}/api/v1/downloads \
+  -H "Authorization: Bearer $NUVIO_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://youtu.be/VIDEO_ID", "type": "audio"}'
+
+curl {{ base_url }}/api/v1/downloads/JOB_ID \
+  -H "Authorization: Bearer $NUVIO_API_KEY"
+
+curl -OJ {{ base_url }}/api/v1/downloads/JOB_ID/file \
+  -H "Authorization: Bearer $NUVIO_API_KEY"</code></pre>
+</section>
+
+<script>
+(function () {
+    document.querySelectorAll('[data-expiry-choice]').forEach(function (choice) {
+        var dateGroup = choice.closest('form').querySelector('[data-expiry-date]');
+        var dateInput = dateGroup.querySelector('input');
+        function sync() {
+            var custom = choice.value === 'custom';
+            dateGroup.hidden = !custom;
+            dateInput.required = custom;
+        }
+        choice.addEventListener('change', sync);
+        sync();
+    });
+
+    document.querySelectorAll('form[data-confirm]').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            if (!window.confirm(form.dataset.confirm)) event.preventDefault();
+        });
+    });
+
+    document.querySelectorAll('[data-copy]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var source = document.getElementById(button.dataset.copy);
+            var range = document.createRange();
+            range.selectNodeContents(source);
+            var selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            // Clipboard API работает только в защищённом контексте; без него
+            // ключ остаётся выделенным для Ctrl+C.
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(source.textContent).then(function () {
+                    button.textContent = button.dataset.copied;
+                });
+            }
+        });
+    });
+})();
+</script>
+
+{% endblock %}
