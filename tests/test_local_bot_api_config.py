@@ -77,6 +77,49 @@ def test_local_limit_cannot_exceed_telegram_limit(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+def test_file_limit_can_be_lowered(monkeypatch, tmp_path):
+    config = _load_config(
+        monkeypatch,
+        TELEGRAM_LOCAL_MODE="true",
+        TELEGRAM_MAX_FILE_SIZE_MB="10",
+        TEMP_DIR=str(tmp_path),
+    )
+
+    assert config.MAX_FILE_SIZE_MB == 10
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("local_mode", "limit_mb"), [("true", 2000), ("false", 50)])
+def test_empty_file_limit_means_the_delivery_mode_limit(
+    monkeypatch, tmp_path, local_mode, limit_mb
+):
+    """Пустую строку передаёт env_file; с голым int() падал весь запуск."""
+    config = _load_config(
+        monkeypatch,
+        TELEGRAM_LOCAL_MODE=local_mode,
+        TELEGRAM_MAX_FILE_SIZE_MB="",
+        TEMP_DIR=str(tmp_path),
+    )
+
+    assert config.MAX_FILE_SIZE_MB == limit_mb
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "default"),
+    [
+        ("DOWNLOAD_WORKERS", 8),
+        ("BLOCKING_TASK_TIMEOUT", 600),
+        ("YTDLP_CLI_TIMEOUT", 900),
+    ],
+)
+def test_empty_numeric_setting_keeps_its_default(monkeypatch, tmp_path, name, default):
+    config = _load_config(monkeypatch, TEMP_DIR=str(tmp_path), **{name: ""})
+
+    assert getattr(config, name) == default
+
+
+@pytest.mark.unit
 def test_local_mode_rejects_cloud_api_urls(monkeypatch, tmp_path):
     config = _load_config(
         monkeypatch,

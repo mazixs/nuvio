@@ -231,7 +231,7 @@ Retention table by weekly cohort (W0-W8), with color showing intensity.
 |---|---|
 | `/admin` | Control panel for cookies (download, health check) |
 | `/cache_stats` | Cache statistics: number of records, breakdown by platform |
-| `/cleanup_cache` | Manual cleaning of records older than 90 days |
+| `/cleanup_cache` | Apply the WebUI cache cleanup policy; does nothing while cleanup is disabled |
 | `/search_cache <query>` | Search the cache by video name |
 
 ### 6.2 Cookie management
@@ -248,7 +248,7 @@ Through `/admin`, an administrator can:
 
 | Task | Schedule | Purpose |
 |---|---|---|
-| Cache cleanup | Every 24 hours | Delete entries older than 90 days |
+| Cache cleanup | Every 24 hours | Apply the WebUI cache cleanup policy; disabled by default |
 | Cookie health check | Every 24 hours | Check the working copies, renew the TikTok session, and alert administrators |
 | Database `VACUUM` | Every seven days | Reduce SQLite file size |
 | yt-dlp update | At startup if enabled in this dated design | Upgrade from the selected channel; current releases use a pinned image |
@@ -299,7 +299,7 @@ On an unhandled exception, the bot sends a crash report to administrators:
 mkdir -p .secrets
 cp .env.example .secrets/.env
 # Set TELEGRAM_TOKEN, ADMIN_IDS, TELEGRAM_API_ID, and
-# TELEGRAM_API_HASH, then change WEB_PASSWORD
+# TELEGRAM_API_HASH, then set WEB_PASSWORD
 docker compose --env-file .secrets/.env up -d
 ```
 
@@ -370,8 +370,8 @@ Tag v* → Release:
 | Variable | Default | Purpose |
 |---|---|---|
 | `WEB_USERNAME` | `admin` | Dashboard username |
-| `WEB_PASSWORD` | `changeme` | Dashboard password; change it |
-| `WEB_SECRET_KEY` | Generated | Session signing key |
+| `WEB_PASSWORD` | - | Dashboard password; sign-in stays closed until it is set |
+| `WEB_SECRET_KEY` | Generated | Session signing key of at least 32 characters |
 | `WEB_PORT` | `8080` | The dashboard port |
 | `FAIL2BAN_RETRIES` | `5` | Failed attempts before IP lockout |
 | `FAIL2BAN_TIME` | `10m` | Lockout duration (`10m`, `1h`, `300`) |
@@ -389,7 +389,7 @@ Tag v* → Release:
 | `utils/youtube_utils.py` | YouTube yt-dlp, cookies, retry, and CLI fallback |
 | `utils/tiktok_instagram_utils.py` | TikTok and Instagram download paths |
 | `utils/media_processor.py` | FFmpeg audio, conversion, and merging |
-| `utils/video_cache.py` | SQLite file ID cache with WAL and 90-day TTL |
+| `utils/video_cache.py` | SQLite file ID cache with WAL; no expiry unless cleanup is enabled in the WebUI |
 | `utils/analytics_db.py` | SQLite users, events, and metrics |
 | `utils/ytdlp_runtime.py` | yt-dlp runtime and version reporting |
 | `utils/cookie_manager.py`, `utils/cookie_health.py` | Administrator cookie management and validation |

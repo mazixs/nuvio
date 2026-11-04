@@ -132,22 +132,15 @@ TELEGRAM_BOT_API_BASE_URL = os.environ.get(
 TELEGRAM_BOT_API_FILE_URL = os.environ.get(
     "TELEGRAM_BOT_API_FILE_URL", "https://api.telegram.org/file/bot"
 ).rstrip("/")
-_configured_max_file_size_mb = int(
-    os.environ.get(
-        "TELEGRAM_MAX_FILE_SIZE_MB",
-        "2000" if TELEGRAM_LOCAL_MODE else "50",
-    )
-)
 _telegram_mode_limit_mb = 2000 if TELEGRAM_LOCAL_MODE else 50
-MAX_FILE_SIZE_MB = min(
-    max(_configured_max_file_size_mb, 1),
-    _telegram_mode_limit_mb,
+MAX_FILE_SIZE_MB = _parse_int_setting(
+    "TELEGRAM_MAX_FILE_SIZE_MB", _telegram_mode_limit_mb, 1, _telegram_mode_limit_mb
 )
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Настройки пула исполнителей для блокирующих задач
-DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", "8"))
-BLOCKING_TASK_TIMEOUT = int(os.environ.get("BLOCKING_TASK_TIMEOUT", "600"))  # сек
+DOWNLOAD_WORKERS = _parse_int_setting("DOWNLOAD_WORKERS", 8, 1, 256)
+BLOCKING_TASK_TIMEOUT = _parse_int_setting("BLOCKING_TASK_TIMEOUT", 600, 1, 86400)  # сек
 
 # Быстрый путь TikTok: прямая ссылка резолвера вместо yt-dlp.
 # Отдаёт H.264 со звуком (576x1024), что снимает перекодирование HEVC.
@@ -163,7 +156,7 @@ INSTAGRAM_FAST_PATH = _parse_bool(
 
 # yt-dlp закреплен в requirements.in и обновляется только новым образом.
 YTDLP_CLI_FALLBACK = _parse_bool(os.environ.get("YTDLP_CLI_FALLBACK"), default=True)
-YTDLP_CLI_TIMEOUT = int(os.environ.get("YTDLP_CLI_TIMEOUT", "900"))
+YTDLP_CLI_TIMEOUT = _parse_int_setting("YTDLP_CLI_TIMEOUT", 900, 1, 86400)
 
 # Канареечная проверка YouTube: раз в CANARY_INTERVAL_HOURS бот сам качает
 # эталонный ролик и зовёт админов, если YouTube сломался. По умолчанию выключена:
@@ -253,24 +246,11 @@ def resolve_secret_path(filename: str) -> Path:
     return legacy
 
 
-# Пути к файлам cookies (опционально). По умолчанию используются файлы в `.secrets/`,
-# но legacy-файлы в корне проекта продолжают поддерживаться как fallback.
-YOUTUBE_COOKIES_PATH = Path(
-    os.environ.get(
-        "YOUTUBE_COOKIES_FILE", str(resolve_secret_path("www.youtube.com_cookies.txt"))
-    )
-)
-INSTAGRAM_COOKIES_PATH = Path(
-    os.environ.get(
-        "INSTAGRAM_COOKIES_FILE",
-        str(resolve_secret_path("www.instagram.com_cookies.txt")),
-    )
-)
-TIKTOK_COOKIES_PATH = Path(
-    os.environ.get(
-        "TIKTOK_COOKIES_FILE", str(resolve_secret_path("www.tiktok.com_cookies.txt"))
-    )
-)
+# Пути к файлам cookies (опционально). Основное место — `.secrets/`,
+# legacy-файлы в корне проекта продолжают поддерживаться как fallback.
+YOUTUBE_COOKIES_PATH = resolve_secret_path("www.youtube.com_cookies.txt")
+INSTAGRAM_COOKIES_PATH = resolve_secret_path("www.instagram.com_cookies.txt")
+TIKTOK_COOKIES_PATH = resolve_secret_path("www.tiktok.com_cookies.txt")
 
 # Строковая совместимость для youtube_utils/tests
 YOUTUBE_COOKIES_FILE = str(YOUTUBE_COOKIES_PATH)

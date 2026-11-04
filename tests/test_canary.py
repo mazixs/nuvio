@@ -364,3 +364,19 @@ def test_canary_budget_stays_above_one_chunk():
     укладывающаяся в один кусок, прошла бы мимо поломки.
     """
     assert canary.CANARY_BUDGET_BYTES > 3 * 10_485_760
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("baked", "shown"), [("9.9.9", "9.9.9"), ("", "версия не вшита")]
+)
+def test_runtime_status_shows_the_version_baked_into_the_image(
+    monkeypatch, baked, shown
+):
+    """Версию задаёт сборка; у образа без неё диагностика говорит об этом прямо."""
+    monkeypatch.setenv("NUVIO_VERSION", baked)
+    runtime_status.runtime_components.cache_clear()
+    try:
+        assert runtime_status.runtime_components()["image"] == shown
+    finally:
+        runtime_status.runtime_components.cache_clear()

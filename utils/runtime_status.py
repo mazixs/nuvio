@@ -40,9 +40,8 @@ def runtime_components() -> dict[str, str]:
         versions["deno"] = result.stdout.splitlines()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         versions["deno"] = "отсутствует"
-    tag = os.environ.get("NUVIO_IMAGE_TAG") or "не передан"
-    digest = os.environ.get("NUVIO_IMAGE_DIGEST") or "digest не передан"
-    versions["image"] = f"{tag}; {digest}"
+    # Версию вшивает сборка образа: снаружи Compose видит только `latest`.
+    versions["image"] = os.environ.get("NUVIO_VERSION") or "версия не вшита"
     return versions
 
 

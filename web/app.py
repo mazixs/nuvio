@@ -80,8 +80,27 @@ def _parse_duration(value: str) -> int:
     return int(value)
 
 
-LOGIN_RATE_LIMIT = int(os.environ.get("FAIL2BAN_RETRIES", "5"))
-LOGIN_LOCKOUT = _parse_duration(os.environ.get("FAIL2BAN_TIME", "10m"))
+# `or`, а не умолчание get(): env_file передаёт и пустые строки.
+LOGIN_RATE_LIMIT = int(os.environ.get("FAIL2BAN_RETRIES") or "5")
+LOGIN_LOCKOUT = _parse_duration(os.environ.get("FAIL2BAN_TIME") or "10m")
+SESSION_KEY_MIN_LENGTH = 32
+
+
+def _session_secret_key() -> str:
+    """Ключ подписи сессий: пустой или короткий заменяется случайным.
+
+    С ключом-заглушкой из документации сессию администратора мог бы подделать
+    кто угодно. Случайный ключ лишь просит войти заново после перезапуска.
+    """
+    key = os.environ.get("WEB_SECRET_KEY", "")
+    if len(key) >= SESSION_KEY_MIN_LENGTH:
+        return key
+    if key:
+        logger.warning(
+            "WEB_SECRET_KEY короче %s символов и не используется: ключ будет случайным",
+            SESSION_KEY_MIN_LENGTH,
+        )
+    return secrets.token_hex(32)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ADMIN_IDS = [
@@ -214,10 +233,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.environ.get("WEB_SECRET_KEY", secrets.token_hex(32)),
-)
+app.add_middleware(SessionMiddleware, secret_key=_session_secret_key())
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 
@@ -242,9 +258,21 @@ def _render(request: Request, template: str, context: dict):
 
 WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
 SALT = secrets.token_bytes(16)
-WEB_PASSWORD_HASH = hashlib.pbkdf2_hmac(
-    "sha256", os.environ.get("WEB_PASSWORD", "changeme").encode(), SALT, 100000
-)
+
+
+def _web_password_hash() -> bytes:
+    """Хэш пароля входа; без пароля вход закрыт: форма отвергает пустое поле.
+
+    Умолчания нет: пароль из шаблона знает любой читатель репозитория, а за входом
+    лежат ключи HTTP API.
+    """
+    password = os.environ.get("WEB_PASSWORD", "")
+    if not password:
+        logger.warning("WEB_PASSWORD не задан: вход в WebUI закрыт")
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), SALT, 100000)
+
+
+WEB_PASSWORD_HASH = _web_password_hash()
 
 
 def _check_auth(request: Request) -> bool:
@@ -859,7 +887,7 @@ async def api_summary(request: Request, _=Depends(require_auth)):
 def run():
     import uvicorn
 
-    port = int(os.environ.get("WEB_PORT", "8080"))
+    port = int(os.environ.get("WEB_PORT") or "8080")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 

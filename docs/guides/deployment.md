@@ -25,9 +25,11 @@ TELEGRAM_TOKEN=1234567890:ABCdef...
 ADMIN_IDS=123456789
 TELEGRAM_API_ID=123456
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-WEB_PASSWORD=replace-me
-WEB_SECRET_KEY=replace-with-a-random-value
+WEB_PASSWORD=<choose a password>
+WEB_SECRET_KEY=<output of the command below>
 ```
+
+Generate the session key with `python -c "import secrets; print(secrets.token_hex(32))"`. A key shorter than 32 characters is replaced by a random one at every start.
 
 ## First switch from the cloud Bot API
 
@@ -172,4 +174,4 @@ set +a
 python main.py
 ```
 
-This uses the cloud Bot API by default. To use a local API outside Compose, provide a shared filesystem path and set `TELEGRAM_LOCAL_MODE`, `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL`, `TELEGRAM_MAX_FILE_SIZE_MB`, and `TEMP_DIR` yourself.
+This uses the cloud Bot API by default. To use a local API outside Compose, provide a shared filesystem path and set `TELEGRAM_LOCAL_MODE`, `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL`, and `TEMP_DIR` yourself.
