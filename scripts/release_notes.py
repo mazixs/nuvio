@@ -100,7 +100,7 @@ def render_notes(subjects: list[str], version: str, repository: str) -> str:
         "cd nuvio",
         "mkdir -p .secrets",
         "cp .env.example .secrets/.env",
-        "# заполнить TELEGRAM_TOKEN, ADMIN_IDS, TELEGRAM_API_ID и TELEGRAM_API_HASH",
+        "# заполнить TELEGRAM_TOKEN, ADMIN_IDS, TELEGRAM_API_ID, TELEGRAM_API_HASH и WEB_PASSWORD",
         f"TAG={version} docker compose --env-file .secrets/.env up -d",
         "```",
         "",

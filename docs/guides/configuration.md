@@ -22,18 +22,17 @@ Create `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in **API development tools** at
 | `TELEGRAM_LOCAL_MODE` | `true` | Enables local-path delivery |
 | `TELEGRAM_BOT_API_BASE_URL` | `http://telegram-bot-api:8081/bot` | Internal API address |
 | `TELEGRAM_BOT_API_FILE_URL` | `http://telegram-bot-api:8081/file/bot` | Internal file endpoint |
-| `TELEGRAM_MAX_FILE_SIZE_MB` | `2000` | Maximum file size for delivery |
 | `TEMP_DIR` | `/app/media` | Shared temporary media volume for the bot and Bot API |
 
-A direct Python run uses `api.telegram.org` with local mode disabled. Its delivery limit is capped at 50 MB.
+The delivery limit follows the mode: 2,000 MB in local mode, 50 MB for a direct Python run, which uses `api.telegram.org`. `TELEGRAM_MAX_FILE_SIZE_MB` can only lower it.
 
 ## WebUI
 
 | Variable | Default | Description |
 |---|---|---|
 | `WEB_USERNAME` | `admin` | Sign-in username |
-| `WEB_PASSWORD` | `changeme` | Sign-in password; change it before deployment |
-| `WEB_SECRET_KEY` | random at startup | Session signing key; set it to preserve sessions across restarts |
+| `WEB_PASSWORD` | - | Sign-in password; sign-in stays closed until it is set |
+| `WEB_SECRET_KEY` | random at startup | Session signing key; set it to preserve sessions across restarts. One shorter than 32 characters is replaced by a random key |
 | `WEB_PORT` | `8080` | Published port |
 | `FAIL2BAN_RETRIES` | `5` | Failed sign-in attempts before an IP is blocked |
 | `FAIL2BAN_TIME` | `10m` | IP lockout duration |
@@ -74,13 +73,19 @@ See `.env.example` for platform fast-path switches and canary settings.
 
 ## Cookies
 
-| Variable | Default path |
-|---|---|
-| `YOUTUBE_COOKIES_FILE` | `.secrets/www.youtube.com_cookies.txt` |
-| `INSTAGRAM_COOKIES_FILE` | `.secrets/www.instagram.com_cookies.txt` |
-| `TIKTOK_COOKIES_FILE` | `.secrets/www.tiktok.com_cookies.txt` |
+The bot reads `www.youtube.com_cookies.txt`, `www.instagram.com_cookies.txt`, and `www.tiktok.com_cookies.txt` from `.secrets/`.
 
 Cookies are optional for public media. Administrators can also update them with the bot's `/admin` command.
+
+## Compose
+
+| Variable | Default | Description |
+|---|---|---|
+| `TAG` | `latest` | Published Nuvio image tag |
+| `NUVIO_ENV_FILE` | `.secrets/.env` | Settings file passed to the containers |
+| `COMPOSE_PROFILES` | - | Set to `api` to start the HTTP API without `--profile api` |
+
+An empty number falls back to its default, but other settings stay empty, so leave a setting commented out to keep its default.
 
 ## Storage
 

@@ -17,6 +17,8 @@ downloads/
 .env.local
 .env.example
 .secrets/
+cookie-work/
+*_cookies.txt
 .venv/
 tests/
 docs/
@@ -24,6 +26,8 @@ requirements*.in
 requirements-dev.txt
 *.md
 Dockerfile*
+compose*.yaml
+compose*.yml
 docker-compose*.yml
 .dockerignore
 .gitignore

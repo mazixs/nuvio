@@ -40,7 +40,7 @@ mkdir -p .secrets
 cp .env.example .secrets/.env
 ```
 
-Set `TELEGRAM_TOKEN` and `ADMIN_IDS` in `.secrets/.env`. For Docker, also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, and change `WEB_PASSWORD`.
+Set `TELEGRAM_TOKEN` and `ADMIN_IDS` in `.secrets/.env`. For Docker, also set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`. WebUI sign-in stays closed until you set `WEB_PASSWORD`.
 
 Run the bot and WebUI in separate terminals:
 
@@ -72,8 +72,8 @@ The sole environment template is [`.env.example`](.env.example). Keep the workin
 | `TELEGRAM_TOKEN` | required | Token issued by @BotFather |
 | `ADMIN_IDS` | required | Comma-separated administrator IDs |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | required for Docker | Telegram application credentials |
-| `WEB_USERNAME`, `WEB_PASSWORD` | `admin`, `changeme` | WebUI sign-in credentials; change the password |
-| `WEB_SECRET_KEY` | generated on startup | Session signing key; set it to keep sessions across restarts |
+| `WEB_USERNAME`, `WEB_PASSWORD` | `admin`, none | WebUI sign-in credentials; sign-in stays closed until a password is set |
+| `WEB_SECRET_KEY` | generated on startup | Session signing key of at least 32 characters; set it to keep sessions across restarts |
 | `WEB_PORT` | `8080` | WebUI port |
 | `API_PORT` | `8090` | HTTP API port |
 | `API_DOWNLOAD_WORKERS` | `4` | Concurrent HTTP API downloads across all keys |
@@ -84,7 +84,7 @@ The sole environment template is [`.env.example`](.env.example). Keep the workin
 | `API_STORAGE_LIMIT_MB` | `10000` | Disk space for finished HTTP API files of all keys |
 | `DOWNLOAD_WORKERS` | `8` | Worker threads for blocking downloads and FFmpeg tasks |
 | `BLOCKING_TASK_TIMEOUT` | `600` | Blocking task timeout in seconds |
-| `TIKTOK_FAST_PATH` | `true` | Direct TikTok H.264 path; cached links retain their previous quality |
+| `TIKTOK_FAST_PATH` | `true` | Direct TikTok H.264 path; part of the cache recipe, so changing it selects a different cached output |
 | `INSTAGRAM_FAST_PATH` | `true` | Direct Instagram GraphQL media path; keeps the same quality |
 | `CANARY_ENABLED` | `false` | Scheduled YouTube download check |
 | `DATA_DIR` | repository root | SQLite database directory |

@@ -88,7 +88,7 @@ python -m api      # HTTP API на http://localhost:8090 (необязатель
 ```bash
 mkdir -p .secrets
 cp .env.example .secrets/.env
-# Заполните обязательные значения и смените WEB_PASSWORD
+# Заполните обязательные значения и задайте WEB_PASSWORD
 
 # Локальная сборка
 docker compose --env-file .secrets/.env -f compose.yaml -f compose.dev.yaml up -d --build
@@ -137,8 +137,8 @@ git push origin v1.0.0
 | `TELEGRAM_API_ID` | да для Docker | -- | ID приложения с my.telegram.org |
 | `TELEGRAM_API_HASH` | да для Docker | -- | Hash приложения с my.telegram.org |
 | `WEB_USERNAME` | нет | `admin` | Логин для WebUI-дашборда |
-| `WEB_PASSWORD` | нет | `changeme` | Пароль для WebUI-дашборда (**сменить!**) |
-| `WEB_SECRET_KEY` | нет | авто | Ключ подписи сессий (см. ниже) |
+| `WEB_PASSWORD` | нет | -- | Пароль для WebUI-дашборда. Пока он не задан, вход закрыт |
+| `WEB_SECRET_KEY` | нет | авто | Ключ подписи сессий, от 32 символов (см. ниже) |
 | `WEB_PORT` | нет | `8080` | Порт WebUI-дашборда |
 | `FAIL2BAN_RETRIES` | нет | `5` | Неудачных попыток логина до блокировки IP |
 | `FAIL2BAN_TIME` | нет | `10m` | Время блокировки IP (`10m`, `1h`, `300`) |
@@ -152,7 +152,7 @@ git push origin v1.0.0
 | `LOG_LEVEL` | нет | `INFO` | Уровень логирования |
 | `DOWNLOAD_WORKERS` | нет | `8` | Количество потоков в ThreadPoolExecutor |
 | `BLOCKING_TASK_TIMEOUT` | нет | `600` | Таймаут блокирующих задач (секунды) |
-| `TIKTOK_FAST_PATH` | нет | `true` | Быстрый путь TikTok: прямая H.264-ссылка вместо yt-dlp (576×1024, без перекодирования). Смена флага не влияет на уже закэшированные ссылки - см. ниже |
+| `TIKTOK_FAST_PATH` | нет | `true` | Быстрый путь TikTok: прямая H.264-ссылка вместо yt-dlp (576×1024, без перекодирования). Флаг входит в рецепт кеша, поэтому его смена выбирает другой результат - см. ниже |
 | `INSTAGRAM_FAST_PATH` | нет | `true` | Быстрый путь Instagram: прямая ссылка из GraphQL вместо yt-dlp (~1.9 с против 7.5 с, качество то же - H.264 + AAC) |
 | `YTDLP_CLI_FALLBACK` | нет | `true` | Использовать CLI-режим yt-dlp как запасной путь |
 | `YTDLP_CLI_TIMEOUT` | нет | `900` | Таймаут CLI-вызова yt-dlp (секунды) |
@@ -161,15 +161,12 @@ git push origin v1.0.0
 | `CANARY_VIDEO_ID` | нет | `6WFj-CKldv4` | Id эталонного ролика. Нужен длиннее пары минут - на коротком клипе поломка не проявляется |
 | `DATA_DIR` | нет | корень репозитория | Каталог баз данных (`analytics.db`, `telegram_cache.db`). В Docker задает compose: `/app/data` |
 | `TEMP_DIR` | нет | `./temp` | Каталог временных медиа. В Docker задает compose: `/app/media` (общий том с Bot API) |
-| `YOUTUBE_COOKIES_FILE` | нет | `www.youtube.com_cookies.txt` | Имя файла cookies YouTube внутри `.secrets/` |
-| `TIKTOK_COOKIES_FILE` | нет | `www.tiktok.com_cookies.txt` | Имя файла cookies TikTok внутри `.secrets/` |
-| `INSTAGRAM_COOKIES_FILE` | нет | `www.instagram.com_cookies.txt` | Имя файла cookies Instagram внутри `.secrets/` |
 | `TELEGRAM_LOCAL_MODE` | нет | `false` | Локальный Bot API вместо облачного. В Docker задает compose: `true` |
 | `TELEGRAM_BOT_API_BASE_URL` | нет | -- | URL локального Bot API. Задает compose, вручную не нужен |
 | `TELEGRAM_BOT_API_FILE_URL` | нет | -- | URL файлового эндпоинта локального Bot API. Задает compose |
-| `TELEGRAM_MAX_FILE_SIZE_MB` | нет | `50` | Желаемый лимит отправки. Жестко зажимается режимом доставки: 2000 при `TELEGRAM_LOCAL_MODE=true`, иначе 50 |
+| `TELEGRAM_MAX_FILE_SIZE_MB` | нет | `2000` локально, `50` в облачном режиме | Желаемый лимит отправки. Может только снизить лимит режима доставки |
 
-Последние четыре переменные задает `compose.yaml`; в `.env.example` их нет
+`TELEGRAM_LOCAL_MODE` и адреса Bot API задает `compose.yaml`; в `.env.example` их нет
 намеренно - при прямом запуске они не нужны, а в Docker их не надо трогать.
 
 ### Кеш медиа и очистка
@@ -189,7 +186,7 @@ git push origin v1.0.0
 
 ### WEB_SECRET_KEY
 
-Ключ подписи сессионных cookie. Если не задан - генерируется случайный при каждом старте, и после рестарта контейнера все сессии сбрасываются (нужно залогиниться заново).
+Ключ подписи сессионных cookie. Если не задан - генерируется случайный при каждом старте, и после рестарта контейнера все сессии сбрасываются (нужно залогиниться заново). Ключ короче 32 символов не используется: вместо него тоже генерируется случайный.
 
 Генерация:
 
@@ -200,7 +197,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 Результат (64 hex-символа) вставить в `.secrets/.env`:
 
 ```env
-WEB_SECRET_KEY=a3f8b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1
+WEB_SECRET_KEY=<результат команды выше>
 ```
 
 ---

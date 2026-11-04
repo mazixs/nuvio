@@ -70,6 +70,20 @@ def test_local_api_source_revision_is_pinned():
 
 
 @pytest.mark.unit
+def test_image_version_comes_from_the_build():
+    """Версию вшивает сборка: digest из .env устаревал с первым обновлением `latest`."""
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "NUVIO_IMAGE" not in compose
+    assert "ENV NUVIO_VERSION=$NUVIO_VERSION" in dockerfile
+    assert "NUVIO_VERSION=${{ steps.docker_meta.outputs.version }}" in release
+
+
+@pytest.mark.unit
 def test_development_override_builds_nuvio_from_source():
     compose = (ROOT / "compose.dev.yaml").read_text(encoding="utf-8")
 

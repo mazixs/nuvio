@@ -2,12 +2,15 @@
 
 import asyncio
 import hashlib
+import importlib
+import inspect
 
 import pytest
 from fastapi.testclient import TestClient as FastAPITestClient
 
+import web
 from web import app as web_app
-from utils import analytics_db
+from utils import analytics_db, env_files
 
 
 @pytest.fixture
@@ -17,6 +20,57 @@ def client(monkeypatch):
     web_app._notified_ips.clear()
     with FastAPITestClient(web_app.app) as test_client:
         yield test_client
+
+
+@pytest.mark.parametrize("value", ["", "replace-with-a-random-value"])
+def test_weak_secret_key_does_not_sign_sessions(monkeypatch, value):
+    """Пустой и короткий ключ заменяются случайным.
+
+    Пустая строка приходит из env_file, короткая — из примера в документации:
+    с таким ключом сессию администратора мог бы подделать кто угодно.
+    """
+    monkeypatch.setenv("WEB_SECRET_KEY", value)
+
+    key = web_app._session_secret_key()
+
+    assert key != value
+    assert len(key) >= web_app.SESSION_KEY_MIN_LENGTH
+
+
+def test_strong_secret_key_survives_restarts(monkeypatch):
+    key = "k" * web_app.SESSION_KEY_MIN_LENGTH
+    monkeypatch.setenv("WEB_SECRET_KEY", key)
+
+    assert web_app._session_secret_key() == key
+
+
+def test_sessions_are_signed_with_the_checked_key():
+    """Проверка ключа бесполезна, если приложение подписывает чем-то другим."""
+    assert "secret_key=_session_secret_key()" in inspect.getsource(web_app)
+
+
+def test_unset_password_keeps_sign_in_closed(client, monkeypatch):
+    """Без WEB_PASSWORD войти нельзя: ни прежним `changeme`, ни пустым паролем."""
+    monkeypatch.delenv("WEB_PASSWORD", raising=False)
+    monkeypatch.setattr(web_app, "WEB_PASSWORD_HASH", web_app._web_password_hash())
+
+    for password in ("changeme", ""):
+        response = client.post(
+            "/login",
+            data={"username": web_app.WEB_USERNAME, "password": password},
+            follow_redirects=False,
+        )
+        assert response.status_code != 303
+
+
+def test_web_package_loads_the_bot_env_files(monkeypatch):
+    """`python -m web` без Compose обязан видеть пароль и ключ из `.secrets/.env`."""
+    calls = []
+    monkeypatch.setattr(env_files, "load_env_files", lambda: calls.append(True))
+
+    importlib.reload(web)
+
+    assert calls
 
 
 def test_web_lifespan_closes_analytics_connection(tmp_path, monkeypatch):

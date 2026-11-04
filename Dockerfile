@@ -62,4 +62,9 @@ COPY . .
 
 RUN mkdir -p logs temp .secrets data
 
+# Версия для диагностики у администратора. Снаружи её не узнать: Compose читает
+# `latest`, а digest из .env устаревает с первым же обновлением.
+ARG NUVIO_VERSION=dev
+ENV NUVIO_VERSION=$NUVIO_VERSION
+
 CMD ["python", "main.py"]

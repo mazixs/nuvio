@@ -25,6 +25,30 @@ def test_environment_template_contains_local_bot_api_credentials():
 
 
 @pytest.mark.unit
+def test_environment_template_sets_only_what_the_operator_must_fill_in():
+    """Шаблон не задаёт необязательных значений: они комментарий с умолчанием.
+
+    Его копируют как есть, а env_file передаёт контейнеру и пустые строки. Так
+    `WEB_SECRET_KEY=` превращался в пустой ключ подписи сессий, а пути `/app/...`
+    к cookies ломали прямой запуск, где такого каталога нет.
+    """
+    template = (ROOT / ".env.example").read_text(encoding="utf-8")
+    active = {
+        line.split("=", 1)[0]
+        for line in template.splitlines()
+        if line and not line.startswith("#")
+    }
+
+    assert active == {
+        "TELEGRAM_TOKEN",
+        "ADMIN_IDS",
+        "TELEGRAM_API_ID",
+        "TELEGRAM_API_HASH",
+        "WEB_PASSWORD",
+    }
+
+
+@pytest.mark.unit
 def test_environment_template_documents_youtube_canary():
     """Канарейка выключена по умолчанию, а её ролик описан в шаблоне.
 
@@ -73,7 +97,7 @@ def test_environment_template_matches_http_api_defaults(name, default):
     template = (ROOT / ".env.example").read_text(encoding="utf-8")
     config_source = (ROOT / "config.py").read_text(encoding="utf-8")
 
-    assert f"\n{name}={default}\n" in template
+    assert f"\n# {name}={default}\n" in template
     assert f'_parse_int_setting("{name}", {default},' in config_source
 
 

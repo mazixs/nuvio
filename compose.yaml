@@ -1,5 +1,11 @@
 name: nuvio
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
 services:
   telegram-bot-api:
     build:
@@ -20,8 +26,6 @@ services:
       - --http-port=8081
       - --dir=/var/lib/telegram-bot-api
       - --temp-dir=/var/lib/telegram-bot-api/temp
-    expose:
-      - "8081"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
       - shared-media:/app/media
@@ -31,26 +35,18 @@ services:
       timeout: 3s
       retries: 12
       start_period: 20s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+    logging: *logging
 
   bot:
     image: ghcr.io/mazixs/nuvio:${TAG:-latest}
     restart: unless-stopped
-    env_file:
-      - ${NUVIO_ENV_FILE:-.secrets/.env}
+    env_file: ${NUVIO_ENV_FILE:-.secrets/.env}
     environment:
       DATA_DIR: /app/data
       TEMP_DIR: /app/media
       TELEGRAM_LOCAL_MODE: "true"
       TELEGRAM_BOT_API_BASE_URL: http://telegram-bot-api:8081/bot
       TELEGRAM_BOT_API_FILE_URL: http://telegram-bot-api:8081/file/bot
-      TELEGRAM_MAX_FILE_SIZE_MB: "2000"
-      NUVIO_IMAGE_TAG: ${TAG:-latest}
-      NUVIO_IMAGE_DIGEST: ${NUVIO_IMAGE_DIGEST:-}
     depends_on:
       telegram-bot-api:
         condition: service_healthy
@@ -64,11 +60,7 @@ services:
       - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
       - ./logs:/app/logs
       - ./.secrets:/app/.secrets
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+    logging: *logging
 
   web:
     image: ghcr.io/mazixs/nuvio:${TAG:-latest}
@@ -76,8 +68,7 @@ services:
     # Через пакет, а не через `web.app`: `web/__main__.py` — единственная точка
     # входа, описанная в документации, иначе она мертва в проде.
     command: python -m web
-    env_file:
-      - ${NUVIO_ENV_FILE:-.secrets/.env}
+    env_file: ${NUVIO_ENV_FILE:-.secrets/.env}
     environment:
       DATA_DIR: /app/data
       WEB_PORT: "8080"
@@ -86,20 +77,12 @@ services:
     volumes:
       - bot-data:/app/data
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://localhost:8080/health')
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+    logging: *logging
 
   api:
     image: ghcr.io/mazixs/nuvio:${TAG:-latest}
@@ -108,8 +91,7 @@ services:
     # `--profile api` или `COMPOSE_PROFILES=api`.
     profiles: ["api"]
     command: python -m api
-    env_file:
-      - ${NUVIO_ENV_FILE:-.secrets/.env}
+    env_file: ${NUVIO_ENV_FILE:-.secrets/.env}
     environment:
       DATA_DIR: /app/data
       TEMP_DIR: /app/media
@@ -130,20 +112,12 @@ services:
       # Свой файл api.log рядом с bot.log: ротация двух процессов не пересекается.
       - ./logs:/app/logs
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://localhost:8090/health')
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+    logging: *logging
 
 volumes:
   bot-data:

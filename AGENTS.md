@@ -6,7 +6,7 @@ Guidance for AI agents working in the Nuvio repository. Documentation is written
 
 Nuvio is an asynchronous Telegram bot that downloads video, photo posts, and audio from YouTube, TikTok, Instagram, Rutube, and VK Video. It caches Telegram `file_id` values for fast repeat delivery, records user analytics in a WebUI, and updates yt-dlp through pinned dependencies and new images.
 
-Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, photos, and carousels; Rutube and VK Video; MP3 192k extraction with FFmpeg; a 90-day SQLite `file_id` cache; files up to 2 GB through the local Telegram Bot API; temporary-media cleanup; spam protection; administrator cache commands; CSI survey scheduling in the WebUI; and pinned yt-dlp releases.
+Features include YouTube videos and Shorts; TikTok and Instagram videos, reels, photos, and carousels; Rutube and VK Video; MP3 192k extraction with FFmpeg; a SQLite `file_id` cache; files up to 2 GB through the local Telegram Bot API; temporary-media cleanup; spam protection; administrator cache commands; CSI survey scheduling in the WebUI; and pinned yt-dlp releases.
 
 ## Technology
 
@@ -147,8 +147,8 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 | `ADMIN_IDS` | Yes | - | Comma-separated administrator IDs |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | For Docker | - | Telegram application credentials |
 | `WEB_USERNAME` | No | `admin` | WebUI username |
-| `WEB_PASSWORD` | No | `changeme` | WebUI password; change it |
-| `WEB_SECRET_KEY` | No | Generated | Session signing key, preferably 64 hex characters |
+| `WEB_PASSWORD` | No | - | WebUI password; sign-in stays closed until it is set |
+| `WEB_SECRET_KEY` | No | Generated | Session signing key, preferably 64 hex characters; one shorter than 32 characters is replaced by a random key |
 | `WEB_PORT` | No | `8080` | WebUI port |
 | `FAIL2BAN_RETRIES` | No | `5` | Failed sign-ins before IP lockout |
 | `FAIL2BAN_TIME` | No | `10m` | Lockout duration, such as `10m`, `1h`, or `300` |
@@ -168,21 +168,19 @@ Parse settings in `config.py`. Prefer secrets in `.secrets/`; `resolve_secret_pa
 | `YTDLP_CLI_TIMEOUT` | No | `900` | CLI timeout in seconds |
 | `CANARY_ENABLED` | No | `false` | Scheduled YouTube check and failure alert |
 | `CANARY_INTERVAL_HOURS` | No | `12` | Check interval, from 1 to 168 hours |
-| `CANARY_VIDEO_ID` | No | `6WFj-CKldv4` | Reference video ID; use a video longer than a few minutes |
+| `CANARY_VIDEO_ID` | No | `6WFj-CKldv4` | Reference video ID; use a video longer than two minutes |
 | `DATA_DIR` | No | Repository root | SQLite directory; `/app/data` in Docker |
 | `TEMP_DIR` | No | `./temp` | Temporary media; shared `/app/media` in Docker |
-| `YOUTUBE_COOKIES_FILE` | No | `www.youtube.com_cookies.txt` | Cookie filename in `.secrets/` |
-| `TIKTOK_COOKIES_FILE` | No | `www.tiktok.com_cookies.txt` | Cookie filename in `.secrets/` |
-| `INSTAGRAM_COOKIES_FILE` | No | `www.instagram.com_cookies.txt` | Cookie filename in `.secrets/` |
 | `TELEGRAM_LOCAL_MODE` | No | `false` | Local Bot API instead of cloud; set to `true` in Docker |
 | `TELEGRAM_BOT_API_BASE_URL`, `TELEGRAM_BOT_API_FILE_URL` | No | - | Local Bot API endpoints set by `compose.yaml` |
-| `TELEGRAM_MAX_FILE_SIZE_MB` | No | `50` | Requested limit, clamped to 2,000 locally or 50 in cloud mode |
+| `TELEGRAM_MAX_FILE_SIZE_MB` | No | `2000` locally, `50` in cloud mode | Requested limit, clamped to the same values |
+| `NUVIO_VERSION` | No | Set at image build | Version shown in administrator diagnostics; not an operator setting |
 
-The final four delivery settings are set by `compose.yaml`; they are not in `.env.example` because direct runs do not need them and Docker users do not need to edit them.
+`TELEGRAM_LOCAL_MODE` and the Bot API endpoints are set by `compose.yaml`; they are not in `.env.example` because direct runs do not need them and Docker users do not need to edit them.
 
 ### TikTok fast path and cached files
 
-The `file_id` cache is checked before downloading and has a 90-day TTL. Changing `TIKTOK_FAST_PATH` does not alter cached links: after setting it to `false`, a cached 576x1024 file will still be delivered. `/cleanup_cache` deletes only expired entries. For an immediate reset, remove `telegram_cache.db` from `DATA_DIR` and restart the bot.
+The `file_id` cache is checked before downloading. `TIKTOK_FAST_PATH` is part of the artifact cache recipe, so changing it selects a different cached output. Valid Telegram references have no expiration by default; optional idle-age cleanup is managed in the WebUI, and `/cleanup_cache` applies the same policy.
 
 ## Change with care
 

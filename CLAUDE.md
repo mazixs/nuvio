@@ -48,7 +48,7 @@ A direct run uses the cloud Bot API and its 50 MB limit. The Docker stack uses t
 | `utils/tiktok_instagram_utils.py` | TikTok and Instagram downloaders, photos, and carousels |
 | `utils/rutube_vk_utils.py` | Rutube and VK Video; VK uses `best[protocol=https]` to avoid fragmented HLS |
 | `utils/media_processor.py` | FFmpeg audio extraction, conversion, and merging |
-| `utils/video_cache.py` | SQLite `file_id` cache keyed by URL and format, WAL, 90-day TTL |
+| `utils/video_cache.py` | SQLite `file_id` cache keyed by URL and format, WAL, no expiry unless cleanup is enabled in the WebUI |
 | `utils/analytics_db.py` | Users, events, CSI, settings, and SQLite migrations |
 | `utils/ytdlp_runtime.py` | Installed yt-dlp version and CLI fallback |
 | `utils/cookie_manager.py`, `utils/cookie_health.py`, `utils/cookie_workfile.py` | Administrator cookie uploads, working-copy health checks, TikTok session renewal, and working copies |
@@ -65,7 +65,7 @@ yt-dlp rewrites a supplied `cookiefile` from its jar. A measured YouTube request
 
 Locally, `DATA_DIR` defaults to the repository root and holds `analytics.db` and `telegram_cache.db`. Docker mounts `bot-data` at `/app/data`. Temporary media lives in `TEMP_DIR`, locally `./temp` and in Docker the shared `/app/media` volume, so the local Bot API can read absolute paths.
 
-**WebUI:** FastAPI, Jinja2, and Uvicorn provide PBKDF2 plus timing-safe sign-in checks, in-memory IP fail2ban with administrator alerts, and `/health` for Compose and CI. Swagger, ReDoc, and the OpenAPI schema (`/openapi.json`) are disabled. `WEB_PORT` sets the port. The `/settings` page writes data; its current POST relies on a session cookie with `SameSite=lax` rather than a separate CSRF token. Revisit that protection if the cookie's `same_site` changes.
+**WebUI:** FastAPI, Jinja2, and Uvicorn provide PBKDF2 plus timing-safe sign-in checks, in-memory IP fail2ban with administrator alerts, and `/health` for Compose and CI. Swagger, ReDoc, and the OpenAPI schema (`/openapi.json`) are disabled. `WEB_PORT` sets the port. `WEB_PASSWORD` has no default, so sign-in stays closed until it is set, and a `WEB_SECRET_KEY` shorter than 32 characters is replaced by a random key. The `/settings` page writes data; its current POST relies on a session cookie with `SameSite=lax` rather than a separate CSRF token. Revisit that protection if the cookie's `same_site` changes.
 
 **Request flow:** URL validation, `get_video_info` in a worker thread, format menu, callback, format-specific cache check, then a cache hit or URL-delivery attempt. If Telegram rejects direct URL delivery, the bot downloads in the worker pool, sends the file, caches the returned `file_id`, cleans temporary media, and ends the session.
 

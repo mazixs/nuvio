@@ -149,8 +149,8 @@ grep "ERROR_CODE" logs/bot.log
 
 ### Password is rejected
 
-- The default credentials are `admin` / `changeme`; change the password before deployment.
-- Set `WEB_USERNAME` and `WEB_PASSWORD` in `.secrets/.env`.
+- The default username is `admin`. There is no default password: sign-in stays closed until `WEB_PASSWORD` is set.
+- Set `WEB_USERNAME` and `WEB_PASSWORD` in `.secrets/.env`, then restart the WebUI.
 
 ## Cache problems
 
