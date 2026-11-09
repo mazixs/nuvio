@@ -87,9 +87,9 @@ The alert keeps no state, so it repeats once a day until the problem is resolved
 
 ### TikTok stays on `probe_failed`
 
-Only TikTok renews its session automatically: the daily check calls an undocumented `passport` endpoint, and its response moves the expiry date in the working copy. If TikTok changes that endpoint, the check returns `probe_failed` and renewal stops. The first alert comes only when fewer than 14 days remain.
+Only TikTok renews its session automatically: the daily check calls an undocumented `passport` endpoint, and when TikTok moves the session date, the response carries the new date and the check saves it to the working copy. TikTok does not move the date in every response: on 2026-11-09 it had stayed the same through twelve `valid` checks. If TikTok changes that endpoint, the check returns `probe_failed` and renewal stops. The first alert comes only when fewer than 14 days remain.
 
-- Check `/admin` for `probe_failed` together with a `Сессия до DD.MM.YYYY` line whose date no longer moves.
+- Check `/admin` for `probe_failed` on TikTok. A `Сессия до DD.MM.YYYY` date that does not move is no signal by itself: it also stays the same under `valid`.
 - Look for `Cookie probe failed for tiktok` in `logs/bot.log`. The text after it separates a network or HTTP error from `unfamiliar response`, which points to a changed endpoint.
 - If the server network is fine, the probe in `utils/cookie_health.py` needs fixing. Until then, upload fresh exports by hand before the session end date.
 

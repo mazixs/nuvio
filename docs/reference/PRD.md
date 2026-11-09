@@ -249,7 +249,7 @@ Through `/admin`, an administrator can:
 | Task | Schedule | Purpose |
 |---|---|---|
 | Cache cleanup | Every 24 hours | Apply the WebUI cache cleanup policy; disabled by default |
-| Cookie health check | Every 24 hours | Check the working copies, renew the TikTok session, and alert administrators |
+| Cookie health check | Every 24 hours | Check the working copies, save a new TikTok session date when TikTok sends one, and alert administrators |
 | Database `VACUUM` | Every seven days | Reduce SQLite file size |
 | yt-dlp update | At startup if enabled in this dated design | Upgrade from the selected channel; current releases use a pinned image |
 
