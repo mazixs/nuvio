@@ -19,13 +19,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # слой из кэша, пока не изменится текст команды. Минимальная версия закреплена
 # в самом тексте: её повышение пересобирает слой, а проверка не даёт собрать
 # образ со старым пакетом. librsvg2-2 устанавливается как зависимость ffmpeg
-# (CVE-2026-96889). Так же закреплён libbrotli1 (CVE-2026-111497).
+# (CVE-2026-96889). Так же закреплены libbrotli1 (CVE-2026-111497), apt с
+# libapt-pkg7.0 (CVE-2026-109518) и zlib1g (CVE-2026-76844, CVE-2026-85091).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ffmpeg \
         librsvg2-2 \
         libbrotli1 \
+        apt \
+        libapt-pkg7.0 \
+        zlib1g \
         openssl \
         libssl3t64 \
         openssl-provider-legacy \
@@ -40,6 +44,9 @@ RUN apt-get update && \
         util-linux && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' librsvg2-2)" ge '2.60.0+dfsg-1+deb13u1' && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libbrotli1)" ge '1.1.0-2+deb13u1' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge '3.0.4' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge '3.0.4' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" ge '1:1.3.dfsg+really1.3.1-1+deb13u1' && \
     rm -rf /var/lib/apt/lists/*
 
 # yt-dlp использует Deno для решения JavaScript-задач YouTube. Без него часть
