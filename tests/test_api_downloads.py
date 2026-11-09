@@ -517,6 +517,17 @@ def test_unknown_routes_use_the_error_envelope(api):
     assert response.json()["error"]["code"] == "not_found"
 
 
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_trailing_slash_is_not_redirected(api, method):
+    # Переадресация за TLS-прокси вела бы на http:// и уносила туда ключ.
+    response = api.client.request(
+        method, "/api/v1/downloads/", headers=auth(api.key), follow_redirects=False
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    assert "location" not in response.headers
+
+
 def test_openapi_documents_the_public_routes(api):
     schema = api.client.get("/api/v1/openapi.json").json()
     assert {"/api/v1/me", "/api/v1/downloads", "/api/v1/downloads/{job_id}", "/api/v1/downloads/{job_id}/file"} <= set(schema["paths"])

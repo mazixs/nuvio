@@ -1,11 +1,12 @@
 """Проба TikTok спрашивает у платформы, чья это сессия, и сохраняет продление.
 
 Публичные видео скачиваются и без входа, поэтому извлечение ролика сессию не
-проверяет. `passport/web/account/info` отвечает прямо и заодно продлевает сессию:
+проверяет. `passport/web/account/info` отвечает прямо и приносит новый срок сессии:
 01.11.2026 токен остался прежним, а срок сдвинулся с 12.02.2027 на 30.04.2027. Кроме
 этого ответа дату в файле никто не обновляет, и в указанный там день cookie перестала
 бы отправляться. Поэтому продление сохраняется, но только в рабочую копию и только
-после подтверждённой сессии.
+после подтверждённой сессии. Сдвигает срок сам TikTok и не в каждом ответе: 09.11.2026
+ответ `valid` принёс только служебные cookies, и дата осталась прежней.
 
 Формы ответов замерены, значения выдуманы. В настоящем ответе лежат email, телефон и
 `session_key`: ни в лог, ни в результат они попасть не должны.
@@ -47,6 +48,8 @@ RENEWAL = (
     f"sessionid={SESSION_VALUE}; Domain=.tiktok.com; Path=/; "
     f"Expires={email.utils.formatdate(NEW_EXPIRY, usegmt=True)}; Secure"
 )
+# Так выглядел ответ 09.11.2026: служебные cookies и ни одной сессионной.
+SERVICE_ONLY = "store-idc=fake-idc; Domain=.tiktok.com; Path=/; Max-Age=14843520; Secure"
 
 
 def _row(name: str, expires: int, value: str = "fake-value") -> str:
@@ -215,6 +218,20 @@ def test_renewal_lands_in_the_working_copy_and_nowhere_else(original, working_co
     renewed = _cookies_in(working_copy)["sessionid"]
     assert (renewed["expires"], renewed["value"]) == (NEW_EXPIRY, SESSION_VALUE)
     assert original.read_bytes() == original_bytes
+
+
+def test_valid_response_without_a_new_date_keeps_the_session(working_copy, respond_with):
+    """TikTok сдвигает срок не в каждом ответе: прежняя дата при `valid` — норма."""
+    respond_with(set_cookie=SERVICE_ONLY)
+
+    result = cookie_health.check_cookie_health("tiktok", force=True)
+
+    assert result.status == "valid"
+    assert result.session_expires_at == OLD_EXPIRY
+    cookies = _cookies_in(working_copy)
+    session = cookies["sessionid"]
+    assert (session["expires"], session["value"]) == (OLD_EXPIRY, SESSION_VALUE)
+    assert cookies["store-idc"]["value"] == "fake-idc"
 
 
 def test_session_cookie_without_a_date_survives_the_save(working_copy, respond_with):

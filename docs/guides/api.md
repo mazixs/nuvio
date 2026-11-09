@@ -42,6 +42,8 @@ Authorization: Bearer nuvio_...
 
 The interactive reference is at `/api/docs`, and the OpenAPI schema at `/api/v1/openapi.json`. Both are public and describe only these endpoints; the WebUI keeps its schema disabled. The reference page loads a pinned Swagger UI version from jsDelivr, so the browser needs access to that CDN. The schema itself has no such dependency.
 
+Paths have no trailing slash. `/api/v1/downloads/` returns `404`, not a redirect: a redirect built behind a TLS proxy could point to `http://` and make the client resend its key unencrypted.
+
 A job belongs to the key that created it. Another key gets `404` for it, exactly as for a job that does not exist. A rotated key keeps its jobs, because jobs are tied to the key, not the secret.
 
 `DELETE` on a running job returns `204` at once and the job disappears from the list, but the download stops at the next progress step of the worker. Until then the job still counts toward `API_MAX_ACTIVE_JOBS`, so a new download right after a cancellation can get `429` for a few seconds.
