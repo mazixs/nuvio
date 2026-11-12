@@ -1,4 +1,4 @@
-FROM python:3.14-slim@sha256:0741d101873c12ab927e6f8653feb8862b9bd58771177acb1b885b95141f91b4 AS sqlite-builder
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS sqlite-builder
 
 # Исправленная библиотека собирается отдельно, инструменты сборки не входят в рабочий образ.
 RUN apt-get update && apt-get install -y --no-install-recommends gcc make libc6-dev \
@@ -9,7 +9,7 @@ RUN python -c "import hashlib, urllib.request; data=urllib.request.urlopen('http
     && ./configure --prefix=/opt/sqlite \
     && make -j2 && make install
 
-FROM python:3.14-slim@sha256:0741d101873c12ab927e6f8653feb8862b9bd58771177acb1b885b95141f91b4
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
