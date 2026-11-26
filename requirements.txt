@@ -858,7 +858,7 @@ python-multipart==0.0.34 \
     --hash=sha256:b998ae90ca6e1e363261ce2e0e230281b8af53867b757970abd69ee9edcd843a \
     --hash=sha256:ebacd224bd686eee2f9aa1066a657affe07435a185834e05e5235e2e59173e91
     # via -r requirements.in
-python-telegram-bot[job-queue]==22.8 \
+python-telegram-bot==22.8 \
     --hash=sha256:42373918097f1b837cc4e717d588c19ea79651497ec712bb5b0c76e5e63c50e1 \
     --hash=sha256:f9d3847fcb23ee603477e442800b33bb4adf851a73e0619d2050be879decf1ef
     # via -r requirements.in
@@ -970,7 +970,7 @@ urllib3==2.8.0 \
     # via
     #   requests
     #   yt-dlp
-uvicorn[standard]==0.54.0 \
+uvicorn==0.54.0 \
     --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
     --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
     # via -r requirements.in
@@ -1246,9 +1246,9 @@ websockets==17.0.1 \
     # via
     #   uvicorn
     #   yt-dlp
-yt-dlp[default]==2026.10.29.232701.dev0 \
-    --hash=sha256:237544af0b1f1c2119e278b36c91f8dd4ff8e9d358443c51602bf467d6ba489b \
-    --hash=sha256:4b4f40eaf1ac44fd3058ca02d03d63dbb424d2be5ed66d936988b1143f8ed45b
+yt-dlp==2026.11.22.232654.dev0 \
+    --hash=sha256:2b1653919d9599e9409f0ad1ac49f4eaffde85e0f20e89563c1aaf79526d5ecf \
+    --hash=sha256:7299b17cdf2a2ac9590a162289d208422c5d04d389036540fe8119f4f9ea3a84
     # via -r requirements.in
 yt-dlp-ejs==0.8.0 \
     --hash=sha256:79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4 \
