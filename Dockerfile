@@ -20,7 +20,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # в самом тексте: её повышение пересобирает слой, а проверка не даёт собрать
 # образ со старым пакетом. librsvg2-2 устанавливается как зависимость ffmpeg
 # (CVE-2026-96889). Так же закреплены libbrotli1 (CVE-2026-111497), apt с
-# libapt-pkg7.0 (CVE-2026-109518) и zlib1g (CVE-2026-76844, CVE-2026-85091).
+# libapt-pkg7.0 (CVE-2026-109518), zlib1g (CVE-2026-76844, CVE-2026-85091),
+# библиотеки Kerberos и libzstd1 (CVE-2026-124851).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -30,6 +31,11 @@ RUN apt-get update && \
         apt \
         libapt-pkg7.0 \
         zlib1g \
+        libgssapi-krb5-2 \
+        libk5crypto3 \
+        libkrb5-3 \
+        libkrb5support0 \
+        libzstd1 \
         openssl \
         libssl3t64 \
         openssl-provider-legacy \
@@ -47,6 +53,11 @@ RUN apt-get update && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge '3.0.4' && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge '3.0.4' && \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" ge '1:1.3.dfsg+really1.3.1-1+deb13u1' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libgssapi-krb5-2)" ge '1.21.3-5+deb13u2' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libk5crypto3)" ge '1.21.3-5+deb13u2' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libkrb5-3)" ge '1.21.3-5+deb13u2' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libkrb5support0)" ge '1.21.3-5+deb13u2' && \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libzstd1)" ge '1.5.7+dfsg-1+deb13u1' && \
     rm -rf /var/lib/apt/lists/*
 
 # yt-dlp использует Deno для решения JavaScript-задач YouTube. Без него часть
